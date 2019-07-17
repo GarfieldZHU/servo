@@ -442,7 +442,7 @@ class Session(object):
 
         try:
             self.send_command("DELETE", "session/%s" % self.session_id)
-        except error.InvalidSessionIdException:
+        except error.SessionNotCreatedException:
             pass
         finally:
             self.session_id = None
