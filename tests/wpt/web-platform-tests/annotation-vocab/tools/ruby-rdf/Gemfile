@@ -3,7 +3,7 @@ ruby '2.3.1'
 
 gem 'rdf', github: "ruby-rdf/rdf", branch: 'develop'
 gem 'rdf-rdfxml', github: "ruby-rdf/rdf-rdfxml", branch: 'develop'
-gem 'linkeddata'
+gem 'linkeddata', '>= 2.0.0'
 
 gem 'jsonlint'
 gem 'rspec'
