@@ -578,7 +578,7 @@ impl ModuleTree {
 
                 let url = ModuleTree::resolve_module_specifier(
                     *cx,
-                    &base_url,
+                    base_url,
                     specifier.handle().into_handle(),
                 );
 
@@ -815,7 +815,7 @@ impl ModuleTree {
 
                 if incomplete_count_before_remove > 0 {
                     parent_tree.remove_incomplete_fetch_url(&self.url);
-                    parent_tree.advance_finished_and_link(&global);
+                    parent_tree.advance_finished_and_link(global);
                 }
             }
         }
@@ -831,7 +831,7 @@ impl ModuleTree {
             (None, None) => {
                 let module_record = self.get_record().borrow();
                 if let Some(record) = &*module_record {
-                    let instantiated = self.instantiate_module_tree(&global, record.handle());
+                    let instantiated = self.instantiate_module_tree(global, record.handle());
 
                     if let Err(exception) = instantiated {
                         self.set_rethrow_error(exception);
@@ -1469,7 +1469,7 @@ unsafe extern "C" fn HostPopulateImportMeta(
     JS_DefineProperty4(
         cx,
         meta_object,
-        "url\0".as_ptr() as *const _,
+        c"url".as_ptr(),
         url_string.handle().into_handle(),
         JSPROP_ENUMERATE.into(),
     )
