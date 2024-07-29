@@ -2,10 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::convert::TryInto;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix, QualName};
+use js::rust::HandleObject;
+use style::str::{split_html_space_chars, str_join};
+use style_dom::ElementState;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::CharacterDataBinding::CharacterDataMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLOptionElementBinding::HTMLOptionElementMethods;
-use crate::dom::bindings::codegen::Bindings::HTMLSelectElementBinding::HTMLSelectElementBinding::HTMLSelectElementMethods;
+use crate::dom::bindings::codegen::Bindings::HTMLSelectElementBinding::HTMLSelectElement_Binding::HTMLSelectElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::Fallible;
@@ -22,14 +31,10 @@ use crate::dom::htmlscriptelement::HTMLScriptElement;
 use crate::dom::htmlselectelement::HTMLSelectElement;
 use crate::dom::node::{BindContext, Node, ShadowIncluding, UnbindContext};
 use crate::dom::text::Text;
+use crate::dom::validation::Validatable;
+use crate::dom::validitystate::ValidationFlags;
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix, QualName};
-use std::cell::Cell;
-use std::convert::TryInto;
-use style::element_state::ElementState;
-use style::str::{split_html_space_chars, str_join};
 
 #[dom_struct]
 pub struct HTMLOptionElement {
@@ -50,7 +55,7 @@ impl HTMLOptionElement {
     ) -> HTMLOptionElement {
         HTMLOptionElement {
             htmlelement: HTMLElement::new_inherited_with_state(
-                ElementState::IN_ENABLED_STATE,
+                ElementState::ENABLED,
                 local_name,
                 prefix,
                 document,
@@ -60,17 +65,19 @@ impl HTMLOptionElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLOptionElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLOptionElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 
@@ -78,6 +85,7 @@ impl HTMLOptionElement {
     #[allow(non_snake_case)]
     pub fn Option(
         window: &Window,
+        proto: Option<HandleObject>,
         text: DOMString,
         value: Option<DOMString>,
         default_selected: bool,
@@ -89,6 +97,7 @@ impl HTMLOptionElement {
             &window.Document(),
             ElementCreator::ScriptCreated,
             CustomElementCreationMode::Synchronous,
+            proto,
         );
 
         let option = DomRoot::downcast::<HTMLOptionElement>(element).unwrap();
@@ -103,6 +112,7 @@ impl HTMLOptionElement {
 
         option.SetDefaultSelected(default_selected);
         option.set_selectedness(selected);
+        option.update_select_validity();
         Ok(option)
     }
 
@@ -160,6 +170,19 @@ impl HTMLOptionElement {
                 );
                 0
             },
+        }
+    }
+
+    fn update_select_validity(&self) {
+        if let Some(select) = self
+            .upcast::<Node>()
+            .ancestors()
+            .filter_map(DomRoot::downcast::<HTMLSelectElement>)
+            .next()
+        {
+            select
+                .validity_state()
+                .perform_validation_and_update(ValidationFlags::all());
         }
     }
 }
@@ -259,6 +282,7 @@ impl HTMLOptionElementMethods for HTMLOptionElement {
         self.dirtiness.set(true);
         self.selectedness.set(selected);
         self.pick_if_selected_and_reset();
+        self.update_select_validity();
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-option-index
@@ -274,8 +298,8 @@ impl VirtualMethods for HTMLOptionElement {
 
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
-        match attr.local_name() {
-            &local_name!("disabled") => {
+        match *attr.local_name() {
+            local_name!("disabled") => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(_) => {
@@ -288,8 +312,9 @@ impl VirtualMethods for HTMLOptionElement {
                         el.check_parent_disabled_state_for_option();
                     },
                 }
+                self.update_select_validity();
             },
-            &local_name!("selected") => {
+            local_name!("selected") => {
                 match mutation {
                     AttributeMutation::Set(_) => {
                         // https://html.spec.whatwg.org/multipage/#concept-option-selectedness
@@ -304,13 +329,14 @@ impl VirtualMethods for HTMLOptionElement {
                         }
                     },
                 }
+                self.update_select_validity();
             },
             _ => {},
         }
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
 
@@ -318,6 +344,7 @@ impl VirtualMethods for HTMLOptionElement {
             .check_parent_disabled_state_for_option();
 
         self.pick_if_selected_and_reset();
+        self.update_select_validity();
     }
 
     fn unbind_from_tree(&self, context: &UnbindContext) {
@@ -329,6 +356,9 @@ impl VirtualMethods for HTMLOptionElement {
             .filter_map(DomRoot::downcast::<HTMLSelectElement>)
             .next()
         {
+            select
+                .validity_state()
+                .perform_validation_and_update(ValidationFlags::all());
             select.ask_for_reset();
         }
 

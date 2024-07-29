@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use servo_atoms::Atom;
+
 use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeListBinding::NodeListMethods;
 use crate::dom::bindings::codegen::Bindings::RadioNodeListBinding::RadioNodeListMethods;
@@ -14,8 +17,6 @@ use crate::dom::htmlinputelement::{HTMLInputElement, InputType};
 use crate::dom::node::Node;
 use crate::dom::nodelist::{NodeList, NodeListType, RadioList, RadioListMode};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_atoms::Atom;
 
 #[dom_struct]
 pub struct RadioNodeList {
@@ -23,14 +24,14 @@ pub struct RadioNodeList {
 }
 
 impl RadioNodeList {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(list_type: NodeListType) -> RadioNodeList {
         RadioNodeList {
             node_list: NodeList::new_inherited(list_type),
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(window: &Window, list_type: NodeListType) -> DomRoot<RadioNodeList> {
         reflect_dom_object(Box::new(RadioNodeList::new_inherited(list_type)), window)
     }
@@ -101,7 +102,7 @@ impl RadioNodeListMethods for RadioNodeList {
             // Step 1
             if let Some(input) = node.downcast::<HTMLInputElement>() {
                 match input.input_type() {
-                    InputType::Radio if value == DOMString::from("on") => {
+                    InputType::Radio if value == *"on" => {
                         // Step 2
                         let val = input.Value();
                         if val.is_empty() || val == value {

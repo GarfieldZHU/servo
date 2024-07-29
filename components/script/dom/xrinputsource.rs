@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::conversions::ToJSValConvertible;
+use js::jsapi::Heap;
+use js::jsval::{JSVal, UndefinedValue};
+use webxr_api::{Handedness, InputId, InputSource, TargetRayMode};
+
 use crate::dom::bindings::codegen::Bindings::XRInputSourceBinding::{
     XRHandedness, XRInputSourceMethods, XRTargetRayMode,
 };
@@ -13,17 +19,13 @@ use crate::dom::xrsession::XRSession;
 use crate::dom::xrspace::XRSpace;
 use crate::realms::enter_realm;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::conversions::ToJSValConvertible;
-use js::jsapi::Heap;
-use js::jsval::{JSVal, UndefinedValue};
-use webxr_api::{Handedness, InputId, InputSource, TargetRayMode};
 
 #[dom_struct]
 pub struct XRInputSource {
     reflector: Reflector,
     session: Dom<XRSession>,
     #[ignore_malloc_size_of = "Defined in rust-webxr"]
+    #[no_trace]
     info: InputSource,
     target_ray_space: MutNullableDom<XRSpace>,
     grip_space: MutNullableDom<XRSpace>,
@@ -56,8 +58,8 @@ impl XRInputSource {
             global,
         );
 
-        let _ac = enter_realm(&*global);
-        let cx = global.get_cx();
+        let _ac = enter_realm(global);
+        let cx = GlobalScope::get_cx();
         unsafe {
             rooted!(in(*cx) let mut profiles = UndefinedValue());
             source.info.profiles.to_jsval(*cx, profiles.handle_mut());
@@ -76,7 +78,7 @@ impl XRInputSource {
 }
 
 impl XRInputSourceMethods for XRInputSource {
-    /// https://immersive-web.github.io/webxr/#dom-xrinputsource-handedness
+    /// <https://immersive-web.github.io/webxr/#dom-xrinputsource-handedness>
     fn Handedness(&self) -> XRHandedness {
         match self.info.handedness {
             Handedness::None => XRHandedness::None,
@@ -85,7 +87,7 @@ impl XRInputSourceMethods for XRInputSource {
         }
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrinputsource-targetraymode
+    /// <https://immersive-web.github.io/webxr/#dom-xrinputsource-targetraymode>
     fn TargetRayMode(&self) -> XRTargetRayMode {
         match self.info.target_ray_mode {
             TargetRayMode::Gaze => XRTargetRayMode::Gaze,
@@ -94,20 +96,20 @@ impl XRInputSourceMethods for XRInputSource {
         }
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrinputsource-targetrayspace
+    /// <https://immersive-web.github.io/webxr/#dom-xrinputsource-targetrayspace>
     fn TargetRaySpace(&self) -> DomRoot<XRSpace> {
         self.target_ray_space.or_init(|| {
             let global = self.global();
-            XRSpace::new_inputspace(&global, &self.session, &self, false)
+            XRSpace::new_inputspace(&global, &self.session, self, false)
         })
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrinputsource-gripspace
+    /// <https://immersive-web.github.io/webxr/#dom-xrinputsource-gripspace>
     fn GetGripSpace(&self) -> Option<DomRoot<XRSpace>> {
         if self.info.supports_grip {
             Some(self.grip_space.or_init(|| {
                 let global = self.global();
-                XRSpace::new_inputspace(&global, &self.session, &self, true)
+                XRSpace::new_inputspace(&global, &self.session, self, true)
             }))
         } else {
             None
@@ -120,13 +122,9 @@ impl XRInputSourceMethods for XRInputSource {
 
     // https://github.com/immersive-web/webxr-hands-input/blob/master/explainer.md
     fn GetHand(&self) -> Option<DomRoot<XRHand>> {
-        if let Some(ref hand) = self.info.hand_support {
-            Some(
-                self.hand
-                    .or_init(|| XRHand::new(&self.global(), &self, hand.clone())),
-            )
-        } else {
-            None
-        }
+        self.info.hand_support.as_ref().map(|hand| {
+            self.hand
+                .or_init(|| XRHand::new(&self.global(), self, hand.clone()))
+        })
     }
 }

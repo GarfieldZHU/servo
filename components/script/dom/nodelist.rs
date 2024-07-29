@@ -2,6 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use servo_atoms::Atom;
+
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::NodeListBinding::NodeListMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
@@ -12,12 +17,9 @@ use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmlformelement::HTMLFormElement;
 use crate::dom::node::{ChildrenMutation, Node};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_atoms::Atom;
-use std::cell::Cell;
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub enum NodeListType {
     Simple(Vec<Dom<Node>>),
     Children(ChildrenList),
@@ -34,15 +36,15 @@ pub struct NodeList {
 }
 
 impl NodeList {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(list_type: NodeListType) -> NodeList {
         NodeList {
             reflector_: Reflector::new(),
-            list_type: list_type,
+            list_type,
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(window: &Window, list_type: NodeListType) -> DomRoot<NodeList> {
         reflect_dom_object(Box::new(NodeList::new_inherited(list_type)), window)
     }
@@ -136,7 +138,7 @@ impl NodeList {
         }
     }
 
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = DomRoot<Node>> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = DomRoot<Node>> + '_ {
         let len = self.Length();
         // There is room for optimization here in non-simple cases,
         // as calling Item repeatedly on a live list can involve redundant work.
@@ -145,7 +147,7 @@ impl NodeList {
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct ChildrenList {
     node: Dom<Node>,
     #[ignore_malloc_size_of = "Defined in rust-mozjs"]
@@ -170,7 +172,7 @@ impl ChildrenList {
     pub fn item(&self, index: u32) -> Option<DomRoot<Node>> {
         // This always start traversing the children from the closest element
         // among parent's first and last children and the last visited one.
-        let len = self.len() as u32;
+        let len = self.len();
         if index >= len {
             return None;
         }
@@ -355,7 +357,7 @@ impl ChildrenList {
 // and it's possible that tracking label moves would end up no faster
 // than recalculating labels.
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct LabelsList {
     element: Dom<HTMLElement>,
 }
@@ -388,10 +390,11 @@ pub enum RadioListMode {
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct RadioList {
     form: Dom<HTMLFormElement>,
     mode: RadioListMode,
+    #[no_trace]
     name: Atom,
 }
 
@@ -399,8 +402,8 @@ impl RadioList {
     pub fn new(form: &HTMLFormElement, mode: RadioListMode, name: Atom) -> RadioList {
         RadioList {
             form: Dom::from_ref(form),
-            mode: mode,
-            name: name,
+            mode,
+            name,
         }
     }
 
@@ -414,7 +417,7 @@ impl RadioList {
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct ElementsByNameList {
     document: Dom<Document>,
     name: DOMString,
@@ -424,7 +427,7 @@ impl ElementsByNameList {
     pub fn new(document: &Document, name: DOMString) -> ElementsByNameList {
         ElementsByNameList {
             document: Dom::from_ref(document),
-            name: name,
+            name,
         }
     }
 
@@ -435,6 +438,6 @@ impl ElementsByNameList {
     pub fn item(&self, index: u32) -> Option<DomRoot<Node>> {
         self.document
             .nth_element_by_name(index, &self.name)
-            .and_then(|n| Some(DomRoot::from_ref(&*n)))
+            .map(|n| DomRoot::from_ref(&*n))
     }
 }

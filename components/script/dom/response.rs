@@ -2,8 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::body::{consume_body, BodyMixin, BodyType};
-use crate::body::{Extractable, ExtractedBody};
+use std::ptr::NonNull;
+use std::rc::Rc;
+use std::str::FromStr;
+
+use dom_struct::dom_struct;
+use http::header::HeaderMap as HyperHeaders;
+use http::StatusCode;
+use hyper_serde::Serde;
+use js::jsapi::JSObject;
+use js::rust::HandleObject;
+use servo_url::ServoUrl;
+use url::Position;
+
+use crate::body::{consume_body, BodyMixin, BodyType, Extractable, ExtractedBody};
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HeadersBinding::HeadersMethods;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding;
@@ -12,40 +24,30 @@ use crate::dom::bindings::codegen::Bindings::ResponseBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::XMLHttpRequestBinding::BodyInit;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject, Reflector};
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{ByteString, USVString};
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::headers::{is_obs_text, is_vchar};
-use crate::dom::headers::{Guard, Headers};
+use crate::dom::headers::{is_obs_text, is_vchar, Guard, Headers};
 use crate::dom::promise::Promise;
 use crate::dom::readablestream::{ExternalUnderlyingSource, ReadableStream};
-use crate::script_runtime::JSContext as SafeJSContext;
-use crate::script_runtime::StreamConsumer;
-use dom_struct::dom_struct;
-use http::header::HeaderMap as HyperHeaders;
-use hyper::StatusCode;
-use hyper_serde::Serde;
-use js::jsapi::JSObject;
-use servo_url::ServoUrl;
-use std::ptr::NonNull;
-use std::rc::Rc;
-use std::str::FromStr;
-use url::Position;
+use crate::script_runtime::{JSContext as SafeJSContext, StreamConsumer};
 
 #[dom_struct]
 pub struct Response {
     reflector_: Reflector,
     headers_reflector: MutNullableDom<Headers>,
-    mime_type: DomRefCell<Vec<u8>>,
     /// `None` can be considered a StatusCode of `0`.
     #[ignore_malloc_size_of = "Defined in hyper"]
+    #[no_trace]
     status: DomRefCell<Option<StatusCode>>,
     raw_status: DomRefCell<Option<(u16, Vec<u8>)>>,
     response_type: DomRefCell<DOMResponseType>,
+    #[no_trace]
     url: DomRefCell<Option<ServoUrl>>,
+    #[no_trace]
     url_list: DomRefCell<Vec<ServoUrl>>,
-    /// The stream of https://fetch.spec.whatwg.org/#body.
+    /// The stream of <https://fetch.spec.whatwg.org/#body>.
     body_stream: MutNullableDom<ReadableStream>,
     #[ignore_malloc_size_of = "StreamConsumer"]
     stream_consumer: DomRefCell<Option<StreamConsumer>>,
@@ -62,7 +64,6 @@ impl Response {
         Response {
             reflector_: Reflector::new(),
             headers_reflector: Default::default(),
-            mime_type: DomRefCell::new("".to_string().into_bytes()),
             status: DomRefCell::new(Some(StatusCode::OK)),
             raw_status: DomRefCell::new(Some((200, b"".to_vec()))),
             response_type: DomRefCell::new(DOMResponseType::Default),
@@ -76,11 +77,17 @@ impl Response {
 
     // https://fetch.spec.whatwg.org/#dom-response
     pub fn new(global: &GlobalScope) -> DomRoot<Response> {
-        reflect_dom_object(Box::new(Response::new_inherited(global)), global)
+        Self::new_with_proto(global, None)
     }
 
+    fn new_with_proto(global: &GlobalScope, proto: Option<HandleObject>) -> DomRoot<Response> {
+        reflect_dom_object_with_proto(Box::new(Response::new_inherited(global)), global, proto)
+    }
+
+    // https://fetch.spec.whatwg.org/#initialize-a-response
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         body: Option<BodyInit>,
         init: &ResponseBinding::ResponseInit,
     ) -> Fallible<DomRoot<Response>> {
@@ -100,34 +107,29 @@ impl Response {
             ));
         }
 
-        // Step 3
-        let r = Response::new(global);
+        let r = Response::new_with_proto(global, proto);
 
-        // Step 4
+        // Step 3
         *r.status.borrow_mut() = Some(StatusCode::from_u16(init.status).unwrap());
 
-        // Step 5
+        // Step 4
         *r.raw_status.borrow_mut() = Some((init.status, init.statusText.clone().into()));
 
-        // Step 6
+        // Step 5
         if let Some(ref headers_member) = init.headers {
-            // Step 6.1
-            r.Headers().empty_header_list();
-
-            // Step 6.2
             r.Headers().fill(Some(headers_member.clone()))?;
         }
 
-        // Step 7
+        // Step 6
         if let Some(ref body) = body {
-            // Step 7.1
+            // Step 6.1
             if is_null_body_status(init.status) {
                 return Err(Error::Type(
                     "Body is non-null but init's status member is a null body status".to_string(),
                 ));
             };
 
-            // Step 7.3
+            // Step 6.2
             let ExtractedBody {
                 stream,
                 total_bytes: _,
@@ -137,7 +139,7 @@ impl Response {
 
             r.body_stream.set(Some(&*stream));
 
-            // Step 7.4
+            // Step 6.3
             if let Some(content_type_contents) = content_type {
                 if !r
                     .Headers()
@@ -150,18 +152,13 @@ impl Response {
                     )?;
                 }
             };
+        } else {
+            // Reset FetchResponse to an in-memory stream with empty byte sequence here for
+            // no-init-body case
+            let stream = ReadableStream::new_from_bytes(global, Vec::with_capacity(0));
+            r.body_stream.set(Some(&*stream));
         }
 
-        // Step 8
-        *r.mime_type.borrow_mut() = r.Headers().extract_mime_type();
-
-        // Step 9
-        // TODO: `entry settings object` is not implemented in Servo yet.
-
-        // Step 10
-        // TODO: Write this step once Promises are merged in
-
-        // Step 11
         Ok(r)
     }
 
@@ -242,7 +239,8 @@ impl BodyMixin for Response {
     }
 
     fn get_mime_type(&self) -> Vec<u8> {
-        self.mime_type.borrow().clone()
+        let headers = self.Headers();
+        headers.extract_mime_type()
     }
 }
 
@@ -278,7 +276,7 @@ impl ResponseMethods for Response {
         USVString(String::from(
             (*self.url.borrow())
                 .as_ref()
-                .map(|u| serialize_without_fragment(u))
+                .map(serialize_without_fragment)
                 .unwrap_or(""),
         ))
     }
@@ -301,7 +299,7 @@ impl ResponseMethods for Response {
         match *self.status.borrow() {
             Some(s) => {
                 let status_num = s.as_u16();
-                return status_num >= 200 && status_num <= 299;
+                (200..=299).contains(&status_num)
             },
             None => false,
         }
@@ -330,17 +328,23 @@ impl ResponseMethods for Response {
 
         // Step 2
         let new_response = Response::new(&self.global());
-        new_response.Headers().set_guard(self.Headers().get_guard());
         new_response.Headers().copy_from_headers(self.Headers())?;
+        new_response.Headers().set_guard(self.Headers().get_guard());
 
         // https://fetch.spec.whatwg.org/#concept-response-clone
         // Instead of storing a net_traits::Response internally, we
         // only store the relevant fields, and only clone them here
-        *new_response.response_type.borrow_mut() = self.response_type.borrow().clone();
-        *new_response.status.borrow_mut() = self.status.borrow().clone();
-        *new_response.raw_status.borrow_mut() = self.raw_status.borrow().clone();
-        *new_response.url.borrow_mut() = self.url.borrow().clone();
-        *new_response.url_list.borrow_mut() = self.url_list.borrow().clone();
+        *new_response.response_type.borrow_mut() = *self.response_type.borrow();
+        *new_response.status.borrow_mut() = *self.status.borrow();
+        new_response
+            .raw_status
+            .borrow_mut()
+            .clone_from(&self.raw_status.borrow());
+        new_response.url.borrow_mut().clone_from(&self.url.borrow());
+        new_response
+            .url_list
+            .borrow_mut()
+            .clone_from(&self.url_list.borrow());
 
         if let Some(stream) = self.body_stream.get().clone() {
             new_response.body_stream.set(Some(&*stream));
@@ -404,7 +408,6 @@ impl Response {
             Some(hyper_headers) => hyper_headers.into_inner(),
             None => HyperHeaders::new(),
         });
-        *self.mime_type.borrow_mut() = self.Headers().extract_mime_type();
     }
 
     pub fn set_raw_status(&self, status: Option<(u16, Vec<u8>)>) {
@@ -458,7 +461,7 @@ impl Response {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn finish(&self) {
         if let Some(body) = self.body_stream.get() {
             body.close_native();

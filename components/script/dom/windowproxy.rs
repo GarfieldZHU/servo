@@ -2,11 +2,46 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::ptr;
+
+use base::id::{BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
+use dom_struct::dom_struct;
+use embedder_traits::EmbedderMsg;
+use html5ever::local_name;
+use indexmap::map::IndexMap;
+use ipc_channel::ipc;
+use js::glue::{
+    CreateWrapperProxyHandler, GetProxyPrivate, GetProxyReservedSlot, ProxyTraps,
+    SetProxyReservedSlot,
+};
+use js::jsapi::{
+    GCContext, Handle as RawHandle, HandleId as RawHandleId, HandleObject as RawHandleObject,
+    HandleValue as RawHandleValue, JSAutoRealm, JSContext, JSErrNum, JSObject, JSTracer,
+    JS_DefinePropertyById, JS_ForwardGetPropertyTo, JS_ForwardSetPropertyTo,
+    JS_GetOwnPropertyDescriptorById, JS_HasOwnPropertyById, JS_HasPropertyById,
+    JS_IsExceptionPending, MutableHandle as RawMutableHandle,
+    MutableHandleObject as RawMutableHandleObject, MutableHandleValue as RawMutableHandleValue,
+    ObjectOpResult, PropertyDescriptor, JSPROP_ENUMERATE, JSPROP_READONLY,
+};
+use js::jsval::{JSVal, NullValue, PrivateValue, UndefinedValue};
+use js::rust::wrappers::{JS_TransplantObject, NewWindowProxy, SetWindowProxy};
+use js::rust::{get_object_class, Handle, MutableHandle};
+use js::JSCLASS_IS_GLOBAL;
+use net_traits::request::Referrer;
+use script_traits::{
+    AuxiliaryBrowsingContextLoadInfo, HistoryEntryReplacement, LoadData, LoadOrigin, NewLayoutInfo,
+    ScriptMsg,
+};
+use serde::{Deserialize, Serialize};
+use servo_url::{ImmutableOrigin, ServoUrl};
+use style::attr::parse_integer;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::conversions::{root_from_handleobject, ToJSValConvertible};
 use crate::dom::bindings::error::{throw_dom_exception, Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::proxyhandler::fill_property_descriptor;
+use crate::dom::bindings::proxyhandler::set_property_descriptor;
 use crate::dom::bindings::reflector::{DomObject, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::{DOMString, USVString};
@@ -20,42 +55,6 @@ use crate::dom::window::Window;
 use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext as SafeJSContext;
 use crate::script_thread::ScriptThread;
-use dom_struct::dom_struct;
-use embedder_traits::EmbedderMsg;
-use indexmap::map::IndexMap;
-use ipc_channel::ipc;
-use js::glue::{CreateWrapperProxyHandler, ProxyTraps};
-use js::glue::{GetProxyPrivate, GetProxyReservedSlot, SetProxyReservedSlot};
-use js::jsapi::Handle as RawHandle;
-use js::jsapi::HandleId as RawHandleId;
-use js::jsapi::HandleObject as RawHandleObject;
-use js::jsapi::HandleValue as RawHandleValue;
-use js::jsapi::MutableHandle as RawMutableHandle;
-use js::jsapi::MutableHandleObject as RawMutableHandleObject;
-use js::jsapi::MutableHandleValue as RawMutableHandleValue;
-use js::jsapi::{JSAutoRealm, JSContext, JSErrNum, JSFreeOp, JSObject};
-use js::jsapi::{JSTracer, JS_DefinePropertyById, JSPROP_ENUMERATE, JSPROP_READONLY};
-use js::jsapi::{JS_ForwardGetPropertyTo, JS_ForwardSetPropertyTo};
-use js::jsapi::{JS_GetOwnPropertyDescriptorById, JS_IsExceptionPending};
-use js::jsapi::{JS_HasOwnPropertyById, JS_HasPropertyById};
-use js::jsapi::{ObjectOpResult, PropertyDescriptor};
-use js::jsval::{JSVal, NullValue, PrivateValue, UndefinedValue};
-use js::rust::get_object_class;
-use js::rust::wrappers::{JS_TransplantObject, NewWindowProxy, SetWindowProxy};
-use js::rust::{Handle, MutableHandle};
-use js::JSCLASS_IS_GLOBAL;
-use msg::constellation_msg::BrowsingContextId;
-use msg::constellation_msg::PipelineId;
-use msg::constellation_msg::TopLevelBrowsingContextId;
-use net_traits::request::Referrer;
-use script_traits::{
-    AuxiliaryBrowsingContextLoadInfo, HistoryEntryReplacement, LoadData, LoadOrigin,
-};
-use script_traits::{NewLayoutInfo, ScriptMsg};
-use servo_url::{ImmutableOrigin, ServoUrl};
-use std::cell::Cell;
-use std::ptr;
-use style::attr::parse_integer;
 
 #[dom_struct]
 // NOTE: the browsing context for a window is managed in two places:
@@ -72,13 +71,16 @@ pub struct WindowProxy {
     /// The id of the browsing context.
     /// In the case that this is a nested browsing context, this is the id
     /// of the container.
+    #[no_trace]
     browsing_context_id: BrowsingContextId,
 
     // https://html.spec.whatwg.org/multipage/#opener-browsing-context
+    #[no_trace]
     opener: Option<BrowsingContextId>,
 
     /// The frame id of the top-level ancestor browsing context.
     /// In the case that this is a top-level window, this is our id.
+    #[no_trace]
     top_level_browsing_context_id: TopLevelBrowsingContextId,
 
     /// The name of the browsing context (sometimes, but not always,
@@ -89,6 +91,7 @@ pub struct WindowProxy {
     /// We do not try to keep the pipeline id for documents in other threads,
     /// as this would require the constellation notifying many script threads about
     /// the change, which could be expensive.
+    #[no_trace]
     currently_active: Cell<Option<PipelineId>>,
 
     /// Has the browsing context been discarded?
@@ -97,7 +100,7 @@ pub struct WindowProxy {
     /// Has the browsing context been disowned?
     disowned: Cell<bool>,
 
-    /// https://html.spec.whatwg.org/multipage/#is-closing
+    /// <https://html.spec.whatwg.org/multipage/#is-closing>
     is_closing: Cell<bool>,
 
     /// The containing iframe element, if this is a same-origin iframe
@@ -106,16 +109,19 @@ pub struct WindowProxy {
     /// The parent browsing context's window proxy, if this is a nested browsing context
     parent: Option<Dom<WindowProxy>>,
 
-    /// https://html.spec.whatwg.org/multipage/#delaying-load-events-mode
+    /// <https://html.spec.whatwg.org/multipage/#delaying-load-events-mode>
     delaying_load_events_mode: Cell<bool>,
 
     /// The creator browsing context's base url.
+    #[no_trace]
     creator_base_url: Option<ServoUrl>,
 
     /// The creator browsing context's url.
+    #[no_trace]
     creator_url: Option<ServoUrl>,
 
     /// The creator browsing context's origin.
+    #[no_trace]
     creator_origin: Option<ImmutableOrigin>,
 }
 
@@ -134,8 +140,8 @@ impl WindowProxy {
         });
         WindowProxy {
             reflector: Reflector::new(),
-            browsing_context_id: browsing_context_id,
-            top_level_browsing_context_id: top_level_browsing_context_id,
+            browsing_context_id,
+            top_level_browsing_context_id,
             name: DomRefCell::new(name),
             currently_active: Cell::new(currently_active),
             discarded: Cell::new(false),
@@ -165,7 +171,7 @@ impl WindowProxy {
             let WindowProxyHandler(handler) = window.windowproxy_handler();
             assert!(!handler.is_null());
 
-            let cx = window.get_cx();
+            let cx = GlobalScope::get_cx();
             let window_jsobject = window.reflector().get_jsobject();
             assert!(!window_jsobject.get().is_null());
             assert_ne!(
@@ -195,7 +201,7 @@ impl WindowProxy {
             SetProxyReservedSlot(
                 js_proxy.get(),
                 0,
-                &PrivateValue((&*window_proxy).as_void_ptr()),
+                &PrivateValue((*window_proxy).as_void_ptr()),
             );
 
             // Notify the JS engine about the new window proxy binding.
@@ -225,7 +231,7 @@ impl WindowProxy {
             let handler = CreateWrapperProxyHandler(&XORIGIN_PROXY_HANDLER);
             assert!(!handler.is_null());
 
-            let cx = global_to_clone_from.get_cx();
+            let cx = GlobalScope::get_cx();
 
             // Create a new browsing context.
             let window_proxy = Box::new(WindowProxy::new_inherited(
@@ -239,7 +245,7 @@ impl WindowProxy {
             ));
 
             // Create a new dissimilar-origin window.
-            let window = DissimilarOriginWindow::new(global_to_clone_from, &*window_proxy);
+            let window = DissimilarOriginWindow::new(global_to_clone_from, &window_proxy);
             let window_jsobject = window.reflector().get_jsobject();
             assert!(!window_jsobject.get().is_null());
             assert_ne!(
@@ -257,7 +263,7 @@ impl WindowProxy {
             SetProxyReservedSlot(
                 js_proxy.get(),
                 0,
-                &PrivateValue((&*window_proxy).as_void_ptr()),
+                &PrivateValue((*window_proxy).as_void_ptr()),
             );
 
             // Notify the JS engine about the new window proxy binding.
@@ -284,10 +290,10 @@ impl WindowProxy {
         let window = self
             .currently_active
             .get()
-            .and_then(|id| ScriptThread::find_document(id))
-            .and_then(|doc| Some(DomRoot::from_ref(doc.window())))
+            .and_then(ScriptThread::find_document)
+            .map(|doc| DomRoot::from_ref(doc.window()))
             .unwrap();
-        let msg = EmbedderMsg::AllowOpeningBrowser(chan);
+        let msg = EmbedderMsg::AllowOpeningWebView(chan);
         window.send_to_embedder(msg);
         if port.recv().unwrap() {
             let new_top_level_browsing_context_id = TopLevelBrowsingContextId::new();
@@ -297,7 +303,7 @@ impl WindowProxy {
             let document = self
                 .currently_active
                 .get()
-                .and_then(|id| ScriptThread::find_document(id))
+                .and_then(ScriptThread::find_document)
                 .expect("A WindowProxy creating an auxiliary to have an active document");
 
             let blank_url = ServoUrl::parse("about:blank").ok().unwrap();
@@ -312,26 +318,24 @@ impl WindowProxy {
             let load_info = AuxiliaryBrowsingContextLoadInfo {
                 load_data: load_data.clone(),
                 opener_pipeline_id: self.currently_active.get().unwrap(),
-                new_browsing_context_id: new_browsing_context_id,
-                new_top_level_browsing_context_id: new_top_level_browsing_context_id,
-                new_pipeline_id: new_pipeline_id,
+                new_browsing_context_id,
+                new_top_level_browsing_context_id,
+                new_pipeline_id,
             };
 
-            let (pipeline_sender, pipeline_receiver) = ipc::channel().unwrap();
             let new_layout_info = NewLayoutInfo {
                 parent_info: None,
-                new_pipeline_id: new_pipeline_id,
+                new_pipeline_id,
                 browsing_context_id: new_browsing_context_id,
                 top_level_browsing_context_id: new_top_level_browsing_context_id,
                 opener: Some(self.browsing_context_id),
-                load_data: load_data,
-                pipeline_port: pipeline_receiver,
+                load_data,
                 window_size: window.window_size(),
             };
-            let constellation_msg = ScriptMsg::ScriptNewAuxiliary(load_info, pipeline_sender);
+            let constellation_msg = ScriptMsg::ScriptNewAuxiliary(load_info);
             window.send_to_constellation(constellation_msg);
             ScriptThread::process_attach_layout(new_layout_info, document.origin().clone());
-            let msg = EmbedderMsg::BrowserCreated(new_top_level_browsing_context_id);
+            let msg = EmbedderMsg::WebViewOpened(new_top_level_browsing_context_id);
             window.send_to_embedder(msg);
             // TODO: if noopener is false, copy the sessionStorage storage area of the creator origin.
             // See step 14 of https://html.spec.whatwg.org/multipage/#creating-a-new-browsing-context
@@ -350,17 +354,17 @@ impl WindowProxy {
         None
     }
 
-    /// https://html.spec.whatwg.org/multipage/#delaying-load-events-mode
+    /// <https://html.spec.whatwg.org/multipage/#delaying-load-events-mode>
     pub fn is_delaying_load_events_mode(&self) -> bool {
         self.delaying_load_events_mode.get()
     }
 
-    /// https://html.spec.whatwg.org/multipage/#delaying-load-events-mode
+    /// <https://html.spec.whatwg.org/multipage/#delaying-load-events-mode>
     pub fn start_delaying_load_events_mode(&self) {
         self.delaying_load_events_mode.set(true);
     }
 
-    /// https://html.spec.whatwg.org/multipage/#delaying-load-events-mode
+    /// <https://html.spec.whatwg.org/multipage/#delaying-load-events-mode>
     pub fn stop_delaying_load_events_mode(&self) {
         self.delaying_load_events_mode.set(false);
         if let Some(document) = self.document() {
@@ -375,18 +379,18 @@ impl WindowProxy {
         self.disowned.set(true);
     }
 
-    /// https://html.spec.whatwg.org/multipage/#dom-window-close
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-close>
     /// Step 3.1, set BCs `is_closing` to true.
     pub fn close(&self) {
         self.is_closing.set(true);
     }
 
-    /// https://html.spec.whatwg.org/multipage/#is-closing
+    /// <https://html.spec.whatwg.org/multipage/#is-closing>
     pub fn is_closing(&self) -> bool {
         self.is_closing.get()
     }
 
-    /// https://html.spec.whatwg.org/multipage/#creator-base-url
+    /// <https://html.spec.whatwg.org/multipage/#creator-base-url>
     pub fn creator_base_url(&self) -> Option<ServoUrl> {
         self.creator_base_url.clone()
     }
@@ -395,7 +399,7 @@ impl WindowProxy {
         self.creator_base_url.is_some()
     }
 
-    /// https://html.spec.whatwg.org/multipage/#creator-url
+    /// <https://html.spec.whatwg.org/multipage/#creator-url>
     pub fn creator_url(&self) -> Option<ServoUrl> {
         self.creator_url.clone()
     }
@@ -404,7 +408,7 @@ impl WindowProxy {
         self.creator_base_url.is_some()
     }
 
-    /// https://html.spec.whatwg.org/multipage/#creator-origin
+    /// <https://html.spec.whatwg.org/multipage/#creator-origin>
     pub fn creator_origin(&self) -> Option<ImmutableOrigin> {
         self.creator_origin.clone()
     }
@@ -438,7 +442,7 @@ impl WindowProxy {
                         let creator =
                             CreatorBrowsingContextInfo::from(parent_browsing_context, None);
                         WindowProxy::new_dissimilar_origin(
-                            &*global_to_clone_from,
+                            &global_to_clone_from,
                             opener_id,
                             opener_top_id,
                             None,
@@ -455,7 +459,7 @@ impl WindowProxy {
         }
         rooted!(in(cx) let mut val = UndefinedValue());
         unsafe { opener_proxy.to_jsval(cx, val.handle_mut()) };
-        return val.get();
+        val.get()
     }
 
     // https://html.spec.whatwg.org/multipage/#window-open-steps
@@ -496,7 +500,7 @@ impl WindowProxy {
             let existing_document = self
                 .currently_active
                 .get()
-                .and_then(|id| ScriptThread::find_document(id))
+                .and_then(ScriptThread::find_document)
                 .unwrap();
             // Step 14.1
             let url = match existing_document.url().join(&url) {
@@ -533,7 +537,7 @@ impl WindowProxy {
             return Ok(None);
         }
         // Step 17.
-        return Ok(target_document.browsing_context());
+        Ok(target_document.browsing_context())
     }
 
     // https://html.spec.whatwg.org/multipage/#the-rules-for-choosing-a-browsing-context-given-a-browsing-context-name
@@ -599,7 +603,7 @@ impl WindowProxy {
     pub fn document(&self) -> Option<DomRoot<Document>> {
         self.currently_active
             .get()
-            .and_then(|id| ScriptThread::find_document(id))
+            .and_then(ScriptThread::find_document)
     }
 
     pub fn parent(&self) -> Option<&WindowProxy> {
@@ -624,7 +628,7 @@ impl WindowProxy {
             let handler = CreateWrapperProxyHandler(traps);
             assert!(!handler.is_null());
 
-            let cx = window.get_cx();
+            let cx = GlobalScope::get_cx();
             let window_jsobject = window.reflector().get_jsobject();
             let old_js_proxy = self.reflector.get_jsobject();
             assert!(!window_jsobject.get().is_null());
@@ -632,7 +636,7 @@ impl WindowProxy {
                 ((*get_object_class(window_jsobject.get())).flags & JSCLASS_IS_GLOBAL),
                 0
             );
-            let _ac = enter_realm(&*window);
+            let _ac = enter_realm(window);
 
             // The old window proxy no longer owns this browsing context.
             SetProxyReservedSlot(old_js_proxy.get(), 0, &PrivateValue(ptr::null_mut()));
@@ -677,7 +681,7 @@ impl WindowProxy {
                 );
             }
         }
-        self.set_window(&*globalscope, &PROXY_HANDLER);
+        self.set_window(globalscope, &PROXY_HANDLER);
         self.currently_active.set(Some(globalscope.pipeline_id()));
     }
 
@@ -686,8 +690,8 @@ impl WindowProxy {
             return debug!("Attempt to unset the currently active window on a windowproxy that does not have one.");
         }
         let globalscope = self.global();
-        let window = DissimilarOriginWindow::new(&*globalscope, self);
-        self.set_window(&*window.upcast(), &XORIGIN_PROXY_HANDLER);
+        let window = DissimilarOriginWindow::new(&globalscope, self);
+        self.set_window(window.upcast(), &XORIGIN_PROXY_HANDLER);
         self.currently_active.set(None);
     }
 
@@ -714,7 +718,7 @@ impl WindowProxy {
 /// active document of that creator browsing context at the time A was created is the creator
 /// Document.
 ///
-/// See: https://html.spec.whatwg.org/multipage/#creating-browsing-contexts
+/// See: <https://html.spec.whatwg.org/multipage/#creating-browsing-contexts>
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreatorBrowsingContextInfo {
     /// Creator document URL.
@@ -762,7 +766,7 @@ fn tokenize_open_features(features: DOMString) -> IndexMap<String, String> {
     let mut cur = iter.next();
 
     // Step 3
-    while cur != None {
+    while cur.is_some() {
         // Step 3.1 & 3.2
         let mut name = String::new();
         let mut value = String::new();
@@ -827,7 +831,7 @@ fn tokenize_open_features(features: DOMString) -> IndexMap<String, String> {
 fn parse_open_feature_boolean(tokenized_features: &IndexMap<String, String>, name: &str) -> bool {
     if let Some(value) = tokenized_features.get(name) {
         // Step 1 & 2
-        if value == "" || value == "yes" {
+        if value.is_empty() || value == "yes" {
             return true;
         }
         // Step 3 & 4
@@ -836,7 +840,7 @@ fn parse_open_feature_boolean(tokenized_features: &IndexMap<String, String>, nam
         }
     }
     // Step 5
-    return false;
+    false
 }
 
 // This is only called from extern functions,
@@ -901,30 +905,26 @@ unsafe extern "C" fn getOwnPropertyDescriptor(
     cx: *mut JSContext,
     proxy: RawHandleObject,
     id: RawHandleId,
-    mut desc: RawMutableHandle<PropertyDescriptor>,
+    desc: RawMutableHandle<PropertyDescriptor>,
+    is_none: *mut bool,
 ) -> bool {
     let window = GetSubframeWindowProxy(cx, proxy, id);
     if let Some((window, attrs)) = window {
         rooted!(in(cx) let mut val = UndefinedValue());
         window.to_jsval(cx, val.handle_mut());
-        desc.value = val.get();
-        fill_property_descriptor(MutableHandle::from_raw(desc), proxy.get(), attrs);
+        set_property_descriptor(
+            MutableHandle::from_raw(desc),
+            val.handle(),
+            attrs,
+            &mut *is_none,
+        );
         return true;
     }
 
     let mut slot = UndefinedValue();
     GetProxyPrivate(proxy.get(), &mut slot);
     rooted!(in(cx) let target = slot.to_object());
-    if !JS_GetOwnPropertyDescriptorById(cx, target.handle().into(), id, desc) {
-        return false;
-    }
-
-    assert!(desc.obj.is_null() || desc.obj == target.get());
-    if desc.obj == target.get() {
-        desc.obj = proxy.get();
-    }
-
-    true
+    return JS_GetOwnPropertyDescriptorById(cx, target.handle().into(), id, desc, is_none);
 }
 
 #[allow(unsafe_code, non_snake_case)]
@@ -1036,7 +1036,7 @@ unsafe extern "C" fn get_prototype_if_ordinary(
     // non-wrapper object *must* report non-ordinary, even if static [[Prototype]]
     // usually means ordinary.
     *is_ordinary = false;
-    return true;
+    true
 }
 
 static PROXY_HANDLER: ProxyTraps = ProxyTraps {
@@ -1062,7 +1062,6 @@ static PROXY_HANDLER: ProxyTraps = ProxyTraps {
     hasOwn: None,
     getOwnEnumerablePropertyKeys: None,
     nativeCall: None,
-    hasInstance: None,
     objectClassIs: None,
     className: None,
     fun_toString: None,
@@ -1084,12 +1083,15 @@ pub fn new_window_proxy_handler() -> WindowProxyHandler {
 // These traps often throw security errors, and only pass on calls to methods
 // defined in the DissimilarOriginWindow IDL.
 
+// TODO: reuse the infrastructure in `proxyhandler.rs`. For starters, the calls
+//       to this function should be replaced with those to
+//       `report_cross_origin_denial`.
 #[allow(unsafe_code)]
 unsafe fn throw_security_error(cx: *mut JSContext, realm: InRealm) -> bool {
     if !JS_IsExceptionPending(cx) {
         let safe_context = SafeJSContext::from_ptr(cx);
         let global = GlobalScope::from_context(cx, realm);
-        throw_dom_exception(safe_context, &*global, Error::Security);
+        throw_dom_exception(safe_context, &global, Error::Security);
     }
     false
 }
@@ -1158,10 +1160,11 @@ unsafe extern "C" fn getOwnPropertyDescriptor_xorigin(
     proxy: RawHandleObject,
     id: RawHandleId,
     desc: RawMutableHandle<PropertyDescriptor>,
+    is_none: *mut bool,
 ) -> bool {
     let mut found = false;
     has_xorigin(cx, proxy, id, &mut found);
-    found && getOwnPropertyDescriptor(cx, proxy, id, desc)
+    found && getOwnPropertyDescriptor(cx, proxy, id, desc, is_none)
 }
 
 #[allow(unsafe_code, non_snake_case)]
@@ -1207,7 +1210,6 @@ static XORIGIN_PROXY_HANDLER: ProxyTraps = ProxyTraps {
     hasOwn: Some(has_xorigin),
     getOwnEnumerablePropertyKeys: None,
     nativeCall: None,
-    hasInstance: None,
     objectClassIs: None,
     className: None,
     fun_toString: None,
@@ -1223,7 +1225,7 @@ static XORIGIN_PROXY_HANDLER: ProxyTraps = ProxyTraps {
 // How WindowProxy objects are garbage collected.
 
 #[allow(unsafe_code)]
-unsafe extern "C" fn finalize(_fop: *mut JSFreeOp, obj: *mut JSObject) {
+unsafe extern "C" fn finalize(_fop: *mut GCContext, obj: *mut JSObject) {
     let mut slot = UndefinedValue();
     GetProxyReservedSlot(obj, 0, &mut slot);
     let this = slot.to_private() as *mut WindowProxy;

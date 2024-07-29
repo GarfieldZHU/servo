@@ -4,33 +4,24 @@
 
 //! The `Record` (open-ended dictionary) type.
 
-use crate::dom::bindings::conversions::jsid_to_string;
-use crate::dom::bindings::str::{ByteString, DOMString, USVString};
-use indexmap::IndexMap;
-use js::conversions::{ConversionResult, FromJSValConvertible, ToJSValConvertible};
-use js::jsapi::HandleId as RawHandleId;
-use js::jsapi::JSContext;
-use js::jsapi::JS_NewPlainObject;
-use js::jsapi::PropertyDescriptor;
-use js::jsapi::JSITER_HIDDEN;
-use js::jsapi::JSITER_OWNONLY;
-use js::jsapi::JSITER_SYMBOLS;
-use js::jsapi::JSPROP_ENUMERATE;
-use js::jsval::ObjectValue;
-use js::jsval::UndefinedValue;
-use js::rust::wrappers::GetPropertyKeys;
-use js::rust::wrappers::JS_DefineUCProperty2;
-use js::rust::wrappers::JS_GetOwnPropertyDescriptorById;
-use js::rust::wrappers::JS_GetPropertyById;
-use js::rust::wrappers::JS_IdToValue;
-use js::rust::HandleId;
-use js::rust::HandleValue;
-use js::rust::IdVector;
-use js::rust::MutableHandleValue;
 use std::cmp::Eq;
 use std::hash::Hash;
 use std::marker::Sized;
 use std::ops::Deref;
+
+use indexmap::IndexMap;
+use js::conversions::{ConversionResult, FromJSValConvertible, ToJSValConvertible};
+use js::jsapi::glue::JS_GetOwnPropertyDescriptorById;
+use js::jsapi::{
+    HandleId as RawHandleId, JSContext, JS_NewPlainObject, PropertyDescriptor, JSITER_HIDDEN,
+    JSITER_OWNONLY, JSITER_SYMBOLS, JSPROP_ENUMERATE,
+};
+use js::jsval::{ObjectValue, UndefinedValue};
+use js::rust::wrappers::{GetPropertyKeys, JS_DefineUCProperty2, JS_GetPropertyById, JS_IdToValue};
+use js::rust::{HandleId, HandleValue, IdVector, MutableHandleValue};
+
+use crate::dom::bindings::conversions::jsid_to_string;
+use crate::dom::bindings::str::{ByteString, DOMString, USVString};
 
 pub trait RecordKey: Eq + Hash + Sized {
     fn to_utf16_vec(&self) -> Vec<u16>;
@@ -81,6 +72,7 @@ impl RecordKey for ByteString {
 /// The `Record` (open-ended dictionary) type.
 #[derive(Clone, JSTraceable)]
 pub struct Record<K: RecordKey, V> {
+    #[custom_trace]
     map: IndexMap<K, V>,
 }
 
@@ -135,12 +127,18 @@ where
             rooted!(in(cx) let id = *id);
             rooted!(in(cx) let mut desc = PropertyDescriptor::default());
 
-            if !JS_GetOwnPropertyDescriptorById(cx, object.handle(), id.handle(), desc.handle_mut())
-            {
+            let mut is_none = false;
+            if !JS_GetOwnPropertyDescriptorById(
+                cx,
+                object.handle().into(),
+                id.handle().into(),
+                desc.handle_mut().into(),
+                &mut is_none,
+            ) {
                 return Err(());
             }
 
-            if (JSPROP_ENUMERATE as u32) & desc.attrs == 0 {
+            if !desc.enumerable_() {
                 continue;
             }
 
@@ -165,7 +163,7 @@ where
             map.insert(key, property);
         }
 
-        Ok(ConversionResult::Success(Record { map: map }))
+        Ok(ConversionResult::Success(Record { map }))
     }
 }
 
@@ -195,5 +193,11 @@ where
         }
 
         rval.set(ObjectValue(js_object.handle().get()));
+    }
+}
+
+impl<K: RecordKey, V> Default for Record<K, V> {
+    fn default() -> Self {
+        Self::new()
     }
 }

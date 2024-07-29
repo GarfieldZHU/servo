@@ -11,20 +11,20 @@
 //! slot. When all associated `WeakRef` values are dropped, the
 //! `WeakBox` itself is dropped too.
 
+use std::cell::{Cell, UnsafeCell};
+use std::ops::{Deref, DerefMut, Drop};
+use std::{mem, ptr};
+
+use js::glue::JS_GetReservedSlot;
+use js::jsapi::{JSTracer, JS_SetReservedSlot};
+use js::jsval::{PrivateValue, UndefinedValue};
+use libc::c_void;
+use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::trace::JSTraceable;
-use js::glue::JS_GetReservedSlot;
-use js::jsapi::{JSTracer, JS_SetReservedSlot};
-use js::jsval::PrivateValue;
-use js::jsval::UndefinedValue;
-use libc::c_void;
-use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
-use std::cell::{Cell, UnsafeCell};
-use std::mem;
-use std::ops::{Deref, DerefMut, Drop};
-use std::ptr;
 
 /// The index of the slot wherein a pointer to the weak holder cell is
 /// stored for weak-referenceable bindings. We use slot 1 for holding it,
@@ -33,14 +33,14 @@ use std::ptr;
 pub const DOM_WEAK_SLOT: u32 = 1;
 
 /// A weak reference to a JS-managed DOM object.
-#[allow(unrooted_must_root)]
-#[unrooted_must_root_lint::allow_unrooted_interior]
+#[allow(crown::unrooted_must_root)]
+#[crown::unrooted_must_root_lint::allow_unrooted_interior]
 pub struct WeakRef<T: WeakReferenceable> {
     ptr: ptr::NonNull<WeakBox<T>>,
 }
 
 /// The inner box of weak references, public for the finalization in codegen.
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct WeakBox<T: WeakReferenceable> {
     /// The reference count. When it reaches zero, the `value` field should
     /// have already been set to `None`. The pointee contributes one to the count.
@@ -218,7 +218,7 @@ unsafe impl<T: WeakReferenceable> JSTraceable for MutableWeakRef<T> {
 
 /// A vector of weak references. On tracing, the vector retains
 /// only references which still point to live objects.
-#[unrooted_must_root_lint::allow_unrooted_interior]
+#[crown::unrooted_must_root_lint::allow_unrooted_interior]
 #[derive(MallocSizeOf)]
 pub struct WeakRefVec<T: WeakReferenceable> {
     vec: Vec<WeakRef<T>>,
@@ -268,7 +268,7 @@ impl<T: WeakReferenceable> DerefMut for WeakRefVec<T> {
 
 /// An entry of a vector of weak references. Passed to the closure
 /// given to `WeakRefVec::update`.
-#[unrooted_must_root_lint::allow_unrooted_interior]
+#[crown::unrooted_must_root_lint::allow_unrooted_interior]
 pub struct WeakRefEntry<'a, T: WeakReferenceable> {
     vec: &'a mut WeakRefVec<T>,
     index: &'a mut usize,

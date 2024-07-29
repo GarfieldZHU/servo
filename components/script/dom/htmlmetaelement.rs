@@ -2,39 +2,54 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::attr::Attr;
-use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::HTMLMetaElementBinding::HTMLMetaElementMethods;
-use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
-use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::root::{DomRoot, MutNullableDom};
-use crate::dom::bindings::str::DOMString;
-use crate::dom::cssstylesheet::CSSStyleSheet;
-use crate::dom::document::Document;
-use crate::dom::element::{AttributeMutation, Element};
-use crate::dom::htmlelement::HTMLElement;
-use crate::dom::htmlheadelement::HTMLHeadElement;
-use crate::dom::node::{
-    document_from_node, stylesheets_owner_from_node, window_from_node, BindContext, Node,
-    UnbindContext,
-};
-use crate::dom::virtualmethods::VirtualMethods;
+use std::str::FromStr;
+
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix};
-use parking_lot::RwLock;
-use servo_arc::Arc;
-use servo_config::pref;
-use std::sync::atomic::AtomicBool;
-use style::media_queries::MediaList;
+use js::rust::HandleObject;
+use regex::bytes::Regex;
+use script_traits::{HistoryEntryReplacement, MsDuration};
+use servo_url::ServoUrl;
 use style::str::HTML_SPACE_CHARACTERS;
-use style::stylesheets::{CssRule, CssRules, Origin, Stylesheet, StylesheetContents, ViewportRule};
+
+use crate::dom::attr::Attr;
+use crate::dom::bindings::codegen::Bindings::HTMLMetaElementBinding::HTMLMetaElementMethods;
+use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::str::DOMString;
+use crate::dom::document::{DeclarativeRefresh, Document};
+use crate::dom::element::{AttributeMutation, Element};
+use crate::dom::globalscope::GlobalScope;
+use crate::dom::htmlelement::HTMLElement;
+use crate::dom::htmlheadelement::HTMLHeadElement;
+use crate::dom::location::NavigationType;
+use crate::dom::node::{document_from_node, window_from_node, BindContext, Node, UnbindContext};
+use crate::dom::virtualmethods::VirtualMethods;
+use crate::dom::window::Window;
+use crate::timers::OneshotTimerCallback;
 
 #[dom_struct]
 pub struct HTMLMetaElement {
     htmlelement: HTMLElement,
-    #[ignore_malloc_size_of = "Arc"]
-    stylesheet: DomRefCell<Option<Arc<Stylesheet>>>,
-    cssom_stylesheet: MutNullableDom<CSSStyleSheet>,
+}
+
+#[derive(JSTraceable, MallocSizeOf)]
+pub struct RefreshRedirectDue {
+    #[no_trace]
+    pub url: ServoUrl,
+    #[ignore_malloc_size_of = "non-owning"]
+    pub window: DomRoot<Window>,
+}
+impl RefreshRedirectDue {
+    pub fn invoke(self) {
+        self.window.Location().navigate(
+            self.url.clone(),
+            HistoryEntryReplacement::Enabled,
+            NavigationType::DeclarativeRefresh,
+        );
+    }
 }
 
 impl HTMLMetaElement {
@@ -45,40 +60,21 @@ impl HTMLMetaElement {
     ) -> HTMLMetaElement {
         HTMLMetaElement {
             htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
-            stylesheet: DomRefCell::new(None),
-            cssom_stylesheet: MutNullableDom::new(None),
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLMetaElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLMetaElement::new_inherited(local_name, prefix, document)),
             document,
+            proto,
         )
-    }
-
-    pub fn get_stylesheet(&self) -> Option<Arc<Stylesheet>> {
-        self.stylesheet.borrow().clone()
-    }
-
-    pub fn get_cssom_stylesheet(&self) -> Option<DomRoot<CSSStyleSheet>> {
-        self.get_stylesheet().map(|sheet| {
-            self.cssom_stylesheet.or_init(|| {
-                CSSStyleSheet::new(
-                    &window_from_node(self),
-                    self.upcast::<Element>(),
-                    "text/css".into(),
-                    None, // todo handle location
-                    None, // todo handle title
-                    sheet,
-                )
-            })
-        })
     }
 
     fn process_attributes(&self) {
@@ -86,48 +82,14 @@ impl HTMLMetaElement {
         if let Some(ref name) = element.get_name() {
             let name = name.to_ascii_lowercase();
             let name = name.trim_matches(HTML_SPACE_CHARACTERS);
-
-            if name == "viewport" {
-                self.apply_viewport();
-            }
-
             if name == "referrer" {
                 self.apply_referrer();
             }
-        }
-    }
-
-    #[allow(unrooted_must_root)]
-    fn apply_viewport(&self) {
-        if !pref!(layout.viewport.enabled) {
-            return;
-        }
-        let element = self.upcast::<Element>();
-        if let Some(ref content) = element.get_attribute(&ns!(), &local_name!("content")) {
-            let content = content.value();
-            if !content.is_empty() {
-                if let Some(translated_rule) = ViewportRule::from_meta(&**content) {
-                    let stylesheets_owner = stylesheets_owner_from_node(self);
-                    let document = document_from_node(self);
-                    let shared_lock = document.style_shared_lock();
-                    let rule = CssRule::Viewport(Arc::new(shared_lock.wrap(translated_rule)));
-                    let sheet = Arc::new(Stylesheet {
-                        contents: StylesheetContents {
-                            rules: CssRules::new(vec![rule], shared_lock),
-                            origin: Origin::Author,
-                            namespaces: Default::default(),
-                            quirks_mode: document.quirks_mode(),
-                            url_data: RwLock::new(window_from_node(self).get_url()),
-                            source_map_url: RwLock::new(None),
-                            source_url: RwLock::new(None),
-                        },
-                        media: Arc::new(shared_lock.wrap(MediaList::empty())),
-                        shared_lock: shared_lock.clone(),
-                        disabled: AtomicBool::new(false),
-                    });
-                    *self.stylesheet.borrow_mut() = Some(sheet.clone());
-                    stylesheets_owner.add_stylesheet(self.upcast(), sheet);
-                }
+        // https://html.spec.whatwg.org/multipage/#attr-meta-http-equiv
+        } else if !self.HttpEquiv().is_empty() {
+            // TODO: Implement additional http-equiv candidates
+            if self.HttpEquiv().to_ascii_lowercase().as_str() == "refresh" {
+                self.declarative_refresh();
             }
         }
     }
@@ -152,6 +114,96 @@ impl HTMLMetaElement {
             }
         }
     }
+
+    /// <https://html.spec.whatwg.org/multipage/#shared-declarative-refresh-steps>
+    fn declarative_refresh(&self) {
+        // 2
+        let content = self.Content();
+        // 1
+        if !content.is_empty() {
+            // 3
+            self.shared_declarative_refresh_steps(content);
+        }
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#shared-declarative-refresh-steps>
+    fn shared_declarative_refresh_steps(&self, content: DOMString) {
+        // 1
+        let document = document_from_node(self);
+        if document.will_declaratively_refresh() {
+            return;
+        }
+
+        // 2-11
+        lazy_static::lazy_static! {
+            static ref REFRESH_REGEX: Regex = Regex::new(
+                r#"(?x)
+                ^
+                \s* # 3
+                ((?<time>\d+)\.?|\.) # 5-6
+                [0-9.]* # 8
+                (
+                    (;|,| ) # 10.1
+                    \s* # 10.2
+                    (;|,)? # 10.3
+                    \s* # 10.4
+                    (
+                        (U|u)(R|r)(L|l) # 11.2-11.4
+                        \s*=\s* # 11.5-11.7
+                        ('(?<url1>.*?)'?|"(?<url2>.*?)"?|(?<url3>[^'"].*)) # 11.8 - 11.10
+                        |
+                        (?<url4>.*)
+                    )?
+                )?
+                $
+            "#,
+            )
+            .unwrap();
+        }
+        let mut url_record = document.url();
+        let captures = if let Some(captures) = REFRESH_REGEX.captures(content.as_bytes()) {
+            captures
+        } else {
+            return;
+        };
+        let time = if let Some(time_string) = captures.name("time") {
+            u64::from_str(&String::from_utf8_lossy(time_string.as_bytes())).unwrap_or(0)
+        } else {
+            0
+        };
+        let captured_url = captures.name("url1").or(captures
+            .name("url2")
+            .or(captures.name("url3").or(captures.name("url4"))));
+
+        if let Some(url_match) = captured_url {
+            url_record = if let Ok(url) = ServoUrl::parse_with_base(
+                Some(&url_record),
+                &String::from_utf8_lossy(url_match.as_bytes()),
+            ) {
+                url
+            } else {
+                return;
+            }
+        }
+        // 12-13
+        if document.completely_loaded() {
+            // TODO: handle active sandboxing flag
+            let window = window_from_node(self);
+            window.upcast::<GlobalScope>().schedule_callback(
+                OneshotTimerCallback::RefreshRedirectDue(RefreshRedirectDue {
+                    window: window.clone(),
+                    url: url_record,
+                }),
+                MsDuration::new(time.saturating_mul(1000)),
+            );
+            document.set_declarative_refresh(DeclarativeRefresh::CreatedAfterLoad);
+        } else {
+            document.set_declarative_refresh(DeclarativeRefresh::PendingLoad {
+                url: url_record,
+                time,
+            });
+        }
+    }
 }
 
 impl HTMLMetaElementMethods for HTMLMetaElement {
@@ -166,6 +218,11 @@ impl HTMLMetaElementMethods for HTMLMetaElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-meta-content
     make_setter!(SetContent, "content");
+
+    // https://html.spec.whatwg.org/multipage/#dom-meta-httpequiv
+    make_getter!(HttpEquiv, "http-equiv");
+    // https://html.spec.whatwg.org/multipage/#dom-meta-httpequiv
+    make_atomic_setter!(SetHttpEquiv, "http-equiv");
 }
 
 impl VirtualMethods for HTMLMetaElement {
@@ -174,7 +231,7 @@ impl VirtualMethods for HTMLMetaElement {
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
 
@@ -192,16 +249,12 @@ impl VirtualMethods for HTMLMetaElement {
     }
 
     fn unbind_from_tree(&self, context: &UnbindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.unbind_from_tree(context);
         }
 
         if context.tree_connected {
             self.process_referrer_attribute();
-
-            if let Some(s) = self.stylesheet.borrow_mut().take() {
-                stylesheets_owner_from_node(self).remove_stylesheet(self.upcast(), &s);
-            }
         }
     }
 }

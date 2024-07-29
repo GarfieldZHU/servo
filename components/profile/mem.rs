@@ -4,16 +4,20 @@
 
 //! Memory profiling functions.
 
-use crate::time::duration_from_seconds;
-use ipc_channel::ipc::{self, IpcReceiver};
-use ipc_channel::router::ROUTER;
-use profile_traits::mem::ReportsChan;
-use profile_traits::mem::{ProfilerChan, ProfilerMsg, ReportKind, Reporter, ReporterRequest};
 use std::borrow::ToOwned;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::thread;
 use std::time::Instant;
+
+use ipc_channel::ipc::{self, IpcReceiver};
+use ipc_channel::router::ROUTER;
+use profile_traits::mem::{
+    ProfilerChan, ProfilerMsg, ReportKind, Reporter, ReporterRequest, ReportsChan,
+};
+use profile_traits::path;
+
+use crate::time::duration_from_seconds;
 
 pub struct Profiler {
     /// The port through which messages are received.
@@ -26,8 +30,8 @@ pub struct Profiler {
     created: Instant,
 }
 
-const JEMALLOC_HEAP_ALLOCATED_STR: &'static str = "jemalloc-heap-allocated";
-const SYSTEM_HEAP_ALLOCATED_STR: &'static str = "system-heap-allocated";
+const JEMALLOC_HEAP_ALLOCATED_STR: &str = "jemalloc-heap-allocated";
+const SYSTEM_HEAP_ALLOCATED_STR: &str = "system-heap-allocated";
 
 impl Profiler {
     pub fn create(period: Option<f64>) -> ProfilerChan {
@@ -37,7 +41,7 @@ impl Profiler {
         if let Some(period) = period {
             let chan = chan.clone();
             thread::Builder::new()
-                .name("Memory profiler timer".to_owned())
+                .name("MemoryProfTimer".to_owned())
                 .spawn(move || loop {
                     thread::sleep(duration_from_seconds(period));
                     if chan.send(ProfilerMsg::Print).is_err() {
@@ -50,7 +54,7 @@ impl Profiler {
         // Always spawn the memory profiler. If there is no timer thread it won't receive regular
         // `Print` events, but it will still receive the other events.
         thread::Builder::new()
-            .name("Memory profiler".to_owned())
+            .name("MemoryProfiler".to_owned())
             .spawn(move || {
                 let mut mem_profiler = Profiler::new(port);
                 mem_profiler.start();
@@ -80,7 +84,7 @@ impl Profiler {
 
     pub fn new(port: IpcReceiver<ProfilerMsg>) -> Profiler {
         Profiler {
-            port: port,
+            port,
             reporters: HashMap::new(),
             created: Instant::now(),
         }
@@ -208,7 +212,7 @@ impl Profiler {
 
         println!("|");
         println!("End memory reports");
-        println!("");
+        println!();
     }
 }
 
@@ -235,7 +239,7 @@ impl ReportsTree {
         ReportsTree {
             size: 0,
             count: 0,
-            path_seg: path_seg,
+            path_seg,
             children: vec![],
         }
     }
@@ -255,7 +259,7 @@ impl ReportsTree {
     fn insert(&mut self, path: &[String], size: usize) {
         let mut t: &mut ReportsTree = self;
         for path_seg in path {
-            let i = match t.find_child(&path_seg) {
+            let i = match t.find_child(path_seg) {
                 Some(i) => i,
                 None => {
                     let new_t = ReportsTree::new(path_seg.clone());
@@ -348,7 +352,7 @@ impl ReportsForest {
 
     fn print(&mut self) {
         // Fill in sizes of interior nodes, and recursively sort the sub-trees.
-        for (_, tree) in &mut self.trees {
+        for tree in self.trees.values_mut() {
             tree.compute_interior_node_sizes_and_sort();
         }
 
@@ -356,7 +360,7 @@ impl ReportsForest {
         // single node) come after non-degenerate trees. Secondary sort: alphabetical order of the
         // root node's path_seg.
         let mut v = vec![];
-        for (_, tree) in &self.trees {
+        for tree in self.trees.values() {
             v.push(tree);
         }
         v.sort_by(|a, b| {
@@ -383,20 +387,23 @@ impl ReportsForest {
 //---------------------------------------------------------------------------
 
 mod system_reporter {
-    use super::{JEMALLOC_HEAP_ALLOCATED_STR, SYSTEM_HEAP_ALLOCATED_STR};
-    #[cfg(target_os = "linux")]
+    #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
+    use std::ffi::CString;
+    #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
+    use std::mem::size_of;
+    #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
+    use std::ptr::null_mut;
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     use libc::c_int;
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
     use libc::{c_void, size_t};
     use profile_traits::mem::{Report, ReportKind, ReporterRequest};
-    #[cfg(not(target_os = "windows"))]
-    use std::ffi::CString;
-    #[cfg(not(target_os = "windows"))]
-    use std::mem::size_of;
-    #[cfg(not(target_os = "windows"))]
-    use std::ptr::null_mut;
+    use profile_traits::path;
     #[cfg(target_os = "macos")]
     use task_info::task_basic_info::{resident_size, virtual_size};
+
+    use super::{JEMALLOC_HEAP_ALLOCATED_STR, SYSTEM_HEAP_ALLOCATED_STR};
 
     /// Collects global measurements from the OS and heap allocators.
     pub fn collect_reports(request: ReporterRequest) {
@@ -405,9 +412,9 @@ mod system_reporter {
             let mut report = |path, size| {
                 if let Some(size) = size {
                     reports.push(Report {
-                        path: path,
+                        path,
                         kind: ReportKind::NonExplicitSize,
-                        size: size,
+                        size,
                     });
                 }
             };
@@ -448,12 +455,12 @@ mod system_reporter {
         request.reports_channel.send(reports);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     extern "C" {
         fn mallinfo() -> struct_mallinfo;
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[repr(C)]
     pub struct struct_mallinfo {
         arena: c_int,
@@ -468,7 +475,7 @@ mod system_reporter {
         keepcost: c_int,
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     fn system_heap_allocated() -> Option<usize> {
         let info: struct_mallinfo = unsafe { mallinfo() };
 
@@ -487,15 +494,15 @@ mod system_reporter {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
     fn system_heap_allocated() -> Option<usize> {
         None
     }
 
-    #[cfg(not(target_os = "windows"))]
-    use servo_allocator::jemalloc_sys::mallctl;
+    #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
+    use tikv_jemalloc_sys::mallctl;
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_env = "ohos")))]
     fn jemalloc_stat(value_name: &str) -> Option<usize> {
         // Before we request the measurement of interest, we first send an "epoch"
         // request. Without that jemalloc gives cached statistics(!) which can be
@@ -542,7 +549,7 @@ mod system_reporter {
         Some(value as usize)
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_env = "ohos"))]
     fn jemalloc_stat(_value_name: &str) -> Option<usize> {
         None
     }
@@ -597,11 +604,12 @@ mod system_reporter {
 
     #[cfg(target_os = "linux")]
     fn resident_segments() -> Vec<(String, usize)> {
-        use regex::Regex;
         use std::collections::hash_map::Entry;
         use std::collections::HashMap;
         use std::fs::File;
         use std::io::{BufRead, BufReader};
+
+        use regex::Regex;
 
         // The first line of an entry in /proc/<pid>/smaps looks just like an entry
         // in /proc/<pid>/maps:
@@ -655,7 +663,7 @@ mod system_reporter {
 
                 // Construct the segment name from its pathname and permissions.
                 curr_seg_name.clear();
-                if pathname == "" || pathname.starts_with("[stack:") {
+                if pathname.is_empty() || pathname.starts_with("[stack:") {
                     // Anonymous memory. Entries marked with "[stack:nnn]"
                     // look like thread stacks but they may include other
                     // anonymous mappings, so we can't trust them and just
@@ -666,7 +674,7 @@ mod system_reporter {
                 }
                 curr_seg_name.push_str(" (");
                 curr_seg_name.push_str(perms);
-                curr_seg_name.push_str(")");
+                curr_seg_name.push(')');
 
                 looking_for = LookingFor::Rss;
             } else {

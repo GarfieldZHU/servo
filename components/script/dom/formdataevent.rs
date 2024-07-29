@@ -2,21 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::FormDataEventBinding;
 use crate::dom::bindings::codegen::Bindings::FormDataEventBinding::FormDataEventMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
-use crate::dom::event::Event;
-use crate::dom::event::{EventBubbles, EventCancelable};
+use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::formdata::FormData;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_atoms::Atom;
 
 #[dom_struct]
 pub struct FormDataEvent {
@@ -32,12 +33,24 @@ impl FormDataEvent {
         cancelable: EventCancelable,
         form_data: &FormData,
     ) -> DomRoot<FormDataEvent> {
-        let ev = reflect_dom_object(
+        Self::new_with_proto(global, None, type_, can_bubble, cancelable, form_data)
+    }
+
+    fn new_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        type_: Atom,
+        can_bubble: EventBubbles,
+        cancelable: EventCancelable,
+        form_data: &FormData,
+    ) -> DomRoot<FormDataEvent> {
+        let ev = reflect_dom_object_with_proto(
             Box::new(FormDataEvent {
                 event: Event::new_inherited(),
                 form_data: Dom::from_ref(form_data),
             }),
             global,
+            proto,
         );
 
         {
@@ -50,18 +63,20 @@ impl FormDataEvent {
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         type_: DOMString,
         init: &FormDataEventBinding::FormDataEventInit,
     ) -> Fallible<DomRoot<FormDataEvent>> {
         let bubbles = EventBubbles::from(init.parent.bubbles);
         let cancelable = EventCancelable::from(init.parent.cancelable);
 
-        let event = FormDataEvent::new(
+        let event = FormDataEvent::new_with_proto(
             &window.global(),
+            proto,
             Atom::from(type_),
             bubbles,
             cancelable,
-            &*init.formData.clone(),
+            &init.formData.clone(),
         );
 
         Ok(event)

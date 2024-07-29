@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use servo_atoms::Atom;
+
 use crate::dom::bindings::codegen::Bindings::HTMLCollectionBinding::HTMLCollectionMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLFormControlsCollectionBinding::HTMLFormControlsCollectionMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::{GetRootNodeOptions, NodeMethods};
@@ -16,8 +19,6 @@ use crate::dom::htmlformelement::HTMLFormElement;
 use crate::dom::node::Node;
 use crate::dom::radionodelist::RadioNodeList;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_atoms::Atom;
 
 #[dom_struct]
 pub struct HTMLFormControlsCollection {
@@ -34,7 +35,7 @@ impl HTMLFormControlsCollection {
             .upcast::<Node>()
             .GetRootNode(&GetRootNodeOptions::empty());
         HTMLFormControlsCollection {
-            collection: HTMLCollection::new_inherited(&*root_of_form, filter),
+            collection: HTMLCollection::new_inherited(&root_of_form, filter),
             form: Dom::from_ref(form),
         }
     }
@@ -91,7 +92,7 @@ impl HTMLFormControlsCollectionMethods for HTMLFormControlsCollection {
                 // specifically HTMLFormElement::Elements(),
                 // and the collection filter excludes image inputs.
                 Some(RadioNodeListOrElement::RadioNodeList(
-                    RadioNodeList::new_controls_except_image_inputs(window, &*self.form, &name),
+                    RadioNodeList::new_controls_except_image_inputs(window, &self.form, &name),
                 ))
             }
         // Step 3

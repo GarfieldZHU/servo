@@ -4,20 +4,6 @@
 
 #![deny(unsafe_code)]
 
-#[macro_use]
-extern crate bitflags;
-#[macro_use]
-extern crate html5ever;
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate range;
-#[macro_use]
-extern crate serde;
-
-#[macro_use]
 pub mod layout_debug;
 
 mod block;
@@ -38,7 +24,6 @@ mod linked_list;
 mod list_item;
 mod model;
 mod multicol;
-pub mod opaque_node;
 pub mod parallel;
 mod persistent_list;
 pub mod query;
@@ -51,14 +36,14 @@ mod table_row;
 mod table_rowgroup;
 mod table_wrapper;
 mod text;
+mod text_run;
 pub mod traversal;
 pub mod wrapper;
 
 // For unit tests:
-pub use self::data::LayoutData;
-pub use crate::fragment::Fragment;
-pub use crate::fragment::SpecificFragmentInfo;
-
 // We can't use servo_arc for everything in layout, because the Flow stuff uses
 // weak references.
 use servo_arc::Arc as ServoArc;
+
+pub use self::data::LayoutData;
+pub use crate::fragment::{Fragment, SpecificFragmentInfo};

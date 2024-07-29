@@ -3,6 +3,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
+use std::cell::Cell;
+
+use canvas_traits::webgl::{
+    webgl_channel, WebGLCommand, WebGLError, WebGLFramebufferBindingRequest, WebGLFramebufferId,
+    WebGLRenderbufferId, WebGLResult, WebGLTextureId, WebGLVersion,
+};
+use dom_struct::dom_struct;
+use euclid::Size2D;
+use webxr_api::Viewport;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
@@ -13,14 +23,6 @@ use crate::dom::webglrenderbuffer::WebGLRenderbuffer;
 use crate::dom::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webgltexture::WebGLTexture;
 use crate::dom::xrsession::XRSession;
-use canvas_traits::webgl::WebGLFramebufferId;
-use canvas_traits::webgl::{webgl_channel, WebGLError, WebGLResult, WebGLVersion};
-use canvas_traits::webgl::{WebGLCommand, WebGLFramebufferBindingRequest};
-use canvas_traits::webgl::{WebGLRenderbufferId, WebGLTextureId};
-use dom_struct::dom_struct;
-use euclid::Size2D;
-use std::cell::Cell;
-use webxr_api::Viewport;
 
 pub enum CompleteForRendering {
     Complete,
@@ -32,7 +34,7 @@ fn log2(n: u32) -> u32 {
     31 - n.leading_zeros()
 }
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 enum WebGLFramebufferAttachment {
     Renderbuffer(Dom<WebGLRenderbuffer>),
@@ -60,10 +62,10 @@ impl WebGLFramebufferAttachment {
     fn root(&self) -> WebGLFramebufferAttachmentRoot {
         match *self {
             WebGLFramebufferAttachment::Renderbuffer(ref rb) => {
-                WebGLFramebufferAttachmentRoot::Renderbuffer(DomRoot::from_ref(&rb))
+                WebGLFramebufferAttachmentRoot::Renderbuffer(DomRoot::from_ref(rb))
             },
             WebGLFramebufferAttachment::Texture { ref texture, .. } => {
-                WebGLFramebufferAttachmentRoot::Texture(DomRoot::from_ref(&texture))
+                WebGLFramebufferAttachmentRoot::Texture(DomRoot::from_ref(texture))
             },
         }
     }
@@ -87,7 +89,9 @@ pub enum WebGLFramebufferAttachmentRoot {
 #[dom_struct]
 pub struct WebGLFramebuffer {
     webgl_object: WebGLObject,
+    #[no_trace]
     webgl_version: WebGLVersion,
+    #[no_trace]
     id: WebGLFramebufferId,
     target: Cell<Option<u32>>,
     is_deleted: Cell<bool>,
@@ -112,7 +116,7 @@ impl WebGLFramebuffer {
         Self {
             webgl_object: WebGLObject::new_inherited(context),
             webgl_version: context.webgl_version(),
-            id: id,
+            id,
             target: Cell::new(None),
             is_deleted: Cell::new(false),
             size: Cell::new(None),
@@ -143,7 +147,7 @@ impl WebGLFramebuffer {
         context: &WebGLRenderingContext,
         size: Size2D<i32, Viewport>,
     ) -> Option<DomRoot<Self>> {
-        let framebuffer = Self::maybe_new(&*context)?;
+        let framebuffer = Self::maybe_new(context)?;
         framebuffer.size.set(Some((size.width, size.height)));
         framebuffer.status.set(constants::FRAMEBUFFER_COMPLETE);
         framebuffer.xr_session.set(Some(session));
@@ -417,7 +421,7 @@ impl WebGLFramebuffer {
             let attachment = attachment.borrow();
             let constraints = color_constraints.clone();
             if let Err(errnum) =
-                self.check_attachment_constraints(&*attachment, constraints, &mut fb_size)
+                self.check_attachment_constraints(&attachment, constraints, &mut fb_size)
             {
                 return self.status.set(errnum);
             }
@@ -711,7 +715,7 @@ impl WebGLFramebuffer {
             Some(texture) => {
                 *binding.borrow_mut() = Some(WebGLFramebufferAttachment::Texture {
                     texture: Dom::from_ref(texture),
-                    level: level,
+                    level,
                 });
                 texture.attach_to_framebuffer(self);
 
@@ -776,7 +780,7 @@ impl WebGLFramebuffer {
 
                 *binding.borrow_mut() = Some(WebGLFramebufferAttachment::Texture {
                     texture: Dom::from_ref(texture),
-                    level: level,
+                    level,
                 });
                 texture.attach_to_framebuffer(self);
 
@@ -847,13 +851,10 @@ impl WebGLFramebuffer {
             attachment: &DomRefCell<Option<WebGLFramebufferAttachment>>,
             target: &WebGLTextureId,
         ) -> bool {
-            match *attachment.borrow() {
-                Some(WebGLFramebufferAttachment::Texture {
-                    texture: ref att_texture,
-                    ..
-                }) if att_texture.id() == *target => true,
-                _ => false,
-            }
+            matches!(*attachment.borrow(), Some(WebGLFramebufferAttachment::Texture {
+                                     texture: ref att_texture,
+                                     ..
+                                }) if att_texture.id() == *target)
         }
 
         for (attachment, name) in &attachments {
@@ -960,7 +961,7 @@ impl WebGLFramebuffer {
             return Err(WebGLError::InvalidOperation);
         }
 
-        *self.color_draw_buffers.borrow_mut() = buffers.clone();
+        self.color_draw_buffers.borrow_mut().clone_from(&buffers);
         context.send_command(WebGLCommand::DrawBuffers(buffers));
         Ok(())
     }
@@ -981,7 +982,7 @@ impl WebGLFramebuffer {
 
 impl Drop for WebGLFramebuffer {
     fn drop(&mut self) {
-        let _ = self.delete(Operation::Fallible);
+        self.delete(Operation::Fallible);
     }
 }
 

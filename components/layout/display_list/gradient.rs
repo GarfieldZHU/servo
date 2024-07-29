@@ -2,14 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::display_list::ToLayout;
 use app_units::Au;
 use euclid::default::{Point2D, Size2D, Vector2D};
+use style::color::mix::ColorInterpolationMethod;
 use style::properties::ComputedValues;
 use style::values::computed::image::{EndingShape, LineDirection};
 use style::values::computed::{Angle, Color, LengthPercentage, Percentage, Position};
-use style::values::generics::image::{Circle, ColorStop, Ellipse, GradientItem, ShapeExtent};
+use style::values::generics::image::{
+    Circle, ColorStop, Ellipse, GradientFlags, GradientItem, ShapeExtent,
+};
 use webrender_api::{ExtendMode, Gradient, GradientBuilder, GradientStop, RadialGradient};
+
+use crate::display_list::ToLayout;
 
 /// A helper data structure for gradients.
 #[derive(Clone, Copy)]
@@ -20,7 +24,7 @@ struct StopRun {
     stop_count: usize,
 }
 
-/// Determines the radius of a circle if it was not explictly provided.
+/// Determines the radius of a circle if it was not explicitly provided.
 /// <https://drafts.csswg.org/css-images-3/#typedef-size>
 fn circle_size_keyword(
     keyword: ShapeExtent,
@@ -57,7 +61,7 @@ where
     )
 }
 
-/// Determines the radius of an ellipse if it was not explictly provided.
+/// Determines the radius of an ellipse if it was not explicitly provided.
 /// <https://drafts.csswg.org/css-images-3/#typedef-size>
 fn ellipse_size_keyword(
     keyword: ShapeExtent,
@@ -86,7 +90,7 @@ fn convert_gradient_stops(
     // Only keep the color stops, discard the color interpolation hints.
     let mut stop_items = gradient_items
         .iter()
-        .filter_map(|item| match *item {
+        .filter_map(|item| match item {
             GradientItem::SimpleColorStop(color) => Some(ColorStop {
                 color,
                 position: None,
@@ -165,7 +169,7 @@ fn convert_gradient_stops(
                     let (end_index, end_stop) = stop_items[(i + 1)..]
                         .iter()
                         .enumerate()
-                        .find(|&(_, ref stop)| stop.position.is_some())
+                        .find(|(_, stop)| stop.position.is_some())
                         .unwrap();
                     let end_offset =
                         position_to_offset(end_stop.position.as_ref().unwrap(), total_length);
@@ -190,8 +194,8 @@ fn convert_gradient_stops(
         };
         assert!(offset.is_finite());
         stops.push(GradientStop {
-            offset: offset,
-            color: style.resolve_color(stop.color).to_layout(),
+            offset,
+            color: style.resolve_color(stop.color.clone()).to_layout(),
         })
     }
     stops
@@ -239,10 +243,12 @@ pub fn linear(
     size: Size2D<Au>,
     stops: &[GradientItem<Color, LengthPercentage>],
     direction: LineDirection,
-    repeating: bool,
+    _color_interpolation_method: &ColorInterpolationMethod,
+    flags: GradientFlags,
 ) -> (Gradient, Vec<GradientStop>) {
     use style::values::specified::position::HorizontalPositionKeyword::*;
     use style::values::specified::position::VerticalPositionKeyword::*;
+    let repeating = flags.contains(GradientFlags::REPEATING);
     let angle = match direction {
         LineDirection::Angle(angle) => angle.radians(),
         LineDirection::Horizontal(x) => match x {
@@ -306,8 +312,10 @@ pub fn radial(
     stops: &[GradientItem<Color, LengthPercentage>],
     shape: &EndingShape,
     center: &Position,
-    repeating: bool,
+    _color_interpolation_method: &ColorInterpolationMethod,
+    flags: GradientFlags,
 ) -> (RadialGradient, Vec<GradientStop>) {
+    let repeating = flags.contains(GradientFlags::REPEATING);
     let center = Point2D::new(
         center.horizontal.to_used_value(size.width),
         center.vertical.to_used_value(size.height),

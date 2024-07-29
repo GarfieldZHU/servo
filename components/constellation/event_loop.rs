@@ -6,11 +6,12 @@
 //! view of a script thread. When an `EventLoop` is dropped, an `ExitScriptThread`
 //! message is sent to the script thread, asking it to shut down.
 
+use std::marker::PhantomData;
+use std::rc::Rc;
+
 use ipc_channel::ipc::IpcSender;
 use ipc_channel::Error;
 use script_traits::ConstellationControlMsg;
-use std::marker::PhantomData;
-use std::rc::Rc;
 
 /// <https://html.spec.whatwg.org/multipage/#event-loop>
 pub struct EventLoop {
@@ -30,7 +31,7 @@ impl EventLoop {
     /// Create a new event loop from the channel to its script thread.
     pub fn new(script_chan: IpcSender<ConstellationControlMsg>) -> Rc<EventLoop> {
         Rc::new(EventLoop {
-            script_chan: script_chan,
+            script_chan,
             dont_send_or_sync: PhantomData,
         })
     }

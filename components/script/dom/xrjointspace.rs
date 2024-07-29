@@ -2,21 +2,24 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use euclid::RigidTransform3D;
+use webxr_api::{BaseSpace, Frame, InputId, Joint, JointFrame, Space};
+
 use crate::dom::bindings::reflector::reflect_dom_object;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::xrsession::{ApiPose, XRSession};
 use crate::dom::xrspace::XRSpace;
-use dom_struct::dom_struct;
-use euclid::RigidTransform3D;
-use webxr_api::{BaseSpace, Frame, InputId, Joint, JointFrame, Space};
 
 #[dom_struct]
 pub struct XRJointSpace {
     xrspace: XRSpace,
     #[ignore_malloc_size_of = "defined in rust-webxr"]
+    #[no_trace]
     input: InputId,
     #[ignore_malloc_size_of = "defined in rust-webxr"]
+    #[no_trace]
     joint: Joint,
 }
 

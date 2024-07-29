@@ -2,6 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+use std::str;
+
+use base::id::PipelineId;
+use devtools_traits::{
+    AutoMargins, ComputedNodeLayout, EvaluateJSReply, Modification, NodeInfo, TimelineMarker,
+    TimelineMarkerType,
+};
+use ipc_channel::ipc::IpcSender;
+use js::jsval::UndefinedValue;
+use js::rust::ToString;
+use uuid::Uuid;
+
 use crate::dom::bindings::codegen::Bindings::CSSStyleDeclarationBinding::CSSStyleDeclarationMethods;
 use crate::dom::bindings::codegen::Bindings::DOMRectBinding::DOMRectMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
@@ -19,21 +32,12 @@ use crate::dom::node::{window_from_node, Node, ShadowIncluding};
 use crate::realms::enter_realm;
 use crate::script_module::ScriptFetchOptions;
 use crate::script_thread::Documents;
-use devtools_traits::{AutoMargins, ComputedNodeLayout, TimelineMarkerType};
-use devtools_traits::{EvaluateJSReply, Modification, NodeInfo, TimelineMarker};
-use ipc_channel::ipc::IpcSender;
-use js::jsval::UndefinedValue;
-use js::rust::ToString;
-use msg::constellation_msg::PipelineId;
-use std::rc::Rc;
-use std::str;
-use uuid::Uuid;
 
 #[allow(unsafe_code)]
 pub fn handle_evaluate_js(global: &GlobalScope, eval: String, reply: IpcSender<EvaluateJSReply>) {
     // global.get_cx() returns a valid `JSContext` pointer, so this is safe.
     let result = unsafe {
-        let cx = global.get_cx();
+        let cx = GlobalScope::get_cx();
         let _ac = enter_realm(global);
         rooted!(in(*cx) let mut rval = UndefinedValue());
         let source_code = SourceCode::Text(Rc::new(DOMString::from_string(eval)));
@@ -42,7 +46,7 @@ pub fn handle_evaluate_js(global: &GlobalScope, eval: String, reply: IpcSender<E
             "<eval>",
             rval.handle_mut(),
             1,
-            ScriptFetchOptions::default_classic_script(&global),
+            ScriptFetchOptions::default_classic_script(global),
             global.api_base_url(),
         );
 
@@ -118,8 +122,8 @@ pub fn handle_get_children(
     node_id: String,
     reply: IpcSender<Option<Vec<NodeInfo>>>,
 ) {
-    match find_node_by_unique_id(documents, pipeline, &*node_id) {
-        None => return reply.send(None).unwrap(),
+    match find_node_by_unique_id(documents, pipeline, &node_id) {
+        None => reply.send(None).unwrap(),
         Some(parent) => {
             let children = parent.children().map(|child| child.summarize()).collect();
 
@@ -134,7 +138,7 @@ pub fn handle_get_layout(
     node_id: String,
     reply: IpcSender<Option<ComputedNodeLayout>>,
 ) {
-    let node = match find_node_by_unique_id(documents, pipeline, &*node_id) {
+    let node = match find_node_by_unique_id(documents, pipeline, &node_id) {
         None => return reply.send(None).unwrap(),
         Some(found_node) => found_node,
     };
@@ -156,23 +160,23 @@ pub fn handle_get_layout(
         .send(Some(ComputedNodeLayout {
             display: String::from(computed_style.Display()),
             position: String::from(computed_style.Position()),
-            zIndex: String::from(computed_style.ZIndex()),
-            boxSizing: String::from(computed_style.BoxSizing()),
-            autoMargins: determine_auto_margins(&node),
-            marginTop: String::from(computed_style.MarginTop()),
-            marginRight: String::from(computed_style.MarginRight()),
-            marginBottom: String::from(computed_style.MarginBottom()),
-            marginLeft: String::from(computed_style.MarginLeft()),
-            borderTopWidth: String::from(computed_style.BorderTopWidth()),
-            borderRightWidth: String::from(computed_style.BorderRightWidth()),
-            borderBottomWidth: String::from(computed_style.BorderBottomWidth()),
-            borderLeftWidth: String::from(computed_style.BorderLeftWidth()),
-            paddingTop: String::from(computed_style.PaddingTop()),
-            paddingRight: String::from(computed_style.PaddingRight()),
-            paddingBottom: String::from(computed_style.PaddingBottom()),
-            paddingLeft: String::from(computed_style.PaddingLeft()),
-            width: width,
-            height: height,
+            z_index: String::from(computed_style.ZIndex()),
+            box_sizing: String::from(computed_style.BoxSizing()),
+            auto_margins: determine_auto_margins(&node),
+            margin_top: String::from(computed_style.MarginTop()),
+            margin_right: String::from(computed_style.MarginRight()),
+            margin_bottom: String::from(computed_style.MarginBottom()),
+            margin_left: String::from(computed_style.MarginLeft()),
+            border_top_width: String::from(computed_style.BorderTopWidth()),
+            border_right_width: String::from(computed_style.BorderRightWidth()),
+            border_bottom_width: String::from(computed_style.BorderBottomWidth()),
+            border_left_width: String::from(computed_style.BorderLeftWidth()),
+            padding_top: String::from(computed_style.PaddingTop()),
+            padding_right: String::from(computed_style.PaddingRight()),
+            padding_bottom: String::from(computed_style.PaddingBottom()),
+            padding_left: String::from(computed_style.PaddingLeft()),
+            width,
+            height,
         }))
         .unwrap();
 }
@@ -194,7 +198,7 @@ pub fn handle_modify_attribute(
     node_id: String,
     modifications: Vec<Modification>,
 ) {
-    let node = match find_node_by_unique_id(documents, pipeline, &*node_id) {
+    let node = match find_node_by_unique_id(documents, pipeline, &node_id) {
         None => {
             return warn!(
                 "node id {} for pipeline id {} is not found",
@@ -209,14 +213,14 @@ pub fn handle_modify_attribute(
         .expect("should be getting layout of element");
 
     for modification in modifications {
-        match modification.newValue {
+        match modification.new_value {
             Some(string) => {
                 let _ = elem.SetAttribute(
-                    DOMString::from(modification.attributeName),
+                    DOMString::from(modification.attribute_name),
                     DOMString::from(string),
                 );
             },
-            None => elem.RemoveAttribute(DOMString::from(modification.attributeName)),
+            None => elem.RemoveAttribute(DOMString::from(modification.attribute_name)),
         }
     }
 }

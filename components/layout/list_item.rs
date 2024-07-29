@@ -5,20 +5,6 @@
 //! Layout for elements with a CSS `display` property of `list-item`. These elements consist of a
 //! block and an extra inline fragment for the marker.
 
-use crate::block::BlockFlow;
-use crate::context::{with_thread_local_font_context, LayoutContext};
-use crate::display_list::items::DisplayListSection;
-use crate::display_list::{
-    BorderPaintingMode, DisplayListBuildState, StackingContextCollectionState,
-};
-use crate::floats::FloatKind;
-use crate::flow::{Flow, FlowClass, OpaqueFlow};
-use crate::fragment::Overflow;
-use crate::fragment::{
-    CoordinateSystem, Fragment, FragmentBorderBoxIterator, GeneratedContentInfo,
-};
-use crate::generated_content;
-use crate::inline::InlineFlow;
 use app_units::Au;
 use euclid::default::Point2D;
 use style::computed_values::list_style_type::T as ListStyleType;
@@ -26,6 +12,20 @@ use style::computed_values::position::T as Position;
 use style::logical_geometry::LogicalSize;
 use style::properties::ComputedValues;
 use style::servo::restyle_damage::ServoRestyleDamage;
+
+use crate::block::BlockFlow;
+use crate::context::LayoutContext;
+use crate::display_list::items::DisplayListSection;
+use crate::display_list::{
+    BorderPaintingMode, DisplayListBuildState, StackingContextCollectionState,
+};
+use crate::floats::FloatKind;
+use crate::flow::{Flow, FlowClass, OpaqueFlow};
+use crate::fragment::{
+    CoordinateSystem, Fragment, FragmentBorderBoxIterator, GeneratedContentInfo, Overflow,
+};
+use crate::generated_content;
+use crate::inline::InlineFlow;
 
 #[allow(unsafe_code)]
 unsafe impl crate::flow::HasBaseFlow for ListItemFlow {}
@@ -49,10 +49,10 @@ impl ListItemFlow {
     ) -> ListItemFlow {
         let mut this = ListItemFlow {
             block_flow: BlockFlow::from_fragment_and_float_kind(main_fragment, flotation),
-            marker_fragments: marker_fragments,
+            marker_fragments,
         };
 
-        if let Some(ref marker) = this.marker_fragments.first() {
+        if let Some(marker) = this.marker_fragments.first() {
             match marker.style().get_list().list_style_type {
                 ListStyleType::Disc |
                 ListStyleType::None |
@@ -107,20 +107,18 @@ impl ListItemFlow {
             marker.border_box.size.inline = intrinsic_inline_sizes
                 .content_intrinsic_sizes
                 .preferred_inline_size;
-            marker_inline_start = marker_inline_start - marker.border_box.size.inline;
+            marker_inline_start -= marker.border_box.size.inline;
             marker.border_box.start.i = marker_inline_start;
         }
     }
 
     fn assign_marker_block_sizes(&mut self, layout_context: &LayoutContext) {
         // FIXME(pcwalton): Do this during flow construction, like `InlineFlow` does?
-        let marker_line_metrics = with_thread_local_font_context(layout_context, |font_context| {
-            InlineFlow::minimum_line_metrics_for_fragments(
-                &self.marker_fragments,
-                font_context,
-                &*self.block_flow.fragment.style,
-            )
-        });
+        let marker_line_metrics = InlineFlow::minimum_line_metrics_for_fragments(
+            &self.marker_fragments,
+            &layout_context.font_context,
+            &self.block_flow.fragment.style,
+        );
 
         for marker in &mut self.marker_fragments {
             marker.assign_replaced_block_size_if_necessary();
@@ -235,7 +233,7 @@ impl Flow for ListItemFlow {
             .relative_containing_block_size;
 
         for fragment in &self.marker_fragments {
-            overflow.union(&fragment.compute_overflow(&flow_size, &relative_containing_block_size))
+            overflow.union(&fragment.compute_overflow(&flow_size, relative_containing_block_size))
         }
         overflow
     }

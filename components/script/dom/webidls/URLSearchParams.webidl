@@ -9,14 +9,15 @@
 [Exposed=(Window,Worker)]
 interface URLSearchParams {
   [Throws] constructor(optional (sequence<sequence<USVString>> or record<USVString, USVString> or USVString) init = "");
-  void append(USVString name, USVString value);
-  void delete(USVString name);
+  readonly attribute unsigned long size;
+  undefined append(USVString name, USVString value);
+  undefined delete(USVString name, optional USVString value);
   USVString? get(USVString name);
   sequence<USVString> getAll(USVString name);
-  boolean has(USVString name);
-  void set(USVString name, USVString value);
+  boolean has(USVString name, optional USVString value);
+  undefined set(USVString name, USVString value);
 
-  void sort();
+  undefined sort();
 
   // Be careful with implementing iterable interface.
   // Search params might be mutated by URL::SetSearch while iterating (discussed in PR #10351).

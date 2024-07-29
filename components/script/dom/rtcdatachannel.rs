@@ -2,10 +2,24 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::ptr;
+
+use dom_struct::dom_struct;
+use js::conversions::ToJSValConvertible;
+use js::jsapi::{JSAutoRealm, JSObject};
+use js::jsval::UndefinedValue;
+use js::rust::CustomAutoRooterGuard;
+use js::typedarray::{ArrayBuffer, ArrayBufferView, CreateWith};
+use script_traits::serializable::BlobImpl;
+use servo_media::webrtc::{
+    DataChannelId, DataChannelInit, DataChannelMessage, DataChannelState, WebRtcError,
+};
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::RTCDataChannelBinding::RTCDataChannelInit;
-use crate::dom::bindings::codegen::Bindings::RTCDataChannelBinding::RTCDataChannelMethods;
-use crate::dom::bindings::codegen::Bindings::RTCDataChannelBinding::RTCDataChannelState;
+use crate::dom::bindings::codegen::Bindings::RTCDataChannelBinding::{
+    RTCDataChannelInit, RTCDataChannelMethods, RTCDataChannelState,
+};
 use crate::dom::bindings::codegen::Bindings::RTCErrorBinding::{RTCErrorDetailType, RTCErrorInit};
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -20,18 +34,6 @@ use crate::dom::messageevent::MessageEvent;
 use crate::dom::rtcerror::RTCError;
 use crate::dom::rtcerrorevent::RTCErrorEvent;
 use crate::dom::rtcpeerconnection::RTCPeerConnection;
-use dom_struct::dom_struct;
-use js::conversions::ToJSValConvertible;
-use js::jsapi::{JSAutoRealm, JSObject};
-use js::jsval::UndefinedValue;
-use js::rust::CustomAutoRooterGuard;
-use js::typedarray::{ArrayBuffer, ArrayBufferView, CreateWith};
-use script_traits::serializable::BlobImpl;
-use servo_media::webrtc::{
-    DataChannelId, DataChannelInit, DataChannelMessage, DataChannelState, WebRtcError,
-};
-use std::cell::Cell;
-use std::ptr;
 
 #[dom_struct]
 pub struct RTCDataChannel {
@@ -51,7 +53,7 @@ pub struct RTCDataChannel {
 }
 
 impl RTCDataChannel {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         peer_connection: &RTCPeerConnection,
         label: USVString,
@@ -70,10 +72,10 @@ impl RTCDataChannel {
                 .expect("Expected data channel id"),
         );
 
-        let channel = RTCDataChannel {
+        RTCDataChannel {
             eventtarget: EventTarget::new_inherited(),
             servo_media_id,
-            peer_connection: Dom::from_ref(&peer_connection),
+            peer_connection: Dom::from_ref(peer_connection),
             label,
             ordered: options.ordered,
             max_packet_life_time: options.maxPacketLifeTime,
@@ -83,9 +85,7 @@ impl RTCDataChannel {
             id: options.id,
             ready_state: Cell::new(RTCDataChannelState::Connecting),
             binary_type: DomRefCell::new(DOMString::from("blob")),
-        };
-
-        channel
+        }
     }
 
     pub fn new(
@@ -105,7 +105,7 @@ impl RTCDataChannel {
             global,
         );
 
-        peer_connection.register_data_channel(rtc_data_channel.servo_media_id, &*rtc_data_channel);
+        peer_connection.register_data_channel(rtc_data_channel.servo_media_id, &rtc_data_channel);
 
         rtc_data_channel
     }
@@ -135,7 +135,7 @@ impl RTCDataChannel {
 
     pub fn on_error(&self, error: WebRtcError) {
         let global = self.global();
-        let cx = global.get_cx();
+        let cx = GlobalScope::get_cx();
         let _ac = JSAutoRealm::new(*cx, self.reflector().get_jsobject().get());
         let init = RTCErrorInit {
             errorDetail: RTCErrorDetailType::Data_channel_failure,
@@ -157,7 +157,7 @@ impl RTCDataChannel {
     pub fn on_message(&self, channel_message: DataChannelMessage) {
         unsafe {
             let global = self.global();
-            let cx = global.get_cx();
+            let cx = GlobalScope::get_cx();
             let _ac = JSAutoRealm::new(*cx, self.reflector().get_jsobject().get());
             rooted!(in(*cx) let mut message = UndefinedValue());
 
@@ -198,17 +198,14 @@ impl RTCDataChannel {
     }
 
     pub fn on_state_change(&self, state: DataChannelState) {
-        match state {
-            DataChannelState::Closing => {
-                let event = Event::new(
-                    &self.global(),
-                    atom!("closing"),
-                    EventBubbles::DoesNotBubble,
-                    EventCancelable::NotCancelable,
-                );
-                event.upcast::<Event>().fire(self.upcast());
-            },
-            _ => {},
+        if let DataChannelState::Closing = state {
+            let event = Event::new(
+                &self.global(),
+                atom!("closing"),
+                EventBubbles::DoesNotBubble,
+                EventCancelable::NotCancelable,
+            );
+            event.upcast::<Event>().fire(self.upcast());
         };
         self.ready_state.set(state.into());
     }
@@ -376,9 +373,9 @@ impl From<&RTCDataChannelInit> for DataChannelInit {
 impl From<DataChannelState> for RTCDataChannelState {
     fn from(state: DataChannelState) -> RTCDataChannelState {
         match state {
-            DataChannelState::New |
-            DataChannelState::Connecting |
-            DataChannelState::__Unknown(_) => RTCDataChannelState::Connecting,
+            DataChannelState::Connecting | DataChannelState::__Unknown(_) => {
+                RTCDataChannelState::Connecting
+            },
             DataChannelState::Open => RTCDataChannelState::Open,
             DataChannelState::Closing => RTCDataChannelState::Closing,
             DataChannelState::Closed => RTCDataChannelState::Closed,

@@ -2,6 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
+use bluetooth_traits::blocklist::{uuid_is_blocklisted, Blocklist};
+use bluetooth_traits::{BluetoothRequest, BluetoothResponse};
+use dom_struct::dom_struct;
+use ipc_channel::ipc::IpcSender;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTCharacteristicBinding::BluetoothRemoteGATTCharacteristicMethods;
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTDescriptorBinding::BluetoothRemoteGATTDescriptorMethods;
@@ -19,11 +26,6 @@ use crate::dom::bluetoothremotegattcharacteristic::{
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::realms::InRealm;
-use bluetooth_traits::blocklist::{uuid_is_blocklisted, Blocklist};
-use bluetooth_traits::{BluetoothRequest, BluetoothResponse};
-use dom_struct::dom_struct;
-use ipc_channel::ipc::IpcSender;
-use std::rc::Rc;
 
 // http://webbluetoothcg.github.io/web-bluetooth/#bluetoothremotegattdescriptor
 #[dom_struct]
@@ -44,9 +46,9 @@ impl BluetoothRemoteGATTDescriptor {
         BluetoothRemoteGATTDescriptor {
             reflector_: Reflector::new(),
             characteristic: Dom::from_ref(characteristic),
-            uuid: uuid,
+            uuid,
             value: DomRefCell::new(None),
-            instance_id: instance_id,
+            instance_id,
         }
     }
 
@@ -93,7 +95,7 @@ impl BluetoothRemoteGATTDescriptorMethods for BluetoothRemoteGATTDescriptor {
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattdescriptor-readvalue
     fn ReadValue(&self, comp: InRealm) -> Rc<Promise> {
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
 
         // Step 1.
         if uuid_is_blocklisted(self.uuid.as_ref(), Blocklist::Reads) {
@@ -120,12 +122,12 @@ impl BluetoothRemoteGATTDescriptorMethods for BluetoothRemoteGATTDescriptor {
         self.get_bluetooth_thread()
             .send(BluetoothRequest::ReadValue(self.get_instance_id(), sender))
             .unwrap();
-        return p;
+        p
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattdescriptor-writevalue
     fn WriteValue(&self, value: ArrayBufferViewOrArrayBuffer, comp: InRealm) -> Rc<Promise> {
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
 
         // Step 1.
         if uuid_is_blocklisted(self.uuid.as_ref(), Blocklist::Writes) {
@@ -166,7 +168,7 @@ impl BluetoothRemoteGATTDescriptorMethods for BluetoothRemoteGATTDescriptor {
                 sender,
             ))
             .unwrap();
-        return p;
+        p
     }
 }
 

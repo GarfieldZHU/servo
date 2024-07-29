@@ -2,6 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use cssparser::{Parser as CssParser, ParserInput};
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use net_traits::ReferrerPolicy;
+use servo_arc::Arc;
+use style::media_queries::MediaList;
+use style::parser::ParserContext as CssParserContext;
+use style::stylesheets::{AllowImportRules, CssRuleType, Origin, Stylesheet, UrlExtraData};
+use style_traits::ParsingMode;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HTMLStyleElementBinding::HTMLStyleElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
@@ -18,21 +31,12 @@ use crate::dom::node::{
 use crate::dom::stylesheet::StyleSheet as DOMStyleSheet;
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::stylesheet_loader::{StylesheetLoader, StylesheetOwner};
-use cssparser::{Parser as CssParser, ParserInput};
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use net_traits::ReferrerPolicy;
-use servo_arc::Arc;
-use std::cell::Cell;
-use style::media_queries::MediaList;
-use style::parser::ParserContext as CssParserContext;
-use style::stylesheets::{AllowImportRules, CssRuleType, Origin, Stylesheet};
-use style_traits::ParsingMode;
 
 #[dom_struct]
 pub struct HTMLStyleElement {
     htmlelement: HTMLElement,
     #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
     stylesheet: DomRefCell<Option<Arc<Stylesheet>>>,
     cssom_stylesheet: MutNullableDom<CSSStyleSheet>,
     /// <https://html.spec.whatwg.org/multipage/#a-style-sheet-that-is-blocking-scripts>
@@ -62,18 +66,20 @@ impl HTMLStyleElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
         creator: ElementCreator,
     ) -> DomRoot<HTMLStyleElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLStyleElement::new_inherited(
                 local_name, prefix, document, creator,
             )),
             document,
+            proto,
         )
     }
 
@@ -94,14 +100,15 @@ impl HTMLStyleElement {
         let data = node
             .GetTextContent()
             .expect("Element.textContent must be a string");
-        let url = window.get_url();
+        let url_data = UrlExtraData(window.get_url().get_arc());
         let css_error_reporter = window.css_error_reporter();
         let context = CssParserContext::new(
             Origin::Author,
-            &url,
+            &url_data,
             Some(CssRuleType::Media),
             ParsingMode::DEFAULT,
             doc.quirks_mode(),
+            /* namespaces = */ Default::default(),
             css_error_reporter,
             None,
         );
@@ -112,14 +119,13 @@ impl HTMLStyleElement {
         let loader = StylesheetLoader::for_element(self.upcast());
         let sheet = Stylesheet::from_str(
             &data,
-            window.get_url(),
+            UrlExtraData(window.get_url().get_arc()),
             Origin::Author,
             mq,
             shared_lock,
             Some(&loader),
             css_error_reporter,
             doc.quirks_mode(),
-            self.line_number as u32,
             AllowImportRules::Yes,
         );
 
@@ -138,7 +144,7 @@ impl HTMLStyleElement {
     }
 
     // FIXME(emilio): This is duplicated with HTMLLinkElement::set_stylesheet.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn set_stylesheet(&self, s: Arc<Stylesheet>) {
         let stylesheets_owner = stylesheets_owner_from_node(self);
         if let Some(ref s) = *self.stylesheet.borrow() {
@@ -219,7 +225,7 @@ impl VirtualMethods for HTMLStyleElement {
     }
 
     fn unbind_from_tree(&self, context: &UnbindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.unbind_from_tree(context);
         }
 
@@ -269,8 +275,21 @@ impl StylesheetOwner for HTMLStyleElement {
 }
 
 impl HTMLStyleElementMethods for HTMLStyleElement {
-    // https://drafts.csswg.org/cssom/#dom-linkstyle-sheet
+    /// <https://drafts.csswg.org/cssom/#dom-linkstyle-sheet>
     fn GetSheet(&self) -> Option<DomRoot<DOMStyleSheet>> {
         self.get_cssom_stylesheet().map(DomRoot::upcast)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-style-disabled>
+    fn Disabled(&self) -> bool {
+        self.get_cssom_stylesheet()
+            .map_or(false, |sheet| sheet.disabled())
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-style-disabled>
+    fn SetDisabled(&self, value: bool) {
+        if let Some(sheet) = self.get_cssom_stylesheet() {
+            sheet.set_disabled(value);
+        }
     }
 }

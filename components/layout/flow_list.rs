@@ -2,13 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::flow::{Flow, FlowClass};
-use crate::flow_ref::FlowRef;
-use serde::ser::{Serialize, SerializeSeq, Serializer};
-use serde_json::{to_value, Map, Value};
 use std::collections::{linked_list, LinkedList};
 use std::ops::Deref;
 use std::sync::Arc;
+
+use serde::ser::{Serialize, SerializeSeq, Serializer};
+use serde_json::{to_value, Map, Value};
+
+use crate::flow::{Flow, FlowClass};
+use crate::flow_ref::FlowRef;
 
 /// This needs to be reworked now that we have dynamically-sized types in Rust.
 /// Until then, it's just a wrapper around LinkedList.
@@ -94,7 +96,7 @@ impl FlowList {
     /// SECURITY-NOTE(pcwalton): This does not hand out `FlowRef`s by design. Do not add a method
     /// to do so! See the comment above in `FlowList`.
     #[inline]
-    pub fn iter<'a>(&'a self) -> FlowListIterator {
+    pub fn iter(&self) -> FlowListIterator {
         FlowListIterator {
             it: self.flows.iter(),
         }
@@ -136,6 +138,12 @@ impl FlowList {
         FlowList {
             flows: self.flows.split_off(i),
         }
+    }
+}
+
+impl Default for FlowList {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -185,7 +193,7 @@ pub struct FlowListRandomAccessMut<'a> {
 }
 
 impl<'a> FlowListRandomAccessMut<'a> {
-    pub fn get<'b>(&'b mut self, index: usize) -> &'b mut dyn Flow {
+    pub fn get(&mut self, index: usize) -> &mut dyn Flow {
         while index >= self.cache.len() {
             match self.iterator.next() {
                 None => panic!("Flow index out of range!"),

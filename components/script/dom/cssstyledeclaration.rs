@@ -2,6 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cmp::Ordering;
+
+use dom_struct::dom_struct;
+use html5ever::local_name;
+use lazy_static::lazy_static;
+use servo_arc::Arc;
+use servo_url::ServoUrl;
+use style::attr::AttrValue;
+use style::properties::{
+    parse_one_declaration_into, parse_style_attribute, Importance, LonghandId,
+    PropertyDeclarationBlock, PropertyId, ShorthandId, SourcePropertyDeclaration,
+};
+use style::selector_parser::PseudoElement;
+use style::shared_lock::Locked;
+use style::stylesheets::{CssRuleType, Origin, UrlExtraData};
+use style_traits::ParsingMode;
+
 use crate::dom::bindings::codegen::Bindings::CSSStyleDeclarationBinding::CSSStyleDeclarationMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
@@ -13,20 +30,6 @@ use crate::dom::cssrule::CSSRule;
 use crate::dom::element::Element;
 use crate::dom::node::{document_from_node, stylesheets_owner_from_node, window_from_node, Node};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_arc::Arc;
-use servo_url::ServoUrl;
-use style::attr::AttrValue;
-use style::properties::{
-    parse_one_declaration_into, parse_style_attribute, SourcePropertyDeclaration,
-};
-use style::properties::{
-    Importance, LonghandId, PropertyDeclarationBlock, PropertyId, ShorthandId,
-};
-use style::selector_parser::PseudoElement;
-use style::shared_lock::Locked;
-use style::stylesheets::{CssRuleType, Origin};
-use style_traits::ParsingMode;
 
 // http://dev.w3.org/csswg/cssom/#the-cssstyledeclaration-interface
 #[dom_struct]
@@ -34,16 +37,19 @@ pub struct CSSStyleDeclaration {
     reflector_: Reflector,
     owner: CSSStyleOwner,
     readonly: bool,
+    #[no_trace]
     pseudo: Option<PseudoElement>,
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub enum CSSStyleOwner {
     Element(Dom<Element>),
     CSSRule(
         Dom<CSSRule>,
-        #[ignore_malloc_size_of = "Arc"] Arc<Locked<PropertyDeclarationBlock>>,
+        #[ignore_malloc_size_of = "Arc"]
+        #[no_trace]
+        Arc<Locked<PropertyDeclarationBlock>>,
     ),
 }
 
@@ -66,9 +72,8 @@ impl CSSStyleOwner {
                 let result = if attr.is_some() {
                     let lock = attr.as_ref().unwrap();
                     let mut guard = shared_lock.write();
-                    let mut pdb = lock.write_with(&mut guard);
-                    let result = f(&mut pdb, &mut changed);
-                    result
+                    let pdb = lock.write_with(&mut guard);
+                    f(pdb, &mut changed)
                 } else {
                     let mut pdb = PropertyDeclarationBlock::new();
                     let result = f(&mut pdb, &mut changed);
@@ -157,12 +162,15 @@ impl CSSStyleOwner {
     fn base_url(&self) -> ServoUrl {
         match *self {
             CSSStyleOwner::Element(ref el) => window_from_node(&**el).Document().base_url(),
-            CSSStyleOwner::CSSRule(ref rule, _) => (*rule
-                .parent_stylesheet()
-                .style_stylesheet()
-                .contents
-                .url_data
-                .read())
+            CSSStyleOwner::CSSRule(ref rule, _) => ServoUrl::from(
+                rule.parent_stylesheet()
+                    .style_stylesheet()
+                    .contents
+                    .url_data
+                    .read()
+                    .0
+                    .clone(),
+            )
             .clone(),
         }
     }
@@ -206,7 +214,7 @@ fn remove_property(decls: &mut PropertyDeclarationBlock, id: &PropertyId) -> boo
 }
 
 impl CSSStyleDeclaration {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         owner: CSSStyleOwner,
         pseudo: Option<PseudoElement>,
@@ -214,13 +222,13 @@ impl CSSStyleDeclaration {
     ) -> CSSStyleDeclaration {
         CSSStyleDeclaration {
             reflector_: Reflector::new(),
-            owner: owner,
+            owner,
             readonly: modification_access == CSSModificationAccess::Readonly,
-            pseudo: pseudo,
+            pseudo,
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         global: &Window,
         owner: CSSStyleOwner,
@@ -248,7 +256,7 @@ impl CSSStyleDeclaration {
                     return DOMString::new();
                 }
                 let addr = node.to_trusted_node_address();
-                window_from_node(node).resolved_style_query(addr, self.pseudo.clone(), property)
+                window_from_node(node).resolved_style_query(addr, self.pseudo, property)
             },
         }
     }
@@ -298,13 +306,13 @@ impl CSSStyleDeclaration {
             // Step 5
             let window = self.owner.window();
             let quirks_mode = window.Document().quirks_mode();
-            let mut declarations = SourcePropertyDeclaration::new();
+            let mut declarations = SourcePropertyDeclaration::default();
             let result = parse_one_declaration_into(
                 &mut declarations,
                 id,
                 &value,
                 Origin::Author,
-                &self.owner.base_url(),
+                &UrlExtraData(self.owner.base_url().get_arc()),
                 window.css_error_reporter(),
                 ParsingMode::DEFAULT,
                 quirks_mode,
@@ -336,9 +344,44 @@ impl CSSStyleDeclaration {
     }
 }
 
+lazy_static! {
+    static ref ENABLED_LONGHAND_PROPERTIES: Vec<LonghandId> = {
+        // The 'all' shorthand contains all the enabled longhands with 2 exceptions:
+        // 'direction' and 'unicode-bidi', so these must be added afterward.
+        let mut enabled_longhands: Vec<LonghandId> = ShorthandId::All.longhands().collect();
+        if PropertyId::NonCustom(LonghandId::Direction.into()).enabled_for_all_content() {
+            enabled_longhands.push(LonghandId::Direction);
+        }
+        if PropertyId::NonCustom(LonghandId::UnicodeBidi.into()).enabled_for_all_content() {
+            enabled_longhands.push(LonghandId::UnicodeBidi);
+        }
+
+        // Sort lexicographically, but with vendor-prefixed properties after standard ones.
+        enabled_longhands.sort_unstable_by(|a, b| {
+            let a = a.name();
+            let b = b.name();
+            let is_a_vendor_prefixed = a.starts_with('-');
+            let is_b_vendor_prefixed = b.starts_with('-');
+            if is_a_vendor_prefixed == is_b_vendor_prefixed {
+                a.partial_cmp(b).unwrap()
+            } else if is_b_vendor_prefixed {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        });
+        enabled_longhands
+    };
+}
+
 impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-length
     fn Length(&self) -> u32 {
+        if self.readonly {
+            // Readonly style declarations are used for getComputedStyle.
+            // TODO: include custom properties whose computed value is not the guaranteed-invalid value.
+            return ENABLED_LONGHAND_PROPERTIES.len() as u32;
+        }
         self.owner.with_block(|pdb| pdb.declarations().len() as u32)
     }
 
@@ -358,6 +401,10 @@ impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-getpropertypriority
     fn GetPropertyPriority(&self, property: DOMString) -> DOMString {
+        if self.readonly {
+            // Readonly style declarations are used for getComputedStyle.
+            return DOMString::new();
+        }
         let id = match PropertyId::parse_enabled_for_all_content(&property) {
             Ok(id) => id,
             Err(..) => return DOMString::new(),
@@ -412,13 +459,13 @@ impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-cssfloat
     fn CssFloat(&self) -> DOMString {
-        self.get_property_value(PropertyId::Longhand(LonghandId::Float))
+        self.get_property_value(PropertyId::NonCustom(LonghandId::Float.into()))
     }
 
     // https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-cssfloat
     fn SetCssFloat(&self, value: DOMString) -> ErrorResult {
         self.set_property(
-            PropertyId::Longhand(LonghandId::Float),
+            PropertyId::NonCustom(LonghandId::Float.into()),
             value,
             DOMString::new(),
         )
@@ -426,20 +473,24 @@ impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
 
     // https://dev.w3.org/csswg/cssom/#the-cssstyledeclaration-interface
     fn IndexedGetter(&self, index: u32) -> Option<DOMString> {
+        if self.readonly {
+            // Readonly style declarations are used for getComputedStyle.
+            // TODO: include custom properties whose computed value is not the guaranteed-invalid value.
+            let longhand = ENABLED_LONGHAND_PROPERTIES.get(index as usize)?;
+            return Some(DOMString::from(longhand.name()));
+        }
         self.owner.with_block(|pdb| {
             let declaration = pdb.declarations().get(index as usize)?;
-            let important = pdb.declarations_importance().get(index as usize)?;
-            let mut css = String::new();
-            declaration.to_css(&mut css).unwrap();
-            if important {
-                css += " !important";
-            }
-            Some(DOMString::from(css))
+            Some(DOMString::from(declaration.id().name()))
         })
     }
 
     // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-csstext
     fn CssText(&self) -> DOMString {
+        if self.readonly {
+            // Readonly style declarations are used for getComputedStyle.
+            return DOMString::new();
+        }
         self.owner.with_block(|pdb| {
             let mut serialization = String::new();
             pdb.to_css(&mut serialization).unwrap();
@@ -461,7 +512,7 @@ impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
             // Step 3
             *pdb = parse_style_attribute(
                 &value,
-                &self.owner.base_url(),
+                &UrlExtraData(self.owner.base_url().get_arc()),
                 window.css_error_reporter(),
                 quirks_mode,
                 CssRuleType::Style,
@@ -472,5 +523,5 @@ impl CSSStyleDeclarationMethods for CSSStyleDeclaration {
     }
 
     // https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-_camel_cased_attribute
-    css_properties_accessors!(css_properties);
+    style::css_properties_accessors!(css_properties);
 }

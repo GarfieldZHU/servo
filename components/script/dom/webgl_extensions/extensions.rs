@@ -2,6 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::HashMap;
+use std::iter::FromIterator;
+use std::ptr::NonNull;
+
+use canvas_traits::webgl::{GlType, TexFormat, WebGLSLVersion, WebGLVersion};
+use fnv::{FnvHashMap, FnvHashSet};
+use js::jsapi::JSObject;
+use malloc_size_of::MallocSizeOf;
+use sparkle::gl::{self, GLenum};
+
 use super::wrapper::{TypedWebGLExtensionWrapper, WebGLExtensionWrapper};
 use super::{ext, WebGLExtension, WebGLExtensionSpec};
 use crate::dom::bindings::cell::DomRefCell;
@@ -18,14 +28,6 @@ use crate::dom::oestexturehalffloat::OESTextureHalfFloat;
 use crate::dom::webglcolorbufferfloat::WEBGLColorBufferFloat;
 use crate::dom::webglrenderingcontext::WebGLRenderingContext;
 use crate::dom::webgltexture::TexCompression;
-use canvas_traits::webgl::{GlType, TexFormat, WebGLSLVersion, WebGLVersion};
-use fnv::{FnvHashMap, FnvHashSet};
-use js::jsapi::JSObject;
-use malloc_size_of::MallocSizeOf;
-use sparkle::gl::{self, GLenum};
-use std::collections::HashMap;
-use std::iter::FromIterator;
-use std::ptr::NonNull;
 
 // Data types that are implemented for texImage2D and texSubImage2D in a WebGL 1.0 context
 // but must trigger a InvalidValue error until the related WebGL Extensions are enabled.
@@ -82,6 +84,7 @@ struct WebGLExtensionFeatures {
     gl_extensions: FnvHashSet<String>,
     disabled_tex_types: FnvHashSet<GLenum>,
     not_filterable_tex_types: FnvHashSet<GLenum>,
+    #[no_trace]
     effective_tex_internal_formats: FnvHashMap<TexFormatType, TexFormat>,
     /// WebGL Hint() targets enabled by extensions.
     hint_targets: FnvHashSet<GLenum>,
@@ -161,13 +164,16 @@ impl WebGLExtensionFeatures {
 }
 
 /// Handles the list of implemented, supported and enabled WebGL extensions.
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 pub struct WebGLExtensions {
     extensions: DomRefCell<HashMap<String, Box<dyn WebGLExtensionWrapper>>>,
     features: DomRefCell<WebGLExtensionFeatures>,
+    #[no_trace]
     webgl_version: WebGLVersion,
+    #[no_trace]
     api_type: GlType,
+    #[no_trace]
     glsl_version: WebGLSLVersion,
 }
 
@@ -209,13 +215,13 @@ impl WebGLExtensions {
         self.extensions
             .borrow()
             .iter()
-            .filter(|ref v| {
+            .filter(|v| {
                 if let WebGLExtensionSpec::Specific(version) = v.1.spec() {
                     if self.webgl_version != version {
                         return false;
                     }
                 }
-                v.1.is_supported(&self)
+                v.1.is_supported(self)
             })
             .map(|ref v| v.1.name())
             .collect()
@@ -273,11 +279,11 @@ impl WebGLExtensions {
     }
 
     pub fn is_tex_type_enabled(&self, data_type: GLenum) -> bool {
-        self.features
+        !self
+            .features
             .borrow()
             .disabled_tex_types
-            .get(&data_type)
-            .is_none()
+            .contains(&data_type)
     }
 
     pub fn add_effective_tex_internal_format(
@@ -315,11 +321,11 @@ impl WebGLExtensions {
     }
 
     pub fn is_filterable(&self, text_data_type: u32) -> bool {
-        self.features
+        !self
+            .features
             .borrow()
             .not_filterable_tex_types
-            .get(&text_data_type)
-            .is_none()
+            .contains(&text_data_type)
     }
 
     pub fn enable_hint_target(&self, name: GLenum) {
@@ -400,7 +406,7 @@ impl WebGLExtensions {
             .borrow()
             .tex_compression_formats
             .keys()
-            .map(|&k| k)
+            .copied()
             .collect()
     }
 
@@ -452,10 +458,10 @@ impl WebGLExtensions {
     }
 
     pub fn effective_type(&self, type_: u32) -> u32 {
-        if type_ == OESTextureHalfFloatConstants::HALF_FLOAT_OES {
-            if !self.supports_gl_extension("GL_OES_texture_half_float") {
-                return gl::HALF_FLOAT;
-            }
+        if type_ == OESTextureHalfFloatConstants::HALF_FLOAT_OES &&
+            !self.supports_gl_extension("GL_OES_texture_half_float")
+        {
+            return gl::HALF_FLOAT;
         }
         type_
     }
@@ -466,5 +472,5 @@ impl WebGLExtensions {
 }
 
 // Helper structs
-#[derive(Eq, Hash, JSTraceable, MallocSizeOf, PartialEq)]
+#[derive(Eq, Hash, MallocSizeOf, PartialEq)]
 struct TexFormatType(TexFormat, u32);

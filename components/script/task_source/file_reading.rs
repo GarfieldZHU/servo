@@ -2,19 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use base::id::PipelineId;
+
 use crate::dom::domexception::DOMErrorName;
 use crate::dom::filereader::{FileReader, GenerationId, ReadMetaData, TrustedFileReader};
 use crate::script_runtime::{CommonScriptMsg, ScriptChan, ScriptThreadEventCategory};
 use crate::task::{TaskCanceller, TaskOnce};
 use crate::task_source::{TaskSource, TaskSourceName};
-use msg::constellation_msg::PipelineId;
 
 #[derive(JSTraceable)]
-pub struct FileReadingTaskSource(pub Box<dyn ScriptChan + Send + 'static>, pub PipelineId);
+pub struct FileReadingTaskSource(
+    pub Box<dyn ScriptChan + Send + 'static>,
+    #[no_trace] pub PipelineId,
+);
 
 impl Clone for FileReadingTaskSource {
     fn clone(&self) -> FileReadingTaskSource {
-        FileReadingTaskSource(self.0.clone(), self.1.clone())
+        FileReadingTaskSource(self.0.clone(), self.1)
     }
 }
 

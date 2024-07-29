@@ -2,26 +2,47 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::default::Default;
+use std::ffi::CString;
+use std::hash::BuildHasherDefault;
+use std::mem;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
+
+use deny_public_fields::DenyPublicFields;
+use dom_struct::dom_struct;
+use fnv::FnvHasher;
+use js::jsapi::JS_GetFunctionObject;
+use js::rust::wrappers::CompileFunction;
+use js::rust::{
+    transform_u16_to_source_text, CompileOptionsWrapper, HandleObject, RootedObjectVectorWrapper,
+};
+use libc::c_char;
+use servo_atoms::Atom;
+use servo_url::ServoUrl;
+
+use super::bindings::trace::HashMapTracedValues;
 use crate::dom::beforeunloadevent::BeforeUnloadEvent;
 use crate::dom::bindings::callback::{CallbackContainer, CallbackFunction, ExceptionHandling};
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BeforeUnloadEventBinding::BeforeUnloadEventMethods;
 use crate::dom::bindings::codegen::Bindings::ErrorEventBinding::ErrorEventMethods;
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
-use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::EventHandlerNonNull;
-use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::OnBeforeUnloadEventHandlerNonNull;
-use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::OnErrorEventHandlerNonNull;
+use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::{
+    EventHandlerNonNull, OnBeforeUnloadEventHandlerNonNull, OnErrorEventHandlerNonNull,
+};
 use crate::dom::bindings::codegen::Bindings::EventListenerBinding::EventListener;
-use crate::dom::bindings::codegen::Bindings::EventTargetBinding::AddEventListenerOptions;
-use crate::dom::bindings::codegen::Bindings::EventTargetBinding::EventListenerOptions;
-use crate::dom::bindings::codegen::Bindings::EventTargetBinding::EventTargetMethods;
+use crate::dom::bindings::codegen::Bindings::EventTargetBinding::{
+    AddEventListenerOptions, EventListenerOptions, EventTargetMethods,
+};
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
-use crate::dom::bindings::codegen::UnionTypes::AddEventListenerOptionsOrBoolean;
-use crate::dom::bindings::codegen::UnionTypes::EventListenerOptionsOrBoolean;
-use crate::dom::bindings::codegen::UnionTypes::EventOrString;
+use crate::dom::bindings::codegen::UnionTypes::{
+    AddEventListenerOptionsOrBoolean, EventListenerOptionsOrBoolean, EventOrString,
+};
 use crate::dom::bindings::error::{report_pending_exception, Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::element::Element;
@@ -34,23 +55,6 @@ use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::window::Window;
 use crate::dom::workerglobalscope::WorkerGlobalScope;
 use crate::realms::{enter_realm, InRealm};
-use dom_struct::dom_struct;
-use fnv::FnvHasher;
-use js::jsapi::JS_GetFunctionObject;
-use js::rust::transform_u16_to_source_text;
-use js::rust::wrappers::CompileFunction;
-use js::rust::{CompileOptionsWrapper, RootedObjectVectorWrapper};
-use libc::c_char;
-use servo_atoms::Atom;
-use servo_url::ServoUrl;
-use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::HashMap;
-use std::default::Default;
-use std::ffi::CString;
-use std::hash::BuildHasherDefault;
-use std::mem;
-use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
 
 #[derive(Clone, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum CommonEventHandler {
@@ -81,6 +85,7 @@ pub enum ListenerPhase {
 #[derive(Clone, JSTraceable, MallocSizeOf, PartialEq)]
 struct InternalRawUncompiledHandler {
     source: DOMString,
+    #[no_trace]
     url: ServoUrl,
     line: usize,
 }
@@ -131,11 +136,11 @@ impl EventListenerType {
         owner: &EventTarget,
         ty: &Atom,
     ) -> Option<CompiledEventListener> {
-        match self {
-            &mut EventListenerType::Inline(ref mut inline) => inline
+        match *self {
+            EventListenerType::Inline(ref mut inline) => inline
                 .get_compiled_handler(owner, ty)
                 .map(CompiledEventListener::Handler),
-            &mut EventListenerType::Additive(ref listener) => {
+            EventListenerType::Additive(ref listener) => {
                 Some(CompiledEventListener::Listener(listener.clone()))
             },
         }
@@ -184,7 +189,7 @@ impl CompiledEventListener {
                     CommonEventHandler::ErrorEventHandler(ref handler) => {
                         if let Some(event) = event.downcast::<ErrorEvent>() {
                             if object.is::<Window>() || object.is::<WorkerGlobalScope>() {
-                                let cx = object.global().get_cx();
+                                let cx = GlobalScope::get_cx();
                                 rooted!(in(*cx) let error = event.Error(cx));
                                 let return_value = handler.Call_(
                                     object,
@@ -199,7 +204,7 @@ impl CompiledEventListener {
                                 if let Ok(return_value) = return_value {
                                     rooted!(in(*cx) let return_value = return_value);
                                     if return_value.handle().is_boolean() &&
-                                        return_value.handle().to_boolean() == true
+                                        return_value.handle().to_boolean()
                                     {
                                         event.upcast::<Event>().PreventDefault();
                                     }
@@ -242,12 +247,12 @@ impl CompiledEventListener {
 
                     CommonEventHandler::EventHandler(ref handler) => {
                         if let Ok(value) = handler.Call_(object, event, exception_handle) {
-                            let cx = object.global().get_cx();
+                            let cx = GlobalScope::get_cx();
                             rooted!(in(*cx) let value = value);
                             let value = value.handle();
 
                             //Step 5
-                            let should_cancel = value.is_boolean() && value.to_boolean() == false;
+                            let should_cancel = value.is_boolean() && !value.to_boolean();
 
                             if should_cancel {
                                 // FIXME: spec says to set the cancelled flag directly
@@ -337,14 +342,14 @@ impl EventListeners {
     fn has_listeners(&self) -> bool {
         // TODO: add, and take into account, a 'removed' field?
         // https://dom.spec.whatwg.org/#event-listener-removed
-        self.0.len() > 0
+        !self.0.is_empty()
     }
 }
 
 #[dom_struct]
 pub struct EventTarget {
     reflector_: Reflector,
-    handlers: DomRefCell<HashMap<Atom, EventListeners, BuildHasherDefault<FnvHasher>>>,
+    handlers: DomRefCell<HashMapTracedValues<Atom, EventListeners, BuildHasherDefault<FnvHasher>>>,
 }
 
 impl EventTarget {
@@ -355,15 +360,20 @@ impl EventTarget {
         }
     }
 
-    fn new(global: &GlobalScope) -> DomRoot<EventTarget> {
-        reflect_dom_object(Box::new(EventTarget::new_inherited()), global)
+    fn new(global: &GlobalScope, proto: Option<HandleObject>) -> DomRoot<EventTarget> {
+        reflect_dom_object_with_proto(Box::new(EventTarget::new_inherited()), global, proto)
     }
 
     #[allow(non_snake_case)]
-    pub fn Constructor(global: &GlobalScope) -> Fallible<DomRoot<EventTarget>> {
-        Ok(EventTarget::new(global))
+    pub fn Constructor(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+    ) -> Fallible<DomRoot<EventTarget>> {
+        Ok(EventTarget::new(global, proto))
     }
 
+    /// Determine if there are any listeners for a given event type.
+    /// See <https://github.com/whatwg/dom/issues/453>.
     pub fn has_listeners_for(&self, type_: &Atom) -> bool {
         match self.handlers.borrow().get(type_) {
             Some(listeners) => listeners.has_listeners(),
@@ -405,10 +415,9 @@ impl EventTarget {
             Vacant(entry) => entry.insert(EventListeners(vec![])),
         };
 
-        let idx = entries.iter().position(|ref entry| match entry.listener {
-            EventListenerType::Inline(_) => true,
-            _ => false,
-        });
+        let idx = entries
+            .iter()
+            .position(|entry| matches!(entry.listener, EventListenerType::Inline(_)));
 
         match idx {
             Some(idx) => match listener {
@@ -437,8 +446,8 @@ impl EventTarget {
         let mut handlers = self.handlers.borrow_mut();
 
         let listener = EventListenerType::Additive(listener.clone());
-        for entries in handlers.get_mut(ty) {
-            entries.drain_filter(|e| e.listener == listener && e.once);
+        if let Some(entries) = handlers.get_mut(ty) {
+            entries.retain(|e| e.listener != listener || !e.once)
         }
     }
 
@@ -458,11 +467,7 @@ impl EventTarget {
         ty: &str,
         source: DOMString,
     ) {
-        let handler = InternalRawUncompiledHandler {
-            source: source,
-            line: line,
-            url: url,
-        };
+        let handler = InternalRawUncompiledHandler { source, line, url };
         self.set_inline_event_listener(
             Atom::from(ty),
             Some(InlineEventListener::Uncompiled(handler)),
@@ -507,25 +512,25 @@ impl EventTarget {
 
         // Step 3.8 TODO: settings objects not implemented
         let window = document.window();
-        let _ac = enter_realm(&*window);
+        let _ac = enter_realm(window);
 
         // Step 3.9
 
         let name = CString::new(format!("on{}", &**ty)).unwrap();
 
         // Step 3.9, subsection ParameterList
-        const ARG_NAMES: &[*const c_char] = &[b"event\0" as *const u8 as *const c_char];
+        const ARG_NAMES: &[*const c_char] = &[c"event".as_ptr()];
         const ERROR_ARG_NAMES: &[*const c_char] = &[
-            b"event\0" as *const u8 as *const c_char,
-            b"source\0" as *const u8 as *const c_char,
-            b"lineno\0" as *const u8 as *const c_char,
-            b"colno\0" as *const u8 as *const c_char,
-            b"error\0" as *const u8 as *const c_char,
+            c"event".as_ptr(),
+            c"source".as_ptr(),
+            c"lineno".as_ptr(),
+            c"colno".as_ptr(),
+            c"error".as_ptr(),
         ];
         let is_error = ty == &atom!("error") && self.is::<Window>();
         let args = if is_error { ERROR_ARG_NAMES } else { ARG_NAMES };
 
-        let cx = window.get_cx();
+        let cx = GlobalScope::get_cx();
         let options = unsafe {
             CompileOptionsWrapper::new(*cx, &handler.url.to_string(), handler.line as u32)
         };
@@ -555,7 +560,7 @@ impl EventTarget {
         if handler.get().is_null() {
             // Step 3.7
             unsafe {
-                let ar = enter_realm(&*self);
+                let ar = enter_realm(self);
                 // FIXME(#13152): dispatch error event.
                 report_pending_exception(*cx, false, InRealm::Entered(&ar));
             }
@@ -574,25 +579,24 @@ impl EventTarget {
             Some(CommonEventHandler::ErrorEventHandler(unsafe {
                 OnErrorEventHandlerNonNull::new(cx, funobj)
             }))
+        } else if ty == &atom!("beforeunload") {
+            Some(CommonEventHandler::BeforeUnloadEventHandler(unsafe {
+                OnBeforeUnloadEventHandlerNonNull::new(cx, funobj)
+            }))
         } else {
-            if ty == &atom!("beforeunload") {
-                Some(CommonEventHandler::BeforeUnloadEventHandler(unsafe {
-                    OnBeforeUnloadEventHandlerNonNull::new(cx, funobj)
-                }))
-            } else {
-                Some(CommonEventHandler::EventHandler(unsafe {
-                    EventHandlerNonNull::new(cx, funobj)
-                }))
-            }
+            Some(CommonEventHandler::EventHandler(unsafe {
+                EventHandlerNonNull::new(cx, funobj)
+            }))
         }
     }
 
     #[allow(unsafe_code)]
-    pub fn set_event_handler_common<T: CallbackContainer>(&self, ty: &str, listener: Option<Rc<T>>)
-    where
-        T: CallbackContainer,
-    {
-        let cx = self.global().get_cx();
+    pub fn set_event_handler_common<T: CallbackContainer>(
+        &self,
+        ty: &str,
+        listener: Option<Rc<T>>,
+    ) {
+        let cx = GlobalScope::get_cx();
 
         let event_listener = listener.map(|listener| {
             InlineEventListener::Compiled(CommonEventHandler::EventHandler(unsafe {
@@ -603,11 +607,8 @@ impl EventTarget {
     }
 
     #[allow(unsafe_code)]
-    pub fn set_error_event_handler<T: CallbackContainer>(&self, ty: &str, listener: Option<Rc<T>>)
-    where
-        T: CallbackContainer,
-    {
-        let cx = self.global().get_cx();
+    pub fn set_error_event_handler<T: CallbackContainer>(&self, ty: &str, listener: Option<Rc<T>>) {
+        let cx = GlobalScope::get_cx();
 
         let event_listener = listener.map(|listener| {
             InlineEventListener::Compiled(CommonEventHandler::ErrorEventHandler(unsafe {
@@ -622,10 +623,8 @@ impl EventTarget {
         &self,
         ty: &str,
         listener: Option<Rc<T>>,
-    ) where
-        T: CallbackContainer,
-    {
-        let cx = self.global().get_cx();
+    ) {
+        let cx = GlobalScope::get_cx();
 
         let event_listener = listener.map(|listener| {
             InlineEventListener::Compiled(CommonEventHandler::BeforeUnloadEventHandler(unsafe {
@@ -637,7 +636,7 @@ impl EventTarget {
 
     #[allow(unsafe_code)]
     pub fn get_event_handler_common<T: CallbackContainer>(&self, ty: &str) -> Option<Rc<T>> {
-        let cx = self.global().get_cx();
+        let cx = GlobalScope::get_cx();
         let listener = self.get_inline_event_listener(&Atom::from(ty));
         unsafe {
             listener.map(|listener| {
@@ -712,7 +711,7 @@ impl EventTarget {
             ListenerPhase::Bubbling
         };
         let new_entry = EventListenerEntry {
-            phase: phase,
+            phase,
             listener: EventListenerType::Additive(listener),
             once: options.once,
         };
@@ -728,20 +727,19 @@ impl EventTarget {
         listener: Option<Rc<EventListener>>,
         options: EventListenerOptions,
     ) {
-        let ref listener = match listener {
-            Some(l) => l,
-            None => return,
+        let Some(ref listener) = listener else {
+            return;
         };
         let mut handlers = self.handlers.borrow_mut();
         let entry = handlers.get_mut(&Atom::from(ty));
-        for entry in entry {
+        if let Some(entry) = entry {
             let phase = if options.capture {
                 ListenerPhase::Capturing
             } else {
                 ListenerPhase::Bubbling
             };
             let old_entry = EventListenerEntry {
-                phase: phase,
+                phase,
                 listener: EventListenerType::Additive(listener.clone()),
                 once: false,
             };

@@ -3,11 +3,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#the-domstringmap-interface
-[Exposed=Window, OverrideBuiltins]
+[Exposed=Window, LegacyOverrideBuiltIns]
 interface DOMStringMap {
   getter DOMString (DOMString name);
   [CEReactions, Throws]
-  setter void (DOMString name, DOMString value);
+  setter undefined (DOMString name, DOMString value);
   [CEReactions]
-  deleter void (DOMString name);
+  deleter undefined (DOMString name);
 };

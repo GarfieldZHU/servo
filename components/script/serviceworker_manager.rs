@@ -7,29 +7,29 @@
 //! If an active service worker timeouts, then it removes the descriptor entry from its
 //! active_workers map
 
-use crate::dom::abstractworker::WorkerScriptMsg;
-use crate::dom::serviceworkerglobalscope::{
-    ServiceWorkerControlMsg, ServiceWorkerGlobalScope, ServiceWorkerScriptMsg,
-};
-use crate::dom::serviceworkerregistration::longest_prefix_match;
-use crate::script_runtime::ContextForRequestInterrupt;
-use crossbeam_channel::{unbounded, Receiver, RecvError, Sender};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+
+use base::id::{PipelineNamespace, ServiceWorkerId, ServiceWorkerRegistrationId};
+use crossbeam_channel::{select, unbounded, Receiver, RecvError, Sender};
 use ipc_channel::ipc::{self, IpcSender};
 use ipc_channel::router::ROUTER;
-use msg::constellation_msg::PipelineNamespace;
-use msg::constellation_msg::{ServiceWorkerId, ServiceWorkerRegistrationId};
 use net_traits::{CoreResourceMsg, CustomResponseMediator};
 use script_traits::{
     DOMMessage, Job, JobError, JobResult, JobResultValue, JobType, SWManagerMsg, SWManagerSenders,
     ScopeThings, ServiceWorkerManagerFactory, ServiceWorkerMsg,
 };
 use servo_config::pref;
-use servo_url::ImmutableOrigin;
-use servo_url::ServoUrl;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use servo_url::{ImmutableOrigin, ServoUrl};
+
+use crate::dom::abstractworker::WorkerScriptMsg;
+use crate::dom::serviceworkerglobalscope::{
+    ServiceWorkerControlMsg, ServiceWorkerGlobalScope, ServiceWorkerScriptMsg,
+};
+use crate::dom::serviceworkerregistration::longest_prefix_match;
+use crate::script_runtime::ContextForRequestInterrupt;
 
 enum Message {
     FromResource(CustomResponseMediator),
@@ -118,15 +118,15 @@ impl Drop for ServiceWorkerRegistration {
     }
 }
 
-/// https://w3c.github.io/ServiceWorker/#service-worker-registration-concept
+/// <https://w3c.github.io/ServiceWorker/#service-worker-registration-concept>
 struct ServiceWorkerRegistration {
     /// A unique identifer.
     id: ServiceWorkerRegistrationId,
-    /// https://w3c.github.io/ServiceWorker/#dfn-active-worker
+    /// <https://w3c.github.io/ServiceWorker/#dfn-active-worker>
     active_worker: Option<ServiceWorker>,
-    /// https://w3c.github.io/ServiceWorker/#dfn-waiting-worker
+    /// <https://w3c.github.io/ServiceWorker/#dfn-waiting-worker>
     waiting_worker: Option<ServiceWorker>,
-    /// https://w3c.github.io/ServiceWorker/#dfn-installing-worker
+    /// <https://w3c.github.io/ServiceWorker/#dfn-installing-worker>
     installing_worker: Option<ServiceWorker>,
     /// A channel to send control message to the worker,
     /// currently only used to signal shutdown.
@@ -209,7 +209,7 @@ impl ServiceWorkerRegistration {
 
 /// A structure managing all registrations and workers for a given origin.
 pub struct ServiceWorkerManager {
-    /// https://w3c.github.io/ServiceWorker/#dfn-scope-to-registration-map
+    /// <https://w3c.github.io/ServiceWorker/#dfn-scope-to-registration-map>
     registrations: HashMap<ServoUrl, ServiceWorkerRegistration>,
     // Will be useful to implement posting a message to a client.
     // See https://github.com/servo/servo/issues/24660
@@ -234,7 +234,7 @@ impl ServiceWorkerManager {
 
         ServiceWorkerManager {
             registrations: HashMap::new(),
-            own_sender: own_sender,
+            own_sender,
             own_port: from_constellation_receiver,
             resource_receiver: resource_port,
             _constellation_sender: constellation_sender,
@@ -243,7 +243,7 @@ impl ServiceWorkerManager {
 
     pub fn get_matching_scope(&self, load_url: &ServoUrl) -> Option<ServoUrl> {
         for scope in self.registrations.keys() {
-            if longest_prefix_match(&scope, load_url) {
+            if longest_prefix_match(scope, load_url) {
                 return Some(scope.clone());
             }
         }
@@ -364,7 +364,6 @@ impl ServiceWorkerManager {
                         active_worker: registration.active_worker.as_ref().map(|worker| worker.id),
                     },
                 ));
-                return;
             }
         } else {
             // Step 6: we do not have a registration.
@@ -498,17 +497,18 @@ impl ServiceWorkerManagerFactory for ServiceWorkerManager {
         let from_constellation = ROUTER.route_ipc_receiver_to_new_crossbeam_receiver(receiver);
         let resource_port = ROUTER.route_ipc_receiver_to_new_crossbeam_receiver(resource_port);
         let _ = resource_sender.send(CoreResourceMsg::NetworkMediator(resource_chan, origin));
+        let swmanager_thread = move || {
+            ServiceWorkerManager::new(
+                own_sender,
+                from_constellation,
+                resource_port,
+                constellation_sender,
+            )
+            .handle_message()
+        };
         if thread::Builder::new()
-            .name("ServiceWorkerManager".to_owned())
-            .spawn(move || {
-                ServiceWorkerManager::new(
-                    own_sender,
-                    from_constellation,
-                    resource_port,
-                    constellation_sender,
-                )
-                .handle_message();
-            })
+            .name("SvcWorkerManager".to_owned())
+            .spawn(swmanager_thread)
             .is_err()
         {
             warn!("ServiceWorkerManager thread spawning failed");

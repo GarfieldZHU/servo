@@ -7,30 +7,30 @@
 interface HTMLTableElement : HTMLElement {
   [HTMLConstructor] constructor();
 
-  [CEReactions]
+  [CEReactions, SetterThrows]
            attribute HTMLTableCaptionElement? caption;
   HTMLTableCaptionElement createCaption();
   [CEReactions]
-  void deleteCaption();
+  undefined deleteCaption();
 
   [CEReactions, SetterThrows]
            attribute HTMLTableSectionElement? tHead;
   HTMLTableSectionElement createTHead();
   [CEReactions]
-  void deleteTHead();
+  undefined deleteTHead();
 
   [CEReactions, SetterThrows]
            attribute HTMLTableSectionElement? tFoot;
   HTMLTableSectionElement createTFoot();
   [CEReactions]
-  void deleteTFoot();
+  undefined deleteTFoot();
 
   readonly attribute HTMLCollection tBodies;
   HTMLTableSectionElement createTBody();
 
   readonly attribute HTMLCollection rows;
   [Throws] HTMLTableRowElement insertRow(optional long index = -1);
-  [CEReactions, Throws] void deleteRow(long index);
+  [CEReactions, Throws] undefined deleteRow(long index);
 
   // also has obsolete members
 };
@@ -51,9 +51,9 @@ partial interface HTMLTableElement {
   attribute DOMString width;
 
   [CEReactions]
-           attribute [TreatNullAs=EmptyString] DOMString bgColor;
-  // [CEReactions, TreatNullAs=EmptyString]
+           attribute [LegacyNullToEmptyString] DOMString bgColor;
+  // [CEReactions, LegacyNullToEmptyString]
   //          attribute DOMString cellPadding;
-  // [CEReactions, TreatNullAs=EmptyString]
+  // [CEReactions, LegacyNullToEmptyString]
   //          attribute DOMString cellSpacing;
 };

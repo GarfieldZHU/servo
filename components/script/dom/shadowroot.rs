@@ -2,9 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use servo_arc::Arc;
+use servo_atoms::Atom;
+use style::author_styles::AuthorStyles;
+use style::dom::TElement;
+use style::shared_lock::SharedRwLockReadGuard;
+use style::stylesheets::Stylesheet;
+use style::stylist::{CascadeData, Stylist};
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::ShadowRootBinding::ShadowRootMethods;
 use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::ShadowRootMode;
+use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::ShadowRoot_Binding::ShadowRootMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::reflect_dom_object;
@@ -18,16 +27,6 @@ use crate::dom::node::{Node, NodeDamage, NodeFlags, ShadowIncluding, UnbindConte
 use crate::dom::stylesheetlist::{StyleSheetList, StyleSheetListOwner};
 use crate::dom::window::Window;
 use crate::stylesheet_set::StylesheetSetRef;
-use dom_struct::dom_struct;
-use selectors::context::QuirksMode;
-use servo_arc::Arc;
-use servo_atoms::Atom;
-use style::author_styles::AuthorStyles;
-use style::dom::TElement;
-use style::media_queries::Device;
-use style::shared_lock::SharedRwLockReadGuard;
-use style::stylesheets::Stylesheet;
-use style::stylist::CascadeData;
 
 /// Whether a shadow root hosts an User Agent widget.
 #[derive(JSTraceable, MallocSizeOf, PartialEq)]
@@ -44,13 +43,14 @@ pub struct ShadowRoot {
     document: Dom<Document>,
     host: MutNullableDom<Element>,
     /// List of author styles associated with nodes in this shadow tree.
+    #[custom_trace]
     author_styles: DomRefCell<AuthorStyles<StyleSheetInDocument>>,
     stylesheet_list: MutNullableDom<StyleSheetList>,
     window: Dom<Window>,
 }
 
 impl ShadowRoot {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(host: &Element, document: &Document) -> ShadowRoot {
         let document_fragment = DocumentFragment::new_inherited(document);
         let node = document_fragment.upcast::<Node>();
@@ -78,10 +78,10 @@ impl ShadowRoot {
     }
 
     pub fn detach(&self) {
-        self.document.unregister_shadow_root(&self);
+        self.document.unregister_shadow_root(self);
         let node = self.upcast::<Node>();
         node.set_containing_shadow_root(None);
-        Node::complete_remove_subtree(&node, &UnbindContext::new(node, None, None, None));
+        Node::complete_remove_subtree(node, &UnbindContext::new(node, None, None, None));
         self.host.set(None);
     }
 
@@ -104,7 +104,7 @@ impl ShadowRoot {
 
     /// Add a stylesheet owned by `owner` to the list of shadow root sheets, in the
     /// correct tree position.
-    #[allow(unrooted_must_root)] // Owner needs to be rooted already necessarily.
+    #[allow(crown::unrooted_must_root)] // Owner needs to be rooted already necessarily.
     pub fn add_stylesheet(&self, owner: &Element, sheet: Arc<Stylesheet>) {
         let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
         let insertion_point = stylesheets
@@ -125,7 +125,7 @@ impl ShadowRoot {
     }
 
     /// Remove a stylesheet owned by `owner` from the list of shadow root sheets.
-    #[allow(unrooted_must_root)] // Owner needs to be rooted already necessarily.
+    #[allow(crown::unrooted_must_root)] // Owner needs to be rooted already necessarily.
     pub fn remove_stylesheet(&self, owner: &Element, s: &Arc<Stylesheet>) {
         DocumentOrShadowRoot::remove_stylesheet(
             owner,
@@ -188,9 +188,7 @@ impl ShadowRootMethods for ShadowRoot {
         ) {
             Some(e) => {
                 let retargeted_node = self.upcast::<Node>().retarget(e.upcast::<Node>());
-                retargeted_node
-                    .downcast::<Element>()
-                    .map(|n| DomRoot::from_ref(n))
+                retargeted_node.downcast::<Element>().map(DomRoot::from_ref)
             },
             None => None,
         }
@@ -207,22 +205,19 @@ impl ShadowRootMethods for ShadowRoot {
             .iter()
         {
             let retargeted_node = self.upcast::<Node>().retarget(e.upcast::<Node>());
-            if let Some(element) = retargeted_node
-                .downcast::<Element>()
-                .map(|n| DomRoot::from_ref(n))
-            {
+            if let Some(element) = retargeted_node.downcast::<Element>().map(DomRoot::from_ref) {
                 elements.push(element);
             }
         }
         elements
     }
 
-    /// https://dom.spec.whatwg.org/#dom-shadowroot-mode
+    /// <https://dom.spec.whatwg.org/#dom-shadowroot-mode>
     fn Mode(&self) -> ShadowRootMode {
         ShadowRootMode::Closed
     }
 
-    /// https://dom.spec.whatwg.org/#dom-shadowroot-host
+    /// <https://dom.spec.whatwg.org/#dom-shadowroot-host>
     fn Host(&self) -> DomRoot<Element> {
         let host = self.host.get();
         host.expect("Trying to get host from a detached shadow root")
@@ -245,8 +240,7 @@ pub trait LayoutShadowRootHelpers<'dom> {
     fn get_style_data_for_layout(self) -> &'dom CascadeData;
     unsafe fn flush_stylesheets<E: TElement>(
         self,
-        device: &Device,
-        quirks_mode: QuirksMode,
+        stylist: &mut Stylist,
         guard: &SharedRwLockReadGuard,
     );
 }
@@ -277,13 +271,12 @@ impl<'dom> LayoutShadowRootHelpers<'dom> for LayoutDom<'dom, ShadowRoot> {
     #[allow(unsafe_code)]
     unsafe fn flush_stylesheets<E: TElement>(
         self,
-        device: &Device,
-        quirks_mode: QuirksMode,
+        stylist: &mut Stylist,
         guard: &SharedRwLockReadGuard,
     ) {
         let author_styles = self.unsafe_get().author_styles.borrow_mut_for_layout();
         if author_styles.stylesheets.dirty() {
-            author_styles.flush::<E>(device, quirks_mode, guard);
+            author_styles.flush::<E>(stylist, guard);
         }
     }
 }

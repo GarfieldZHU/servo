@@ -6,47 +6,43 @@
 #![crate_type = "rlib"]
 #![deny(unsafe_code)]
 
-#[macro_use]
-extern crate crossbeam_channel;
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate serde;
-
 mod actions;
 mod capabilities;
 
-use crate::actions::{InputSourceState, PointerInputState};
-use base64;
+use std::borrow::ToOwned;
+use std::collections::{BTreeMap, HashMap};
+use std::io::Cursor;
+use std::net::{SocketAddr, SocketAddrV4};
+use std::time::Duration;
+use std::{fmt, mem, thread};
+
+use base::id::{BrowsingContextId, TopLevelBrowsingContextId};
+use base64::Engine;
 use capabilities::ServoCapabilities;
-use compositing::ConstellationMsg;
-use crossbeam_channel::{after, unbounded, Receiver, Sender};
+use compositing_traits::ConstellationMsg;
+use cookie::{CookieBuilder, Expiration};
+use crossbeam_channel::{after, select, unbounded, Receiver, Sender};
 use euclid::{Rect, Size2D};
-use hyper::Method;
+use http::method::Method;
 use image::{DynamicImage, ImageFormat, RgbImage};
 use ipc_channel::ipc::{self, IpcSender};
 use ipc_channel::router::ROUTER;
 use keyboard_types::webdriver::send_keys;
-use msg::constellation_msg::{BrowsingContextId, TopLevelBrowsingContextId, TraversalDirection};
+use log::{debug, info};
 use net_traits::request::Referrer;
 use pixels::PixelFormat;
-use script_traits::webdriver_msg::{LoadStatus, WebDriverCookieError, WebDriverFrameId};
 use script_traits::webdriver_msg::{
-    WebDriverJSError, WebDriverJSResult, WebDriverJSValue, WebDriverScriptCommand,
+    LoadStatus, WebDriverCookieError, WebDriverFrameId, WebDriverJSError, WebDriverJSResult,
+    WebDriverJSValue, WebDriverScriptCommand,
 };
-use script_traits::{LoadData, LoadOrigin, WebDriverCommandMsg};
-use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
-use serde::ser::{Serialize, Serializer};
+use script_traits::{LoadData, LoadOrigin, TraversalDirection, WebDriverCommandMsg};
+use serde::de::{Deserializer, MapAccess, Visitor};
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use servo_config::{prefs, prefs::PrefValue};
+use servo_config::prefs;
+use servo_config::prefs::PrefValue;
 use servo_url::ServoUrl;
-use std::borrow::ToOwned;
-use std::collections::{BTreeMap, HashMap};
-use std::fmt;
-use std::mem;
-use std::net::{SocketAddr, SocketAddrV4};
-use std::thread;
-use std::time::Duration;
 use style_traits::CSSPixel;
 use uuid::Uuid;
 use webdriver::actions::{
@@ -54,26 +50,25 @@ use webdriver::actions::{
     PointerUpAction,
 };
 use webdriver::capabilities::{Capabilities, CapabilitiesMatching};
-use webdriver::command::{ActionsParameters, SwitchToWindowParameters};
 use webdriver::command::{
-    AddCookieParameters, GetParameters, JavascriptCommandParameters, LocatorParameters,
-};
-use webdriver::command::{
-    NewSessionParameters, SendKeysParameters, SwitchToFrameParameters, TimeoutsParameters,
-};
-use webdriver::command::{
-    WebDriverCommand, WebDriverExtensionCommand, WebDriverMessage, WindowRectParameters,
+    ActionsParameters, AddCookieParameters, GetParameters, JavascriptCommandParameters,
+    LocatorParameters, NewSessionParameters, SendKeysParameters, SwitchToFrameParameters,
+    SwitchToWindowParameters, TimeoutsParameters, WebDriverCommand, WebDriverExtensionCommand,
+    WebDriverMessage, WindowRectParameters,
 };
 use webdriver::common::{Cookie, Date, LocatorStrategy, Parameters, WebElement};
 use webdriver::error::{ErrorStatus, WebDriverError, WebDriverResult};
 use webdriver::httpapi::WebDriverExtensionRoute;
-use webdriver::response::{CookieResponse, CookiesResponse};
-use webdriver::response::{ElementRectResponse, NewSessionResponse, ValueResponse};
-use webdriver::response::{TimeoutsResponse, WebDriverResponse, WindowRectResponse};
-use webdriver::server::{self, Session, WebDriverHandler};
+use webdriver::response::{
+    CookieResponse, CookiesResponse, ElementRectResponse, NewSessionResponse, TimeoutsResponse,
+    ValueResponse, WebDriverResponse, WindowRectResponse,
+};
+use webdriver::server::{self, Session, SessionTeardownKind, WebDriverHandler};
+
+use crate::actions::{InputSourceState, PointerInputState};
 
 fn extension_routes() -> Vec<(Method, &'static str, ServoExtensionRoute)> {
-    return vec![
+    vec![
         (
             Method::POST,
             "/session/{sessionId}/servo/prefs/get",
@@ -89,7 +84,7 @@ fn extension_routes() -> Vec<(Method, &'static str, ServoExtensionRoute)> {
             "/session/{sessionId}/servo/prefs/reset",
             ServoExtensionRoute::ResetPrefs,
         ),
-    ];
+    ]
 }
 
 fn cookie_msg_to_cookie(cookie: cookie::Cookie) -> Cookie {
@@ -98,21 +93,29 @@ fn cookie_msg_to_cookie(cookie: cookie::Cookie) -> Cookie {
         value: cookie.value().to_owned(),
         path: cookie.path().map(|s| s.to_owned()),
         domain: cookie.domain().map(|s| s.to_owned()),
-        expiry: cookie
-            .expires()
-            .map(|time| Date(time.to_timespec().sec as u64)),
+        expiry: cookie.expires().and_then(|expiration| match expiration {
+            Expiration::DateTime(date_time) => Some(Date(date_time.unix_timestamp() as u64)),
+            Expiration::Session => None,
+        }),
         secure: cookie.secure().unwrap_or(false),
         http_only: cookie.http_only().unwrap_or(false),
+        same_site: cookie.same_site().map(|s| s.to_string()),
     }
 }
 
 pub fn start_server(port: u16, constellation_chan: Sender<ConstellationMsg>) {
     let handler = Handler::new(constellation_chan);
     thread::Builder::new()
-        .name("WebdriverHttpServer".to_owned())
+        .name("WebDriverHttpServer".to_owned())
         .spawn(move || {
             let address = SocketAddrV4::new("0.0.0.0".parse().unwrap(), port);
-            match server::start(SocketAddr::V4(address), handler, extension_routes()) {
+            match server::start(
+                SocketAddr::V4(address),
+                vec![],
+                vec![],
+                handler,
+                extension_routes(),
+            ) {
                 Ok(listening) => info!("WebDriver server listening on {}", listening.socket),
                 Err(_) => panic!("Unable to start WebDriver HTTPD server"),
             }
@@ -156,8 +159,8 @@ impl WebDriverSession {
     ) -> WebDriverSession {
         WebDriverSession {
             id: Uuid::new_v4(),
-            browsing_context_id: browsing_context_id,
-            top_level_browsing_context_id: top_level_browsing_context_id,
+            browsing_context_id,
+            top_level_browsing_context_id,
 
             script_timeout: Some(30_000),
             load_timeout: 300_000,
@@ -188,6 +191,7 @@ struct Handler {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 enum ServoExtensionRoute {
     GetPrefs,
     SetPrefs,
@@ -221,6 +225,7 @@ impl WebDriverExtensionRoute for ServoExtensionRoute {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 enum ServoExtensionCommand {
     GetPrefs(GetPrefsParameters),
     SetPrefs(SetPrefsParameters),
@@ -250,7 +255,7 @@ impl Serialize for SendableWebDriverJSValue {
             WebDriverJSValue::Null => serializer.serialize_unit(),
             WebDriverJSValue::Boolean(x) => serializer.serialize_bool(x),
             WebDriverJSValue::Number(x) => serializer.serialize_f64(x),
-            WebDriverJSValue::String(ref x) => serializer.serialize_str(&x),
+            WebDriverJSValue::String(ref x) => serializer.serialize_str(x),
             WebDriverJSValue::Element(ref x) => x.serialize(serializer),
             WebDriverJSValue::Frame(ref x) => x.serialize(serializer),
             WebDriverJSValue::Window(ref x) => x.serialize(serializer),
@@ -278,10 +283,15 @@ impl Serialize for WebDriverPrefValue {
     {
         match self.0 {
             PrefValue::Bool(b) => serializer.serialize_bool(b),
-            PrefValue::Str(ref s) => serializer.serialize_str(&s),
+            PrefValue::Str(ref s) => serializer.serialize_str(s),
             PrefValue::Float(f) => serializer.serialize_f64(f),
             PrefValue::Int(i) => serializer.serialize_i64(i),
             PrefValue::Missing => serializer.serialize_unit(),
+            PrefValue::Array(ref v) => v
+                .iter()
+                .map(|value| WebDriverPrefValue(value.clone()))
+                .collect::<Vec<WebDriverPrefValue>>()
+                .serialize(serializer),
         }
     }
 }
@@ -401,7 +411,7 @@ impl Handler {
             load_status_sender,
             load_status_receiver,
             session: None,
-            constellation_chan: constellation_chan,
+            constellation_chan,
             resize_timeout: 500,
         }
     }
@@ -707,14 +717,8 @@ impl Handler {
         params: &WindowRectParameters,
     ) -> WebDriverResult<WebDriverResponse> {
         let (sender, receiver) = ipc::channel().unwrap();
-        let width = match params.width {
-            Some(v) => v,
-            None => 0,
-        };
-        let height = match params.height {
-            Some(v) => v,
-            None => 0,
-        };
+        let width = params.width.unwrap_or(0);
+        let height = params.height.unwrap_or(0);
         let size = Size2D::new(width as u32, height as u32);
         let top_level_browsing_context_id = self.session()?.top_level_browsing_context_id;
         let cmd_msg = WebDriverCommandMsg::SetWindowSize(
@@ -1252,19 +1256,19 @@ impl Handler {
     ) -> WebDriverResult<WebDriverResponse> {
         let (sender, receiver) = ipc::channel().unwrap();
 
-        let cookie = cookie::Cookie::build(params.name.to_owned(), params.value.to_owned())
+        let cookie_builder = CookieBuilder::new(params.name.to_owned(), params.value.to_owned())
             .secure(params.secure)
             .http_only(params.httpOnly);
-        let cookie = match params.domain {
-            Some(ref domain) => cookie.domain(domain.to_owned()),
-            _ => cookie,
+        let cookie_builder = match params.domain {
+            Some(ref domain) => cookie_builder.domain(domain.to_owned()),
+            _ => cookie_builder,
         };
-        let cookie = match params.path {
-            Some(ref path) => cookie.path(path.to_owned()).finish(),
-            _ => cookie.finish(),
+        let cookie_builder = match params.path {
+            Some(ref path) => cookie_builder.path(path.to_owned()),
+            _ => cookie_builder,
         };
 
-        let cmd = WebDriverScriptCommand::AddCookie(cookie, sender);
+        let cmd = WebDriverScriptCommand::AddCookie(cookie_builder.build(), sender);
         self.browsing_context_script_command(cmd)?;
         match receiver.recv().unwrap() {
             Ok(_) => Ok(WebDriverResponse::Void),
@@ -1362,7 +1366,7 @@ impl Handler {
         let input_cancel_list = {
             let session = self.session_mut()?;
             session.input_cancel_list.reverse();
-            mem::replace(&mut session.input_cancel_list, Vec::new())
+            mem::take(&mut session.input_cancel_list)
         };
 
         if let Err(error) = self.dispatch_actions(&input_cancel_list) {
@@ -1465,7 +1469,7 @@ impl Handler {
         receiver
             .recv()
             .unwrap()
-            .or_else(|error| Err(WebDriverError::new(error, "")))?;
+            .map_err(|error| WebDriverError::new(error, ""))?;
 
         let input_events = send_keys(&keys.text);
 
@@ -1503,15 +1507,22 @@ impl Handler {
                     let pointer_move_action = PointerMoveAction {
                         duration: None,
                         origin: PointerOrigin::Element(WebElement(element_id)),
-                        x: Some(0),
-                        y: Some(0),
+                        x: 0,
+                        y: 0,
+                        ..Default::default()
                     };
 
                     // Steps 8.7 - 8.8
-                    let pointer_down_action = PointerDownAction { button: 1 };
+                    let pointer_down_action = PointerDownAction {
+                        button: 1,
+                        ..Default::default()
+                    };
 
                     // Steps 8.9 - 8.10
-                    let pointer_up_action = PointerUpAction { button: 1 };
+                    let pointer_up_action = PointerUpAction {
+                        button: 1,
+                        ..Default::default()
+                    };
 
                     // Step 8.11
                     if let Err(error) =
@@ -1583,12 +1594,12 @@ impl Handler {
         );
 
         let rgb = RgbImage::from_raw(img.width, img.height, img.bytes.to_vec()).unwrap();
-        let mut png_data = Vec::new();
+        let mut png_data = Cursor::new(Vec::new());
         DynamicImage::ImageRgb8(rgb)
             .write_to(&mut png_data, ImageFormat::Png)
             .unwrap();
 
-        Ok(base64::encode(&png_data))
+        Ok(base64::engine::general_purpose::STANDARD.encode(png_data.get_ref()))
     }
 
     fn handle_take_screenshot(&self) -> WebDriverResult<WebDriverResponse> {
@@ -1616,12 +1627,10 @@ impl Handler {
                     serde_json::to_value(encoded)?,
                 )))
             },
-            Err(_) => {
-                return Err(WebDriverError::new(
-                    ErrorStatus::StaleElementReference,
-                    "Element not found",
-                ));
-            },
+            Err(_) => Err(WebDriverError::new(
+                ErrorStatus::StaleElementReference,
+                "Element not found",
+            )),
         }
     }
 
@@ -1649,7 +1658,7 @@ impl Handler {
         &self,
         parameters: &SetPrefsParameters,
     ) -> WebDriverResult<WebDriverResponse> {
-        for &(ref key, ref value) in parameters.prefs.iter() {
+        for (key, value) in parameters.prefs.iter() {
             prefs::pref_map()
                 .set(key, value.0.clone())
                 .expect("Failed to set preference");
@@ -1661,7 +1670,7 @@ impl Handler {
         &self,
         parameters: &GetPrefsParameters,
     ) -> WebDriverResult<WebDriverResponse> {
-        let prefs = if parameters.prefs.len() == 0 {
+        let prefs = if parameters.prefs.is_empty() {
             prefs::pref_map().reset_all();
             BTreeMap::new()
         } else {
@@ -1780,7 +1789,7 @@ impl WebDriverHandler<ServoExtensionRoute> for Handler {
         }
     }
 
-    fn delete_session(&mut self, _session: &Option<Session>) {
+    fn teardown_session(&mut self, _session: SessionTeardownKind) {
         self.session = None;
     }
 }

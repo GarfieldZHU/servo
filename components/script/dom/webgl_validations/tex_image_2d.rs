@@ -2,14 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::{self, cmp, fmt};
+
+use canvas_traits::webgl::WebGLError::*;
+use canvas_traits::webgl::{TexDataType, TexFormat};
+
 use super::types::TexImageTarget;
 use super::WebGLValidator;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webglrenderingcontext::WebGLRenderingContext;
-use crate::dom::webgltexture::{ImageInfo, WebGLTexture};
-use crate::dom::webgltexture::{TexCompression, TexCompressionValidation};
-use canvas_traits::webgl::{TexDataType, TexFormat, WebGLError::*};
-use std::{self, cmp, fmt};
+use crate::dom::webgltexture::{ImageInfo, TexCompression, TexCompressionValidation, WebGLTexture};
 
 /// The errors that the texImage* family of functions can generate.
 #[derive(Debug)]
@@ -212,12 +214,12 @@ impl<'a> WebGLValidator for CommonTexImage2DValidator<'a> {
         }
 
         Ok(CommonTexImage2DValidatorResult {
-            texture: texture,
-            target: target,
-            level: level,
-            internal_format: internal_format,
-            width: width,
-            height: height,
+            texture,
+            target,
+            level,
+            internal_format,
+            width,
+            height,
             border: self.border as u32,
         })
     }
@@ -234,13 +236,13 @@ impl<'a> CommonTexImage2DValidator<'a> {
         border: i32,
     ) -> Self {
         CommonTexImage2DValidator {
-            context: context,
-            target: target,
-            level: level,
-            internal_format: internal_format,
-            width: width,
-            height: height,
-            border: border,
+            context,
+            target,
+            level,
+            internal_format,
+            width,
+            height,
+            border,
         }
     }
 }
@@ -252,7 +254,8 @@ pub struct TexImage2DValidator<'a> {
 }
 
 impl<'a> TexImage2DValidator<'a> {
-    // TODO: Move data validation logic here.
+    /// TODO: Move data validation logic here.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: &'a WebGLRenderingContext,
         target: u32,
@@ -274,8 +277,8 @@ impl<'a> TexImage2DValidator<'a> {
                 height,
                 border,
             ),
-            format: format,
-            data_type: data_type,
+            format,
+            data_type,
         }
     }
 }
@@ -356,7 +359,7 @@ impl<'a> WebGLValidator for TexImage2DValidator<'a> {
             {
                 context.webgl_error(InvalidOperation);
                 return Err(TexImageValidationError::InvalidTypeForFormat);
-            }
+            },
             TexDataType::UnsignedShort565 if format != TexFormat::RGB => {
                 context.webgl_error(InvalidOperation);
                 return Err(TexImageValidationError::InvalidTypeForFormat);
@@ -365,15 +368,15 @@ impl<'a> WebGLValidator for TexImage2DValidator<'a> {
         }
 
         Ok(TexImage2DValidatorResult {
-            width: width,
-            height: height,
-            level: level,
-            border: border,
-            texture: texture,
-            target: target,
-            internal_format: internal_format,
-            format: format,
-            data_type: data_type,
+            width,
+            height,
+            level,
+            border,
+            texture,
+            target,
+            internal_format,
+            format,
+            data_type,
         })
     }
 }
@@ -384,6 +387,7 @@ pub struct CommonCompressedTexImage2DValidator<'a> {
 }
 
 impl<'a> CommonCompressedTexImage2DValidator<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: &'a WebGLRenderingContext,
         target: u32,
@@ -507,6 +511,7 @@ pub struct CompressedTexImage2DValidator<'a> {
 }
 
 impl<'a> CompressedTexImage2DValidator<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: &'a WebGLRenderingContext,
         target: u32,
@@ -583,6 +588,7 @@ pub struct CompressedTexSubImage2DValidator<'a> {
 }
 
 impl<'a> CompressedTexSubImage2DValidator<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: &'a WebGLRenderingContext,
         target: u32,
@@ -695,6 +701,7 @@ pub struct TexStorageValidatorResult {
 }
 
 impl<'a> TexStorageValidator<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: &'a WebGLRenderingContext,
         dimensions: u8,
@@ -763,7 +770,7 @@ impl<'a> WebGLValidator for TexStorageValidator<'a> {
             return Err(TexImageValidationError::InvalidTextureFormat);
         }
 
-        let max_level = log2(cmp::max(width, height) as u32) + 1;
+        let max_level = log2(cmp::max(width, height)) + 1;
         if level > max_level {
             context.webgl_error(InvalidOperation);
             return Err(TexImageValidationError::LevelTooHigh);

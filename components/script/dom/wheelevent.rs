@@ -2,20 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
 use crate::dom::bindings::codegen::Bindings::WheelEventBinding;
 use crate::dom::bindings::codegen::Bindings::WheelEventBinding::WheelEventMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::mouseevent::MouseEvent;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use std::cell::Cell;
 
 #[dom_struct]
 pub struct WheelEvent {
@@ -37,10 +40,11 @@ impl WheelEvent {
         }
     }
 
-    pub fn new_unintialized(window: &Window) -> DomRoot<WheelEvent> {
-        reflect_dom_object(Box::new(WheelEvent::new_inherited()), window)
+    fn new_unintialized(window: &Window, proto: Option<HandleObject>) -> DomRoot<WheelEvent> {
+        reflect_dom_object_with_proto(Box::new(WheelEvent::new_inherited()), window, proto)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         window: &Window,
         type_: DOMString,
@@ -53,7 +57,27 @@ impl WheelEvent {
         delta_z: Finite<f64>,
         delta_mode: u32,
     ) -> DomRoot<WheelEvent> {
-        let ev = WheelEvent::new_unintialized(window);
+        Self::new_with_proto(
+            window, None, type_, can_bubble, cancelable, view, detail, delta_x, delta_y, delta_z,
+            delta_mode,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_proto(
+        window: &Window,
+        proto: Option<HandleObject>,
+        type_: DOMString,
+        can_bubble: EventBubbles,
+        cancelable: EventCancelable,
+        view: Option<&Window>,
+        detail: i32,
+        delta_x: Finite<f64>,
+        delta_y: Finite<f64>,
+        delta_z: Finite<f64>,
+        delta_mode: u32,
+    ) -> DomRoot<WheelEvent> {
+        let ev = WheelEvent::new_unintialized(window, proto);
         ev.InitWheelEvent(
             type_,
             bool::from(can_bubble),
@@ -72,11 +96,13 @@ impl WheelEvent {
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         type_: DOMString,
         init: &WheelEventBinding::WheelEventInit,
     ) -> Fallible<DomRoot<WheelEvent>> {
-        let event = WheelEvent::new(
+        let event = WheelEvent::new_with_proto(
             window,
+            proto,
             type_,
             EventBubbles::from(init.parent.parent.parent.parent.bubbles),
             EventCancelable::from(init.parent.parent.parent.parent.cancelable),

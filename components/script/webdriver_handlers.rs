@@ -2,6 +2,29 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cmp;
+use std::collections::HashMap;
+use std::ffi::CString;
+
+use base::id::{BrowsingContextId, PipelineId};
+use cookie::Cookie;
+use euclid::default::{Point2D, Rect, Size2D};
+use hyper_serde::Serde;
+use ipc_channel::ipc::{self, IpcSender};
+use js::jsapi::{HandleValueArray, JSAutoRealm, JSContext, JSType, JS_IsExceptionPending};
+use js::jsval::UndefinedValue;
+use js::rust::wrappers::{JS_CallFunctionName, JS_GetProperty, JS_HasOwnProperty, JS_TypeOfValue};
+use js::rust::{HandleObject, HandleValue};
+use net_traits::CookieSource::{NonHTTP, HTTP};
+use net_traits::CoreResourceMsg::{DeleteCookies, GetCookiesDataForUrl, SetCookieForUrl};
+use net_traits::IpcSend;
+use script_traits::webdriver_msg::{
+    WebDriverCookieError, WebDriverFrameId, WebDriverJSError, WebDriverJSResult, WebDriverJSValue,
+};
+use servo_url::ServoUrl;
+use webdriver::common::{WebElement, WebFrame, WebWindow};
+use webdriver::error::ErrorStatus;
+
 use crate::dom::bindings::codegen::Bindings::CSSStyleDeclarationBinding::CSSStyleDeclarationMethods;
 use crate::dom::bindings::codegen::Bindings::DOMRectBinding::DOMRectMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
@@ -14,10 +37,8 @@ use crate::dom::bindings::codegen::Bindings::NodeBinding::{GetRootNodeOptions, N
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::codegen::Bindings::XMLSerializerBinding::XMLSerializerMethods;
 use crate::dom::bindings::conversions::{
-    get_property, get_property_jsval, is_array_like, root_from_object,
-};
-use crate::dom::bindings::conversions::{
-    ConversionBehavior, ConversionResult, FromJSValConvertible, StringificationBehavior,
+    get_property, get_property_jsval, is_array_like, root_from_object, ConversionBehavior,
+    ConversionResult, FromJSValConvertible, StringificationBehavior,
 };
 use crate::dom::bindings::error::{throw_dom_exception, Error};
 use crate::dom::bindings::inheritance::Castable;
@@ -41,29 +62,6 @@ use crate::realms::enter_realm;
 use crate::script_module::ScriptFetchOptions;
 use crate::script_runtime::JSContext as SafeJSContext;
 use crate::script_thread::{Documents, ScriptThread};
-use cookie::Cookie;
-use euclid::default::{Point2D, Rect, Size2D};
-use hyper_serde::Serde;
-use ipc_channel::ipc::{self, IpcSender};
-use js::jsapi::{HandleValueArray, JSAutoRealm, JSContext, JSType, JS_IsExceptionPending};
-use js::jsval::UndefinedValue;
-use js::rust::wrappers::{JS_CallFunctionName, JS_GetProperty, JS_HasOwnProperty, JS_TypeOfValue};
-use js::rust::{HandleObject, HandleValue};
-use msg::constellation_msg::BrowsingContextId;
-use msg::constellation_msg::PipelineId;
-use net_traits::CookieSource::{NonHTTP, HTTP};
-use net_traits::CoreResourceMsg::{DeleteCookies, GetCookiesDataForUrl, SetCookieForUrl};
-use net_traits::IpcSend;
-use script_traits::webdriver_msg::WebDriverCookieError;
-use script_traits::webdriver_msg::{
-    WebDriverFrameId, WebDriverJSError, WebDriverJSResult, WebDriverJSValue,
-};
-use servo_url::ServoUrl;
-use std::cmp;
-use std::collections::HashMap;
-use std::ffi::CString;
-use webdriver::common::{WebElement, WebFrame, WebWindow};
-use webdriver::error::ErrorStatus;
 
 fn find_node_by_unique_id(
     documents: &Documents,
@@ -87,11 +85,11 @@ fn find_node_by_unique_id(
     }
 }
 
-fn matching_links<'a>(
-    links: &'a NodeList,
+fn matching_links(
+    links: &NodeList,
     link_text: String,
     partial: bool,
-) -> impl Iterator<Item = String> + 'a {
+) -> impl Iterator<Item = String> + '_ {
     links
         .iter()
         .filter(move |node| {
@@ -253,7 +251,7 @@ pub unsafe fn jsval_to_webdriver(
                 cx,
                 object.handle(),
                 name.as_ptr(),
-                &mut HandleValueArray::new(),
+                &HandleValueArray::new(),
                 value.handle_mut(),
             ) {
                 jsval_to_webdriver(cx, global_scope, value.handle())
@@ -264,11 +262,10 @@ pub unsafe fn jsval_to_webdriver(
         } else {
             let mut result = HashMap::new();
 
-            let common_properties = vec!["x", "y", "width", "height", "key"];
+            let common_properties = ["x", "y", "width", "height", "key"];
             for property in common_properties.iter() {
                 rooted!(in(cx) let mut item = UndefinedValue());
-                if let Ok(_) = get_property_jsval(cx, object.handle(), property, item.handle_mut())
-                {
+                if get_property_jsval(cx, object.handle(), property, item.handle_mut()).is_ok() {
                     if !item.is_undefined() {
                         if let Ok(value) = jsval_to_webdriver(cx, global_scope, item.handle()) {
                             result.insert(property.to_string(), value);
@@ -302,10 +299,10 @@ pub fn handle_execute_script(
                 global.evaluate_js_on_global_with_result(
                     &eval,
                     rval.handle_mut(),
-                    ScriptFetchOptions::default_classic_script(&global),
+                    ScriptFetchOptions::default_classic_script(global),
                     global.api_base_url(),
                 );
-                jsval_to_webdriver(*cx, &window.upcast::<GlobalScope>(), rval.handle())
+                jsval_to_webdriver(*cx, window.upcast::<GlobalScope>(), rval.handle())
             };
 
             reply.send(result).unwrap();
@@ -332,7 +329,7 @@ pub fn handle_execute_async_script(
             global.evaluate_js_on_global_with_result(
                 &eval,
                 rval.handle_mut(),
-                ScriptFetchOptions::default_classic_script(&global),
+                ScriptFetchOptions::default_classic_script(global),
                 global.api_base_url(),
             );
         },
@@ -383,33 +380,30 @@ fn get_element_in_view_center_point(element: &Element) -> Option<Point2D<i64>> {
         .GetBody()
         .map(DomRoot::upcast::<Element>)
         .and_then(|body| {
-            element
-                .GetClientRects()
-                .iter()
-                // Step 1
-                .next()
-                .map(|rectangle| {
-                    let x = rectangle.X().round() as i64;
-                    let y = rectangle.Y().round() as i64;
-                    let width = rectangle.Width().round() as i64;
-                    let height = rectangle.Height().round() as i64;
+            // Step 1: Let rectangle be the first element of the DOMRect sequence
+            // returned by calling getClientRects() on element.
+            element.GetClientRects().first().map(|rectangle| {
+                let x = rectangle.X().round() as i64;
+                let y = rectangle.Y().round() as i64;
+                let width = rectangle.Width().round() as i64;
+                let height = rectangle.Height().round() as i64;
 
-                    let client_width = body.ClientWidth() as i64;
-                    let client_height = body.ClientHeight() as i64;
+                let client_width = body.ClientWidth() as i64;
+                let client_height = body.ClientHeight() as i64;
 
-                    // Steps 2 - 5
-                    let left = cmp::max(0, cmp::min(x, x + width));
-                    let right = cmp::min(client_width, cmp::max(x, x + width));
-                    let top = cmp::max(0, cmp::min(y, y + height));
-                    let bottom = cmp::min(client_height, cmp::max(y, y + height));
+                // Steps 2 - 5
+                let left = cmp::max(0, cmp::min(x, x + width));
+                let right = cmp::min(client_width, cmp::max(x, x + width));
+                let top = cmp::max(0, cmp::min(y, y + height));
+                let bottom = cmp::min(client_height, cmp::max(y, y + height));
 
-                    // Steps 6 - 7
-                    let x = (left + right) / 2;
-                    let y = (top + bottom) / 2;
+                // Steps 6 - 7
+                let x = (left + right) / 2;
+                let y = (top + bottom) / 2;
 
-                    // Step 8
-                    Point2D::new(x, y)
-                })
+                // Step 8
+                Point2D::new(x, y)
+            })
         })
 }
 
@@ -463,7 +457,7 @@ pub fn handle_find_element_link_text(
                 .find_document(pipeline)
                 .ok_or(ErrorStatus::UnknownError)
                 .and_then(|document| {
-                    first_matching_link(&document.upcast::<Node>(), selector.clone(), partial)
+                    first_matching_link(document.upcast::<Node>(), selector.clone(), partial)
                 }),
         )
         .unwrap();
@@ -480,11 +474,11 @@ pub fn handle_find_element_tag_name(
             documents
                 .find_document(pipeline)
                 .ok_or(ErrorStatus::UnknownError)
-                .and_then(|document| {
-                    Ok(document
+                .map(|document| {
+                    document
                         .GetElementsByTagName(DOMString::from(selector))
                         .elements_iter()
-                        .next())
+                        .next()
                 })
                 .map(|node| node.map(|x| x.upcast::<Node>().unique_id())),
         )
@@ -530,7 +524,7 @@ pub fn handle_find_elements_link_text(
                 .find_document(pipeline)
                 .ok_or(ErrorStatus::UnknownError)
                 .and_then(|document| {
-                    all_matching_links(&document.upcast::<Node>(), selector.clone(), partial)
+                    all_matching_links(document.upcast::<Node>(), selector.clone(), partial)
                 }),
         )
         .unwrap();
@@ -547,7 +541,7 @@ pub fn handle_find_elements_tag_name(
             documents
                 .find_document(pipeline)
                 .ok_or(ErrorStatus::UnknownError)
-                .and_then(|document| Ok(document.GetElementsByTagName(DOMString::from(selector))))
+                .map(|document| document.GetElementsByTagName(DOMString::from(selector)))
                 .map(|nodes| {
                     nodes
                         .elements_iter()
@@ -728,7 +722,7 @@ pub fn handle_get_page_source(
                     Some(element) => match element.GetOuterHTML() {
                         Ok(source) => Ok(source.to_string()),
                         Err(_) => {
-                            match XMLSerializer::new(document.window())
+                            match XMLSerializer::new(document.window(), None)
                                 .SerializeToString(element.upcast::<Node>())
                             {
                                 Ok(source) => Ok(source.to_string()),
@@ -957,7 +951,7 @@ pub fn handle_get_text(
     reply
         .send(
             find_node_by_unique_id(documents, pipeline, node_id)
-                .and_then(|node| Ok(node.GetTextContent().map_or("".to_owned(), String::from))),
+                .map(|node| node.GetTextContent().map_or("".to_owned(), String::from)),
         )
         .unwrap();
 }
@@ -971,7 +965,7 @@ pub fn handle_get_name(
     reply
         .send(
             find_node_by_unique_id(documents, pipeline, node_id)
-                .and_then(|node| Ok(String::from(node.downcast::<Element>().unwrap().TagName()))),
+                .map(|node| String::from(node.downcast::<Element>().unwrap().TagName())),
         )
         .unwrap();
 }
@@ -985,12 +979,11 @@ pub fn handle_get_attribute(
 ) {
     reply
         .send(
-            find_node_by_unique_id(documents, pipeline, node_id).and_then(|node| {
-                Ok(node
-                    .downcast::<Element>()
+            find_node_by_unique_id(documents, pipeline, node_id).map(|node| {
+                node.downcast::<Element>()
                     .unwrap()
                     .GetAttribute(DOMString::from(name))
-                    .map(String::from))
+                    .map(String::from)
             }),
         )
         .unwrap();
@@ -1006,7 +999,7 @@ pub fn handle_get_property(
 ) {
     reply
         .send(
-            find_node_by_unique_id(documents, pipeline, node_id).and_then(|node| {
+            find_node_by_unique_id(documents, pipeline, node_id).map(|node| {
                 let document = documents.find_document(pipeline).unwrap();
                 let _ac = enter_realm(&*document);
                 let cx = document.window().get_cx();
@@ -1023,12 +1016,12 @@ pub fn handle_get_property(
                     Ok(_) => match unsafe {
                         jsval_to_webdriver(*cx, &node.reflector().global(), property.handle())
                     } {
-                        Ok(property) => Ok(property),
-                        Err(_) => Ok(WebDriverJSValue::Undefined),
+                        Ok(property) => property,
+                        Err(_) => WebDriverJSValue::Undefined,
                     },
                     Err(error) => {
                         throw_dom_exception(cx, &node.reflector().global(), error);
-                        Ok(WebDriverJSValue::Undefined)
+                        WebDriverJSValue::Undefined
                     },
                 }
             }),
@@ -1045,14 +1038,14 @@ pub fn handle_get_css(
 ) {
     reply
         .send(
-            find_node_by_unique_id(documents, pipeline, node_id).and_then(|node| {
+            find_node_by_unique_id(documents, pipeline, node_id).map(|node| {
                 let window = window_from_node(&*node);
                 let element = node.downcast::<Element>().unwrap();
-                Ok(String::from(
+                String::from(
                     window
-                        .GetComputedStyle(&element, None)
+                        .GetComputedStyle(element, None)
                         .GetPropertyValue(DOMString::from(name)),
-                ))
+                )
             }),
         )
         .unwrap();
@@ -1175,7 +1168,7 @@ pub fn handle_is_enabled(
 ) {
     reply
         .send(
-            find_node_by_unique_id(&documents, pipeline, element_id).and_then(|node| match node
+            find_node_by_unique_id(documents, pipeline, element_id).and_then(|node| match node
                 .downcast::<Element>(
             ) {
                 Some(element) => Ok(element.enabled_state()),

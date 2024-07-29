@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::TextTrackBinding::{
     TextTrackKind, TextTrackMethods, TextTrackMode,
@@ -15,8 +19,6 @@ use crate::dom::texttrackcue::TextTrackCue;
 use crate::dom::texttrackcuelist::TextTrackCueList;
 use crate::dom::texttracklist::TextTrackList;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use std::cell::Cell;
 
 #[dom_struct]
 pub struct TextTrack {
@@ -41,13 +43,13 @@ impl TextTrack {
     ) -> TextTrack {
         TextTrack {
             eventtarget: EventTarget::new_inherited(),
-            kind: kind,
+            kind,
             label: label.into(),
             language: language.into(),
             id: id.into(),
             mode: Cell::new(mode),
             cue_list: Default::default(),
-            track_list: DomRefCell::new(track_list.map(|t| Dom::from_ref(t))),
+            track_list: DomRefCell::new(track_list.map(Dom::from_ref)),
         }
     }
 
@@ -70,7 +72,7 @@ impl TextTrack {
 
     pub fn get_cues(&self) -> DomRoot<TextTrackCueList> {
         self.cue_list
-            .or_init(|| TextTrackCueList::new(&self.global().as_window(), &[]))
+            .or_init(|| TextTrackCueList::new(self.global().as_window(), &[]))
     }
 
     pub fn id(&self) -> &str {
@@ -129,7 +131,7 @@ impl TextTrackMethods for TextTrack {
     fn GetActiveCues(&self) -> Option<DomRoot<TextTrackCueList>> {
         // XXX implement active cues logic
         //      https://github.com/servo/servo/issues/22314
-        Some(TextTrackCueList::new(&self.global().as_window(), &[]))
+        Some(TextTrackCueList::new(self.global().as_window(), &[]))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-texttrack-addcue
@@ -140,7 +142,7 @@ impl TextTrackMethods for TextTrack {
             // gecko calls RemoveCue when the given cue
             // has an associated track, but doesn't return
             // the error from it, so we wont either.
-            if let Err(_) = old_track.RemoveCue(cue) {
+            if old_track.RemoveCue(cue).is_err() {
                 warn!("Failed to remove cues for the added cue's text track");
             }
         }

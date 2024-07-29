@@ -4,15 +4,17 @@
 
 // check-tidy: no specs after this line
 
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::TestBindingPairIterableBinding::TestBindingPairIterableMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::iterable::Iterable;
-use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
 
 #[dom_struct]
 pub struct TestBindingPairIterable {
@@ -27,13 +29,13 @@ impl Iterable for TestBindingPairIterable {
         self.map.borrow().len() as u32
     }
     fn get_value_at_index(&self, index: u32) -> u32 {
-        self.map
+        *self
+            .map
             .borrow()
             .iter()
             .nth(index as usize)
             .map(|a| &a.1)
             .unwrap()
-            .clone()
     }
     fn get_key_at_index(&self, index: u32) -> DOMString {
         self.map
@@ -47,19 +49,23 @@ impl Iterable for TestBindingPairIterable {
 }
 
 impl TestBindingPairIterable {
-    fn new(global: &GlobalScope) -> DomRoot<TestBindingPairIterable> {
-        reflect_dom_object(
+    fn new(global: &GlobalScope, proto: Option<HandleObject>) -> DomRoot<TestBindingPairIterable> {
+        reflect_dom_object_with_proto(
             Box::new(TestBindingPairIterable {
                 reflector: Reflector::new(),
                 map: DomRefCell::new(vec![]),
             }),
             global,
+            proto,
         )
     }
 
     #[allow(non_snake_case)]
-    pub fn Constructor(global: &GlobalScope) -> Fallible<DomRoot<TestBindingPairIterable>> {
-        Ok(TestBindingPairIterable::new(global))
+    pub fn Constructor(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+    ) -> Fallible<DomRoot<TestBindingPairIterable>> {
+        Ok(TestBindingPairIterable::new(global, proto))
     }
 }
 

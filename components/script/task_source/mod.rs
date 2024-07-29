@@ -4,20 +4,24 @@
 
 pub mod dom_manipulation;
 pub mod file_reading;
+pub mod gamepad;
 pub mod history_traversal;
 pub mod media_element;
 pub mod networking;
 pub mod performance_timeline;
 pub mod port_message;
 pub mod remote_event;
+pub mod rendering;
 pub mod timer;
 pub mod user_interaction;
 pub mod websocket;
 
+use std::result::Result;
+
+use enum_iterator::IntoEnumIterator;
+
 use crate::dom::globalscope::GlobalScope;
 use crate::task::{TaskCanceller, TaskOnce};
-use enum_iterator::IntoEnumIterator;
-use std::result::Result;
 
 // The names of all task sources, used to differentiate TaskCancellers.
 // Note: When adding a task source, update this enum.
@@ -33,9 +37,13 @@ pub enum TaskSourceName {
     PortMessage,
     UserInteraction,
     RemoteEvent,
+    /// <https://html.spec.whatwg.org/multipage/#rendering-task-source>
+    Rendering,
     MediaElement,
     Websocket,
     Timer,
+    /// <https://www.w3.org/TR/gamepad/#dfn-gamepad-task-source>
+    Gamepad,
 }
 
 impl TaskSourceName {

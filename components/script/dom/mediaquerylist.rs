@@ -2,9 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use style::media_queries::MediaList;
+use style_traits::ToCss;
+
 use crate::dom::bindings::codegen::Bindings::EventListenerBinding::EventListener;
-use crate::dom::bindings::codegen::Bindings::EventTargetBinding::AddEventListenerOptions;
-use crate::dom::bindings::codegen::Bindings::EventTargetBinding::EventListenerOptions;
+use crate::dom::bindings::codegen::Bindings::EventTargetBinding::{
+    AddEventListenerOptions, EventListenerOptions,
+};
 use crate::dom::bindings::codegen::Bindings::MediaQueryListBinding::MediaQueryListMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::reflect_dom_object;
@@ -12,11 +20,6 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
 use crate::dom::eventtarget::EventTarget;
-use dom_struct::dom_struct;
-use std::cell::Cell;
-use std::rc::Rc;
-use style::media_queries::MediaList;
-use style_traits::ToCss;
 
 pub enum MediaQueryListMatchState {
     Same(bool),
@@ -27,6 +30,7 @@ pub enum MediaQueryListMatchState {
 pub struct MediaQueryList {
     eventtarget: EventTarget,
     document: Dom<Document>,
+    #[no_trace]
     media_query_list: MediaList,
     last_match_state: Cell<Option<bool>>,
 }
@@ -36,7 +40,7 @@ impl MediaQueryList {
         MediaQueryList {
             eventtarget: EventTarget::new_inherited(),
             document: Dom::from_ref(document),
-            media_query_list: media_query_list,
+            media_query_list,
             last_match_state: Cell::new(None),
         }
     }
@@ -68,8 +72,9 @@ impl MediaQueryList {
     }
 
     pub fn evaluate(&self) -> bool {
+        let quirks_mode = self.document.quirks_mode();
         self.media_query_list
-            .evaluate(&self.document.device(), self.document.quirks_mode())
+            .evaluate(self.document.window().layout().device(), quirks_mode)
     }
 }
 

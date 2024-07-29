@@ -2,13 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use mime::{self, Mime};
-use net::mime_classifier::{ApacheBugFlag, MimeClassifier, Mp4Matcher, NoSniffFlag};
-use net_traits::LoadContext;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{self, PathBuf};
+
+use mime::{self, Mime};
+use net::mime_classifier::{ApacheBugFlag, MimeClassifier, Mp4Matcher, NoSniffFlag};
+use net_traits::LoadContext;
 
 fn read_file(path: &path::Path) -> io::Result<Vec<u8>> {
     let mut file = File::open(path)?;
@@ -43,7 +44,7 @@ fn test_sniff_mp4_matcher_long() {
     let matcher = Mp4Matcher;
 
     let mut data: [u8; 260] = [0; 260];
-    &data[..11].clone_from_slice(&[
+    let _ = &data[..11].clone_from_slice(&[
         0x00, 0x00, 0x01, 0x04, 0x66, 0x74, 0x79, 0x70, 0x6D, 0x70, 0x34,
     ]);
 
@@ -52,7 +53,7 @@ fn test_sniff_mp4_matcher_long() {
 
 #[test]
 fn test_validate_classifier() {
-    let classifier = MimeClassifier::new();
+    let classifier = MimeClassifier::default();
     classifier.validate().expect("Validation error")
 }
 
@@ -73,7 +74,7 @@ fn test_sniff_with_flags(
     let mut filename = PathBuf::from("tests/parsable_mime/");
     filename.push(filename_orig);
 
-    let classifier = MimeClassifier::new();
+    let classifier = MimeClassifier::default();
 
     let read_result = read_file(&filename);
 

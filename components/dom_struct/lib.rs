@@ -2,12 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-extern crate proc_macro;
-#[macro_use]
-extern crate quote;
-extern crate syn;
-
 use proc_macro::TokenStream;
+use quote::quote;
 use syn::*;
 
 #[proc_macro_attribute]
@@ -16,21 +12,21 @@ pub fn dom_struct(args: TokenStream, input: TokenStream) -> TokenStream {
         panic!("#[dom_struct] takes no arguments");
     }
     let attributes = quote! {
-        #[derive(DenyPublicFields, DomObject, JSTraceable, MallocSizeOf)]
-        #[unrooted_must_root_lint::must_root]
+        #[derive(deny_public_fields::DenyPublicFields, domobject_derive::DomObject, JSTraceable, MallocSizeOf)]
+        #[crown::unrooted_must_root_lint::must_root]
         #[repr(C)]
     };
 
     // Work around https://github.com/rust-lang/rust/issues/46489
     let attributes: TokenStream = attributes.to_string().parse().unwrap();
 
-    let output: TokenStream = attributes.into_iter().chain(input.into_iter()).collect();
+    let output: TokenStream = attributes.into_iter().chain(input).collect();
 
     let item: Item = syn::parse(output).unwrap();
 
     if let Item::Struct(s) = item {
         let s2 = s.clone();
-        if s.generics.params.len() > 0 {
+        if !s.generics.params.is_empty() {
             return quote!(#s2).into();
         }
         if let Fields::Named(ref f) = s.fields {

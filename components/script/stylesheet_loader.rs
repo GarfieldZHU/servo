@@ -2,6 +2,32 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::atomic::AtomicBool;
+use std::sync::Mutex;
+
+use base::id::PipelineId;
+use cssparser::SourceLocation;
+use encoding_rs::UTF_8;
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use mime::{self, Mime};
+use net_traits::request::{CorsSettings, Destination, Referrer, RequestBuilder};
+use net_traits::{
+    FetchMetadata, FetchResponseListener, FilteredMetadata, Metadata, NetworkError, ReferrerPolicy,
+    ResourceFetchTiming, ResourceTimingType,
+};
+use servo_arc::Arc;
+use servo_url::{ImmutableOrigin, ServoUrl};
+use style::media_queries::MediaList;
+use style::parser::ParserContext;
+use style::shared_lock::{Locked, SharedRwLock};
+use style::stylesheets::import_rule::{ImportLayer, ImportSheet, ImportSupportsCondition};
+use style::stylesheets::{
+    CssRules, ImportRule, Origin, Stylesheet, StylesheetContents,
+    StylesheetLoader as StyleStylesheetLoader, UrlExtraData,
+};
+use style::values::CssUrl;
+
 use crate::document_loader::LoadType;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
@@ -18,33 +44,6 @@ use crate::dom::performanceresourcetiming::InitiatorType;
 use crate::dom::shadowroot::ShadowRoot;
 use crate::fetch::create_a_potential_cors_request;
 use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
-use cssparser::SourceLocation;
-use encoding_rs::UTF_8;
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use mime::{self, Mime};
-use msg::constellation_msg::PipelineId;
-use net_traits::request::{CorsSettings, Destination, Referrer, RequestBuilder};
-use net_traits::{
-    FetchMetadata, FetchResponseListener, FilteredMetadata, Metadata, NetworkError, ReferrerPolicy,
-};
-use net_traits::{ResourceFetchTiming, ResourceTimingType};
-use parking_lot::RwLock;
-use servo_arc::Arc;
-use servo_url::ImmutableOrigin;
-use servo_url::ServoUrl;
-use std::mem;
-use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
-use style::media_queries::MediaList;
-use style::parser::ParserContext;
-use style::shared_lock::{Locked, SharedRwLock};
-use style::stylesheets::import_rule::ImportSheet;
-use style::stylesheets::StylesheetLoader as StyleStylesheetLoader;
-use style::stylesheets::{
-    CssRules, ImportRule, Namespaces, Origin, Stylesheet, StylesheetContents,
-};
-use style::values::CssUrl;
 
 pub trait StylesheetOwner {
     /// Returns whether this element was inserted by the parser (i.e., it should
@@ -134,14 +133,14 @@ impl FetchResponseListener for StylesheetContext {
             });
 
             let data = if is_css {
-                mem::replace(&mut self.data, vec![])
+                std::mem::take(&mut self.data)
             } else {
                 vec![]
             };
 
             // TODO: Get the actual value. http://dev.w3.org/csswg/css-syntax/#environment-encoding
             let environment_encoding = UTF_8;
-            let protocol_encoding_label = metadata.charset.as_ref().map(|s| &**s);
+            let protocol_encoding_label = metadata.charset.as_deref();
             let final_url = metadata.final_url;
 
             let win = window_from_node(&*elem);
@@ -159,7 +158,7 @@ impl FetchResponseListener for StylesheetContext {
                         let shared_lock = document.style_shared_lock().clone();
                         let sheet = Arc::new(Stylesheet::from_bytes(
                             &data,
-                            final_url,
+                            UrlExtraData(final_url.get_arc()),
                             protocol_encoding_label,
                             Some(environment_encoding),
                             Origin::Author,
@@ -179,14 +178,18 @@ impl FetchResponseListener for StylesheetContext {
                 },
                 StylesheetContextSource::Import(ref stylesheet) => {
                     Stylesheet::update_from_bytes(
-                        &stylesheet,
+                        stylesheet,
                         &data,
                         protocol_encoding_label,
                         Some(environment_encoding),
-                        final_url,
+                        UrlExtraData(final_url.get_arc()),
                         Some(&loader),
                         win.css_error_reporter(),
                     );
+
+                    // Layout knows about this stylesheet, because Stylo added it to the Stylist,
+                    // but Layout doesn't know about any new web fonts that it contains.
+                    document.load_web_fonts_from_stylesheet(stylesheet.clone());
                 },
             }
 
@@ -277,8 +280,8 @@ impl<'a> StylesheetLoader<'a> {
             .downcast::<HTMLLinkElement>()
             .map(HTMLLinkElement::get_request_generation_id);
         let context = ::std::sync::Arc::new(Mutex::new(StylesheetContext {
-            elem: Trusted::new(&*self.elem),
-            source: source,
+            elem: Trusted::new(self.elem),
+            source,
             url: url.clone(),
             metadata: None,
             data: vec![],
@@ -361,27 +364,39 @@ impl<'a> StyleStylesheetLoader for StylesheetLoader<'a> {
         context: &ParserContext,
         lock: &SharedRwLock,
         media: Arc<Locked<MediaList>>,
+        supports: Option<ImportSupportsCondition>,
+        layer: ImportLayer,
     ) -> Arc<Locked<ImportRule>> {
+        // Ensure the supports conditions for this @import are true, if not, refuse to load
+        if !supports.as_ref().map_or(true, |s| s.enabled) {
+            return Arc::new(lock.wrap(ImportRule {
+                url,
+                stylesheet: ImportSheet::new_refused(),
+                supports,
+                layer,
+                source_location,
+            }));
+        }
+
         let sheet = Arc::new(Stylesheet {
-            contents: StylesheetContents {
-                rules: CssRules::new(Vec::new(), lock),
-                origin: context.stylesheet_origin,
-                url_data: RwLock::new(context.url_data.clone()),
-                quirks_mode: context.quirks_mode,
-                namespaces: RwLock::new(Namespaces::default()),
-                source_map_url: RwLock::new(None),
-                source_url: RwLock::new(None),
-            },
-            media: media,
+            contents: StylesheetContents::from_data(
+                CssRules::new(Vec::new(), lock),
+                context.stylesheet_origin,
+                context.url_data.clone(),
+                context.quirks_mode,
+            ),
+            media,
             shared_lock: lock.clone(),
             disabled: AtomicBool::new(false),
         });
 
-        let stylesheet = ImportSheet(sheet.clone());
+        let stylesheet = ImportSheet::new(sheet.clone());
         let import = ImportRule {
             url,
-            source_location,
             stylesheet,
+            supports,
+            layer,
+            source_location,
         };
 
         let url = match import.url.url().cloned() {
@@ -392,7 +407,7 @@ impl<'a> StyleStylesheetLoader for StylesheetLoader<'a> {
         // TODO (mrnayak) : Whether we should use the original loader's CORS
         // setting? Fix this when spec has more details.
         let source = StylesheetContextSource::Import(sheet.clone());
-        self.load(source, url, None, "".to_owned());
+        self.load(source, url.into(), None, "".to_owned());
 
         Arc::new(lock.wrap(import))
     }

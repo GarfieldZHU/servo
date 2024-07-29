@@ -2,15 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::convert::TryInto;
+
+use canvas_traits::webgl::{WebGLCommand, WebGLContextId, WebGLTextureId};
+use dom_struct::dom_struct;
+use euclid::{Rect, Size2D};
+use js::rust::HandleObject;
+use webxr_api::{ContextId as WebXRContextId, LayerId, LayerInit, Viewport};
+
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextMethods;
-use crate::dom::bindings::codegen::Bindings::XRWebGLLayerBinding::XRWebGLLayerInit;
-use crate::dom::bindings::codegen::Bindings::XRWebGLLayerBinding::XRWebGLLayerMethods;
-use crate::dom::bindings::codegen::Bindings::XRWebGLLayerBinding::XRWebGLRenderingContext;
-use crate::dom::bindings::error::Error;
-use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::codegen::Bindings::XRWebGLLayerBinding::{
+    XRWebGLLayerInit, XRWebGLLayerMethods, XRWebGLRenderingContext,
+};
+use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::webglframebuffer::WebGLFramebuffer;
@@ -23,16 +30,6 @@ use crate::dom::xrlayer::XRLayer;
 use crate::dom::xrsession::XRSession;
 use crate::dom::xrview::XRView;
 use crate::dom::xrviewport::XRViewport;
-use canvas_traits::webgl::WebGLCommand;
-use canvas_traits::webgl::WebGLContextId;
-use canvas_traits::webgl::WebGLTextureId;
-use dom_struct::dom_struct;
-use euclid::{Rect, Size2D};
-use std::convert::TryInto;
-use webxr_api::ContextId as WebXRContextId;
-use webxr_api::LayerId;
-use webxr_api::LayerInit;
-use webxr_api::Viewport;
 
 impl<'a> From<&'a XRWebGLLayerInit> for LayerInit {
     fn from(init: &'a XRWebGLLayerInit) -> LayerInit {
@@ -78,15 +75,16 @@ impl XRWebGLLayer {
         }
     }
 
-    pub fn new(
+    fn new(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         session: &XRSession,
         context: &WebGLRenderingContext,
         init: &XRWebGLLayerInit,
         framebuffer: Option<&WebGLFramebuffer>,
         layer_id: Option<LayerId>,
     ) -> DomRoot<XRWebGLLayer> {
-        reflect_dom_object(
+        reflect_dom_object_with_proto(
             Box::new(XRWebGLLayer::new_inherited(
                 session,
                 context,
@@ -95,13 +93,15 @@ impl XRWebGLLayer {
                 layer_id,
             )),
             global,
+            proto,
         )
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrwebgllayer-xrwebgllayer
+    /// <https://immersive-web.github.io/webxr/#dom-xrwebgllayer-xrwebgllayer>
     #[allow(non_snake_case)]
     pub fn Constructor(
         global: &Window,
+        proto: Option<HandleObject>,
         session: &XRSession,
         context: XRWebGLRenderingContext,
         init: &XRWebGLLayerInit,
@@ -147,6 +147,7 @@ impl XRWebGLLayer {
         // Step 10. "Return layer."
         Ok(XRWebGLLayer::new(
             &global.global(),
+            proto,
             session,
             &context,
             init,
@@ -164,7 +165,7 @@ impl XRWebGLLayer {
     }
 
     pub fn session(&self) -> &XRSession {
-        &self.xr_layer.session()
+        self.xr_layer.session()
     }
 
     pub fn size(&self) -> Size2D<u32, Viewport> {
@@ -281,32 +282,32 @@ impl XRWebGLLayer {
 }
 
 impl XRWebGLLayerMethods for XRWebGLLayer {
-    /// https://immersive-web.github.io/webxr/#dom-xrwebgllayer-antialias
+    /// <https://immersive-web.github.io/webxr/#dom-xrwebgllayer-antialias>
     fn Antialias(&self) -> bool {
         self.antialias
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrwebgllayer-ignoredepthvalues
+    /// <https://immersive-web.github.io/webxr/#dom-xrwebgllayer-ignoredepthvalues>
     fn IgnoreDepthValues(&self) -> bool {
         self.ignore_depth_values
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrwebgllayer-framebuffer
+    /// <https://immersive-web.github.io/webxr/#dom-xrwebgllayer-framebuffer>
     fn GetFramebuffer(&self) -> Option<DomRoot<WebGLFramebuffer>> {
         self.framebuffer.as_ref().map(|x| DomRoot::from_ref(&**x))
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrwebgllayer-framebufferwidth
+    /// <https://immersive-web.github.io/webxr/#dom-xrwebgllayer-framebufferwidth>
     fn FramebufferWidth(&self) -> u32 {
         self.size().width
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrwebgllayer-framebufferheight
+    /// <https://immersive-web.github.io/webxr/#dom-xrwebgllayer-framebufferheight>
     fn FramebufferHeight(&self) -> u32 {
         self.size().height
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrwebgllayer-getviewport
+    /// <https://immersive-web.github.io/webxr/#dom-xrwebgllayer-getviewport>
     fn GetViewport(&self, view: &XRView) -> Option<DomRoot<XRViewport>> {
         if self.session() != view.session() {
             return None;

@@ -2,15 +2,44 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::fmt;
+use std::str::FromStr;
+use std::sync::Arc;
+
+use canvas_traits::canvas::{
+    Canvas2dMsg, CanvasId, CanvasMsg, CompositionOrBlending, Direction, FillOrStrokeStyle,
+    FillRule, LineCapStyle, LineJoinStyle, LinearGradientStyle, RadialGradientStyle,
+    RepetitionStyle, TextAlign, TextBaseline, TextMetrics as CanvasTextMetrics,
+};
+use cssparser::color::clamp_unit_f32;
+use cssparser::{Parser, ParserInput};
+use euclid::default::{Point2D, Rect, Size2D, Transform2D};
+use euclid::vec2;
+use ipc_channel::ipc::{self, IpcSender, IpcSharedMemory};
+use net_traits::image_cache::{ImageCache, ImageResponse};
+use net_traits::request::CorsSettings;
+use pixels::PixelFormat;
+use profile_traits::ipc as profiled_ipc;
+use script_traits::ScriptMsg;
+use servo_url::{ImmutableOrigin, ServoUrl};
+use style::color::{AbsoluteColor, ColorFlags, ColorSpace};
+use style::context::QuirksMode;
+use style::parser::ParserContext;
+use style::properties::longhands::font_variant_caps::computed_value::T as FontVariantCaps;
+use style::properties::style_structs::Font;
+use style::stylesheets::{CssRuleType, Origin};
+use style::values::computed::font::FontStyle;
+use style::values::specified::color::Color;
+use style_traits::values::ToCss;
+use style_traits::{CssWriter, ParsingMode};
+use url::Url;
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasDirection;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasFillRule;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasImageSource;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineCap;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineJoin;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasTextAlign;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasTextBaseline;
-use crate::dom::bindings::codegen::Bindings::ImageDataBinding::ImageDataMethods;
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
+    CanvasDirection, CanvasFillRule, CanvasImageSource, CanvasLineCap, CanvasLineJoin,
+    CanvasTextAlign, CanvasTextBaseline, ImageDataMethods,
+};
 use crate::dom::bindings::codegen::UnionTypes::StringOrCanvasGradientOrCanvasPattern;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -20,8 +49,7 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::canvasgradient::{CanvasGradient, CanvasGradientStyle, ToFillOrStrokeStyle};
 use crate::dom::canvaspattern::CanvasPattern;
 use crate::dom::dommatrix::DOMMatrix;
-use crate::dom::element::cors_setting_for_element;
-use crate::dom::element::Element;
+use crate::dom::element::{cors_setting_for_element, Element};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlcanvaselement::{CanvasContext, HTMLCanvasElement};
 use crate::dom::imagedata::ImageData;
@@ -30,38 +58,12 @@ use crate::dom::offscreencanvas::{OffscreenCanvas, OffscreenCanvasContext};
 use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
 use crate::dom::textmetrics::TextMetrics;
 use crate::unpremultiplytable::UNPREMULTIPLY_TABLE;
-use canvas_traits::canvas::{Canvas2dMsg, CanvasId, CanvasMsg, Direction, TextAlign, TextBaseline};
-use canvas_traits::canvas::{CompositionOrBlending, FillOrStrokeStyle, FillRule};
-use canvas_traits::canvas::{LineCapStyle, LineJoinStyle, LinearGradientStyle};
-use canvas_traits::canvas::{RadialGradientStyle, RepetitionStyle};
-use cssparser::Color as CSSColor;
-use cssparser::{Parser, ParserInput, RGBA};
-use euclid::{
-    default::{Point2D, Rect, Size2D, Transform2D},
-    vec2,
-};
-use ipc_channel::ipc::{self, IpcSender};
-use net_traits::image_cache::{ImageCache, ImageResponse};
-use net_traits::request::CorsSettings;
-use pixels::PixelFormat;
-use profile_traits::ipc as profiled_ipc;
-use script_traits::ScriptMsg;
-use serde_bytes::ByteBuf;
-use servo_url::{ImmutableOrigin, ServoUrl};
-use std::cell::Cell;
-use std::fmt;
-use std::str::FromStr;
-use std::sync::Arc;
-use style::properties::longhands::font_variant_caps::computed_value::T as FontVariantCaps;
-use style::properties::style_structs::Font;
-use style::values::computed::font::FontStyle;
-use style_traits::values::ToCss;
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 #[allow(dead_code)]
 pub(crate) enum CanvasFillOrStrokeStyle {
-    Color(RGBA),
+    Color(#[no_trace] AbsoluteColor),
     Gradient(Dom<CanvasGradient>),
     Pattern(Dom<CanvasPattern>),
 }
@@ -76,26 +78,35 @@ impl CanvasFillOrStrokeStyle {
     }
 }
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 pub(crate) struct CanvasContextState {
     global_alpha: f64,
+    #[no_trace]
     global_composition: CompositionOrBlending,
     image_smoothing_enabled: bool,
     fill_style: CanvasFillOrStrokeStyle,
     stroke_style: CanvasFillOrStrokeStyle,
     line_width: f64,
+    #[no_trace]
     line_cap: LineCapStyle,
+    #[no_trace]
     line_join: LineJoinStyle,
     miter_limit: f64,
+    #[no_trace]
     transform: Transform2D<f32>,
     shadow_offset_x: f64,
     shadow_offset_y: f64,
     shadow_blur: f64,
-    shadow_color: RGBA,
+    #[no_trace]
+    shadow_color: AbsoluteColor,
+    #[no_trace]
     font_style: Option<Font>,
+    #[no_trace]
     text_align: TextAlign,
+    #[no_trace]
     text_baseline: TextBaseline,
+    #[no_trace]
     direction: Direction,
 }
 
@@ -103,13 +114,12 @@ impl CanvasContextState {
     const DEFAULT_FONT_STYLE: &'static str = "10px sans-serif";
 
     pub(crate) fn new() -> CanvasContextState {
-        let black = RGBA::new(0, 0, 0, 255);
         CanvasContextState {
             global_alpha: 1.0,
             global_composition: CompositionOrBlending::default(),
             image_smoothing_enabled: true,
-            fill_style: CanvasFillOrStrokeStyle::Color(black),
-            stroke_style: CanvasFillOrStrokeStyle::Color(black),
+            fill_style: CanvasFillOrStrokeStyle::Color(AbsoluteColor::BLACK),
+            stroke_style: CanvasFillOrStrokeStyle::Color(AbsoluteColor::BLACK),
             line_width: 1.0,
             line_cap: LineCapStyle::Butt,
             line_join: LineJoinStyle::Miter,
@@ -118,7 +128,7 @@ impl CanvasContextState {
             shadow_offset_x: 0.0,
             shadow_offset_y: 0.0,
             shadow_blur: 0.0,
-            shadow_color: RGBA::transparent(),
+            shadow_color: AbsoluteColor::TRANSPARENT_BLACK,
             font_style: None,
             text_align: Default::default(),
             text_baseline: Default::default(),
@@ -127,21 +137,27 @@ impl CanvasContextState {
     }
 }
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 pub(crate) struct CanvasState {
     #[ignore_malloc_size_of = "Defined in ipc-channel"]
+    #[no_trace]
     ipc_renderer: IpcSender<CanvasMsg>,
+    #[no_trace]
     canvas_id: CanvasId,
     state: DomRefCell<CanvasContextState>,
     origin_clean: Cell<bool>,
     #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
     image_cache: Arc<dyn ImageCache>,
     /// The base URL for resolving CSS image URL values.
-    /// Needed because of https://github.com/servo/servo/issues/17625
+    /// Needed because of <https://github.com/servo/servo/issues/17625>
+    #[no_trace]
     base_url: ServoUrl,
+    #[no_trace]
     origin: ImmutableOrigin,
     /// Any missing image URLs.
+    #[no_trace]
     missing_image_urls: DomRefCell<Vec<ServoUrl>>,
     saved_states: DomRefCell<Vec<CanvasContextState>>,
 }
@@ -167,8 +183,8 @@ impl CanvasState {
             global.origin().immutable().clone()
         };
         CanvasState {
-            ipc_renderer: ipc_renderer,
-            canvas_id: canvas_id,
+            ipc_renderer,
+            canvas_id,
             state: DomRefCell::new(CanvasContextState::new()),
             origin_clean: Cell::new(true),
             image_cache: global.image_cache(),
@@ -188,7 +204,7 @@ impl CanvasState {
     }
 
     pub fn get_canvas_id(&self) -> CanvasId {
-        self.canvas_id.clone()
+        self.canvas_id
     }
 
     pub fn send_canvas_2d_msg(&self, msg: Canvas2dMsg) {
@@ -201,7 +217,14 @@ impl CanvasState {
     pub fn set_bitmap_dimensions(&self, size: Size2D<u64>) {
         self.reset_to_initial_state();
         self.ipc_renderer
-            .send(CanvasMsg::Recreate(size, self.get_canvas_id()))
+            .send(CanvasMsg::Recreate(Some(size), self.get_canvas_id()))
+            .unwrap();
+    }
+
+    pub fn reset(&self) {
+        self.reset_to_initial_state();
+        self.ipc_renderer
+            .send(CanvasMsg::Recreate(None, self.get_canvas_id()))
             .unwrap();
     }
 
@@ -249,7 +272,7 @@ impl CanvasState {
         &self,
         url: ServoUrl,
         cors_setting: Option<CorsSettings>,
-    ) -> Option<(Vec<u8>, Size2D<u32>)> {
+    ) -> Option<(IpcSharedMemory, Size2D<u32>)> {
         let img = match self.request_image_from_cache(url, cors_setting) {
             ImageResponse::Loaded(img, _) => img,
             ImageResponse::PlaceholderLoaded(_, _) |
@@ -261,7 +284,7 @@ impl CanvasState {
 
         let image_size = Size2D::new(img.width, img.height);
         let image_data = match img.format {
-            PixelFormat::BGRA8 => img.bytes.to_vec(),
+            PixelFormat::BGRA8 => img.bytes.clone(),
             pixel_format => unimplemented!("unsupported pixel format ({:?})", pixel_format),
         };
 
@@ -287,43 +310,6 @@ impl CanvasState {
         }
     }
 
-    fn parse_color(&self, canvas: Option<&HTMLCanvasElement>, string: &str) -> Result<RGBA, ()> {
-        let mut input = ParserInput::new(string);
-        let mut parser = Parser::new(&mut input);
-        let color = CSSColor::parse(&mut parser);
-        if parser.is_exhausted() {
-            match color {
-                Ok(CSSColor::RGBA(rgba)) => Ok(rgba),
-                Ok(CSSColor::CurrentColor) => {
-                    // TODO: https://github.com/whatwg/html/issues/1099
-                    // Reconsider how to calculate currentColor in a display:none canvas
-
-                    // TODO: will need to check that the context bitmap mode is fixed
-                    // once we implement CanvasProxy
-                    let canvas = match canvas {
-                        // https://drafts.css-houdini.org/css-paint-api/#2d-rendering-context
-                        // Whenever "currentColor" is used as a color in the PaintRenderingContext2D API,
-                        // it is treated as opaque black.
-                        None => return Ok(RGBA::new(0, 0, 0, 255)),
-                        Some(ref canvas) => &**canvas,
-                    };
-
-                    let canvas_element = canvas.upcast::<Element>();
-
-                    match canvas_element.style() {
-                        Some(ref s) if canvas_element.has_css_layout_box() => {
-                            Ok(s.get_inherited_text().color)
-                        },
-                        _ => Ok(RGBA::new(0, 0, 0, 255)),
-                    }
-                },
-                _ => Err(()),
-            }
-        } else {
-            Err(())
-        }
-    }
-
     pub fn get_rect(&self, canvas_size: Size2D<u64>, rect: Rect<u64>) -> Vec<u8> {
         assert!(self.origin_is_clean());
 
@@ -343,27 +329,29 @@ impl CanvasState {
         pixels
     }
 
-    //
-    // drawImage coordinates explained
-    //
-    //  Source Image      Destination Canvas
-    // +-------------+     +-------------+
-    // |             |     |             |
-    // |(sx,sy)      |     |(dx,dy)      |
-    // |   +----+    |     |   +----+    |
-    // |   |    |    |     |   |    |    |
-    // |   |    |sh  |---->|   |    |dh  |
-    // |   |    |    |     |   |    |    |
-    // |   +----+    |     |   +----+    |
-    // |     sw      |     |     dw      |
-    // |             |     |             |
-    // +-------------+     +-------------+
-    //
-    //
-    // The rectangle (sx, sy, sw, sh) from the source image
-    // is copied on the rectangle (dx, dy, dh, dw) of the destination canvas
-    //
-    // https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage
+    ///
+    /// drawImage coordinates explained
+    ///
+    /// ```
+    ///  Source Image      Destination Canvas
+    /// +-------------+     +-------------+
+    /// |             |     |             |
+    /// |(sx,sy)      |     |(dx,dy)      |
+    /// |   +----+    |     |   +----+    |
+    /// |   |    |    |     |   |    |    |
+    /// |   |    |sh  |---->|   |    |dh  |
+    /// |   |    |    |     |   |    |    |
+    /// |   +----+    |     |   +----+    |
+    /// |     sw      |     |     dw      |
+    /// |             |     |             |
+    /// +-------------+     +-------------+
+    /// ```
+    ///
+    /// The rectangle (sx, sy, sw, sh) from the source image
+    /// is copied on the rectangle (dx, dy, dh, dw) of the destination canvas
+    ///
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage>
+    #[allow(clippy::too_many_arguments)]
     fn draw_image_internal(
         &self,
         htmlcanvas: Option<&HTMLCanvasElement>,
@@ -384,7 +372,7 @@ impl CanvasState {
                     return Err(Error::InvalidState);
                 }
 
-                self.draw_html_canvas_element(&canvas, htmlcanvas, sx, sy, sw, sh, dx, dy, dw, dh)
+                self.draw_html_canvas_element(canvas, htmlcanvas, sx, sy, sw, sh, dx, dy, dw, dh)
             },
             CanvasImageSource::OffscreenCanvas(ref canvas) => {
                 // https://html.spec.whatwg.org/multipage/#check-the-usability-of-the-image-argument
@@ -392,7 +380,7 @@ impl CanvasState {
                     return Err(Error::InvalidState);
                 }
 
-                self.draw_offscreen_canvas(&canvas, htmlcanvas, sx, sy, sw, sh, dx, dy, dw, dh)
+                self.draw_offscreen_canvas(canvas, htmlcanvas, sx, sy, sw, sh, dx, dy, dw, dh)
             },
             CanvasImageSource::HTMLImageElement(ref image) => {
                 // https://html.spec.whatwg.org/multipage/#drawing-images
@@ -438,6 +426,7 @@ impl CanvasState {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_offscreen_canvas(
         &self,
         canvas: &OffscreenCanvas,
@@ -481,12 +470,10 @@ impl CanvasState {
                 },
             }
         } else {
-            self.send_canvas_2d_msg(Canvas2dMsg::DrawImage(
-                None,
+            self.send_canvas_2d_msg(Canvas2dMsg::DrawEmptyImage(
                 image_size,
                 dest_rect,
                 source_rect,
-                smoothing_enabled,
             ));
         }
 
@@ -494,6 +481,7 @@ impl CanvasState {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_html_canvas_element(
         &self,
         canvas: &HTMLCanvasElement,             // source canvas
@@ -543,12 +531,10 @@ impl CanvasState {
                 _ => return Err(Error::InvalidState),
             }
         } else {
-            self.send_canvas_2d_msg(Canvas2dMsg::DrawImage(
-                None,
+            self.send_canvas_2d_msg(Canvas2dMsg::DrawEmptyImage(
                 image_size,
                 dest_rect,
                 source_rect,
-                smoothing_enabled,
             ));
         }
 
@@ -556,6 +542,7 @@ impl CanvasState {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fetch_and_draw_image_data(
         &self,
         canvas: Option<&HTMLCanvasElement>,
@@ -571,10 +558,9 @@ impl CanvasState {
         dh: Option<f64>,
     ) -> ErrorResult {
         debug!("Fetching image {}.", url);
-        let (mut image_data, image_size) = self
+        let (image_data, image_size) = self
             .fetch_image_data(url, cors_setting)
             .ok_or(Error::InvalidState)?;
-        pixels::rgba8_premultiply_inplace(&mut image_data);
         let image_size = image_size.to_f64();
 
         let dw = dw.unwrap_or(image_size.width);
@@ -592,7 +578,7 @@ impl CanvasState {
 
         let smoothing_enabled = self.state.borrow().image_smoothing_enabled;
         self.send_canvas_2d_msg(Canvas2dMsg::DrawImage(
-            Some(ByteBuf::from(image_data)),
+            image_data,
             image_size,
             dest_rect,
             source_rect,
@@ -603,15 +589,16 @@ impl CanvasState {
     }
 
     pub fn mark_as_dirty(&self, canvas: Option<&HTMLCanvasElement>) {
-        if let Some(ref canvas) = canvas {
+        if let Some(canvas) = canvas {
             canvas.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
         }
     }
 
-    // It is used by DrawImage to calculate the size of the source and destination rectangles based
-    // on the drawImage call arguments
-    // source rectangle = area of the original image to be copied
-    // destination rectangle = area of the destination canvas where the source image is going to be drawn
+    /// It is used by DrawImage to calculate the size of the source and destination rectangles based
+    /// on the drawImage call arguments
+    /// source rectangle = area of the original image to be copied
+    /// destination rectangle = area of the destination canvas where the source image is going to be drawn
+    #[allow(clippy::too_many_arguments)]
     fn adjust_source_dest_rects(
         &self,
         image_size: Size2D<f64>,
@@ -626,7 +613,7 @@ impl CanvasState {
     ) -> (Rect<f64>, Rect<f64>) {
         let image_rect = Rect::new(
             Point2D::new(0f64, 0f64),
-            Size2D::new(image_size.width as f64, image_size.height as f64),
+            Size2D::new(image_size.width, image_size.height),
         );
 
         // The source rectangle is the rectangle whose corners are the four points (sx, sy),
@@ -749,10 +736,10 @@ impl CanvasState {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-shadowcolor
-    pub fn set_shadow_color(&self, value: DOMString) {
-        if let Ok(color) = parse_color(&value) {
-            self.state.borrow_mut().shadow_color = color;
-            self.send_canvas_2d_msg(Canvas2dMsg::SetShadowColor(color))
+    pub fn set_shadow_color(&self, canvas: Option<&HTMLCanvasElement>, value: DOMString) {
+        if let Ok(rgba) = parse_color(canvas, &value) {
+            self.state.borrow_mut().shadow_color = rgba;
+            self.send_canvas_2d_msg(Canvas2dMsg::SetShadowColor(rgba))
         }
     }
 
@@ -765,10 +752,10 @@ impl CanvasState {
                 StringOrCanvasGradientOrCanvasPattern::String(DOMString::from(result))
             },
             CanvasFillOrStrokeStyle::Gradient(ref gradient) => {
-                StringOrCanvasGradientOrCanvasPattern::CanvasGradient(DomRoot::from_ref(&*gradient))
+                StringOrCanvasGradientOrCanvasPattern::CanvasGradient(DomRoot::from_ref(gradient))
             },
             CanvasFillOrStrokeStyle::Pattern(ref pattern) => {
-                StringOrCanvasGradientOrCanvasPattern::CanvasPattern(DomRoot::from_ref(&*pattern))
+                StringOrCanvasGradientOrCanvasPattern::CanvasPattern(DomRoot::from_ref(pattern))
             },
         }
     }
@@ -781,7 +768,7 @@ impl CanvasState {
     ) {
         match value {
             StringOrCanvasGradientOrCanvasPattern::String(string) => {
-                if let Ok(rgba) = self.parse_color(canvas, &string) {
+                if let Ok(rgba) = parse_color(canvas, &string) {
                     self.state.borrow_mut().stroke_style = CanvasFillOrStrokeStyle::Color(rgba);
                 }
             },
@@ -808,10 +795,10 @@ impl CanvasState {
                 StringOrCanvasGradientOrCanvasPattern::String(DOMString::from(result))
             },
             CanvasFillOrStrokeStyle::Gradient(ref gradient) => {
-                StringOrCanvasGradientOrCanvasPattern::CanvasGradient(DomRoot::from_ref(&*gradient))
+                StringOrCanvasGradientOrCanvasPattern::CanvasGradient(DomRoot::from_ref(gradient))
             },
             CanvasFillOrStrokeStyle::Pattern(ref pattern) => {
-                StringOrCanvasGradientOrCanvasPattern::CanvasPattern(DomRoot::from_ref(&*pattern))
+                StringOrCanvasGradientOrCanvasPattern::CanvasPattern(DomRoot::from_ref(pattern))
             },
         }
     }
@@ -824,7 +811,7 @@ impl CanvasState {
     ) {
         match value {
             StringOrCanvasGradientOrCanvasPattern::String(string) => {
-                if let Ok(rgba) = self.parse_color(canvas, &string) {
+                if let Ok(rgba) = parse_color(canvas, &string) {
                     self.state.borrow_mut().fill_style = CanvasFillOrStrokeStyle::Color(rgba);
                 }
             },
@@ -857,7 +844,8 @@ impl CanvasState {
         )
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-context-2d-createradialgradient
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-createradialgradient>
+    #[allow(clippy::too_many_arguments)]
     pub fn create_radial_gradient(
         &self,
         global: &GlobalScope,
@@ -905,6 +893,7 @@ impl CanvasState {
                     .and_then(|url| {
                         self.fetch_image_data(url, cors_setting_for_element(image.upcast()))
                     })
+                    .map(|data| (data.0.to_vec(), data.1))
                     .ok_or(Error::InvalidState)?
             },
             CanvasImageSource::HTMLCanvasElement(ref canvas) => {
@@ -924,6 +913,7 @@ impl CanvasState {
             CanvasImageSource::CSSStyleValue(ref value) => value
                 .get_url(self.base_url.clone())
                 .and_then(|url| self.fetch_image_data(url, None))
+                .map(|data| (data.0.to_vec(), data.1))
                 .ok_or(Error::InvalidState)?,
         };
 
@@ -952,7 +942,7 @@ impl CanvasState {
         self.send_canvas_2d_msg(Canvas2dMsg::SaveContext);
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-restore
     pub fn restore(&self) {
         let mut saved_states = self.saved_states.borrow_mut();
@@ -969,7 +959,7 @@ impl CanvasState {
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-globalalpha
     pub fn set_global_alpha(&self, alpha: f64) {
-        if !alpha.is_finite() || alpha > 1.0 || alpha < 0.0 {
+        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
             return;
         }
 
@@ -1040,11 +1030,34 @@ impl CanvasState {
     }
 
     // https://html.spec.whatwg.org/multipage/#textmetrics
-    pub fn measure_text(&self, global: &GlobalScope, _text: DOMString) -> DomRoot<TextMetrics> {
-        // FIXME: for now faking the implementation of MeasureText().
-        // See https://github.com/servo/servo/issues/5411#issuecomment-533776291
+    pub fn measure_text(
+        &self,
+        global: &GlobalScope,
+        canvas: Option<&HTMLCanvasElement>,
+        text: DOMString,
+    ) -> DomRoot<TextMetrics> {
+        if self.state.borrow().font_style.is_none() {
+            self.set_font(canvas, CanvasContextState::DEFAULT_FONT_STYLE.into());
+        }
+
+        let (sender, receiver) = ipc::channel::<CanvasTextMetrics>().unwrap();
+        self.send_canvas_2d_msg(Canvas2dMsg::MeasureText(text.into(), sender));
+        let metrics = receiver.recv().unwrap();
+
         TextMetrics::new(
-            global, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            global,
+            metrics.width.into(),
+            metrics.actual_boundingbox_left.into(),
+            metrics.actual_boundingbox_right.into(),
+            metrics.font_boundingbox_ascent.into(),
+            metrics.font_boundingbox_descent.into(),
+            metrics.actual_boundingbox_ascent.into(),
+            metrics.actual_boundingbox_descent.into(),
+            metrics.em_height_ascent.into(),
+            metrics.em_height_descent.into(),
+            metrics.hanging_baseline.into(),
+            metrics.alphabetic_baseline.into(),
+            metrics.ideographic_baseline.into(),
         )
     }
 
@@ -1055,8 +1068,8 @@ impl CanvasState {
             None => return, // offscreen canvas doesn't have a placeholder canvas
         };
         let node = canvas.upcast::<Node>();
-        let window = window_from_node(&*canvas);
-        let resolved_font_style = match window.resolved_font_style_query(&node, value.to_string()) {
+        let window = window_from_node(canvas);
+        let resolved_font_style = match window.resolved_font_style_query(node, value.to_string()) {
             Some(value) => value,
             None => return, // syntax error
         };
@@ -1223,7 +1236,7 @@ impl CanvasState {
         if sw == 0 || sh == 0 {
             return Err(Error::IndexSize);
         }
-        ImageData::new(global, sw.abs() as u32, sh.abs() as u32, None)
+        ImageData::new(global, sw.unsigned_abs(), sh.unsigned_abs(), None)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-createimagedata
@@ -1293,8 +1306,8 @@ impl CanvasState {
         )
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-context-2d-putimagedata
-    #[allow(unsafe_code)]
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-putimagedata>
+    #[allow(unsafe_code, clippy::too_many_arguments)]
     pub fn put_image_data_(
         &self,
         canvas_size: Size2D<u64>,
@@ -1390,7 +1403,8 @@ impl CanvasState {
         )
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage>
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_image__(
         &self,
         canvas: Option<&HTMLCanvasElement>,
@@ -1495,14 +1509,9 @@ impl CanvasState {
 
         let (sin, cos) = (angle.sin(), angle.cos());
         let transform = self.state.borrow().transform;
-        self.state.borrow_mut().transform = transform.pre_transform(&Transform2D::row_major(
-            cos as f32,
-            sin as f32,
-            -sin as f32,
-            cos as f32,
-            0.0,
-            0.0,
-        ));
+        self.state.borrow_mut().transform =
+            Transform2D::new(cos as f32, sin as f32, -sin as f32, cos as f32, 0.0, 0.0)
+                .then(&transform);
         self.update_transform()
     }
 
@@ -1530,9 +1539,9 @@ impl CanvasState {
         }
 
         let transform = self.state.borrow().transform;
-        self.state.borrow_mut().transform = transform.pre_transform(&Transform2D::row_major(
-            a as f32, b as f32, c as f32, d as f32, e as f32, f as f32,
-        ));
+        self.state.borrow_mut().transform =
+            Transform2D::new(a as f32, b as f32, c as f32, d as f32, e as f32, f as f32)
+                .then(&transform);
         self.update_transform()
     }
 
@@ -1558,7 +1567,7 @@ impl CanvasState {
         }
 
         self.state.borrow_mut().transform =
-            Transform2D::row_major(a as f32, b as f32, c as f32, d as f32, e as f32, f as f32);
+            Transform2D::new(a as f32, b as f32, c as f32, d as f32, e as f32, f as f32);
         self.update_transform()
     }
 
@@ -1666,7 +1675,8 @@ impl CanvasState {
         Ok(())
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-context-2d-ellipse
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-ellipse>
+    #[allow(clippy::too_many_arguments)]
     pub fn ellipse(
         &self,
         x: f64,
@@ -1701,18 +1711,46 @@ impl CanvasState {
     }
 }
 
-pub fn parse_color(string: &str) -> Result<RGBA, ()> {
+pub fn parse_color(canvas: Option<&HTMLCanvasElement>, string: &str) -> Result<AbsoluteColor, ()> {
     let mut input = ParserInput::new(string);
     let mut parser = Parser::new(&mut input);
-    match CSSColor::parse(&mut parser) {
-        Ok(CSSColor::RGBA(rgba)) => {
-            if parser.is_exhausted() {
-                Ok(rgba)
-            } else {
-                Err(())
-            }
+    let url = Url::parse("about:blank").unwrap().into();
+    let context = ParserContext::new(
+        Origin::Author,
+        &url,
+        Some(CssRuleType::Style),
+        ParsingMode::DEFAULT,
+        QuirksMode::NoQuirks,
+        /* namespaces = */ Default::default(),
+        None,
+        None,
+    );
+    match Color::parse_and_compute(&context, &mut parser, None) {
+        Some(color) => {
+            // TODO: https://github.com/whatwg/html/issues/1099
+            // Reconsider how to calculate currentColor in a display:none canvas
+
+            // TODO: will need to check that the context bitmap mode is fixed
+            // once we implement CanvasProxy
+            let current_color = match canvas {
+                // https://drafts.css-houdini.org/css-paint-api/#2d-rendering-context
+                // Whenever "currentColor" is used as a color in the PaintRenderingContext2D API,
+                // it is treated as opaque black.
+                None => AbsoluteColor::BLACK,
+                Some(canvas) => {
+                    let canvas_element = canvas.upcast::<Element>();
+                    match canvas_element.style() {
+                        Some(ref s) if canvas_element.has_css_layout_box() => {
+                            s.get_inherited_text().color
+                        },
+                        _ => AbsoluteColor::BLACK,
+                    }
+                },
+            };
+
+            Ok(color.resolve_to_absolute(&current_color))
         },
-        _ => Err(()),
+        None => Err(()),
     }
 }
 
@@ -1723,15 +1761,21 @@ pub fn is_rect_valid(rect: Rect<f64>) -> bool {
 }
 
 // https://html.spec.whatwg.org/multipage/#serialisation-of-a-color
-pub fn serialize<W>(color: &RGBA, dest: &mut W) -> fmt::Result
+pub fn serialize<W>(color: &AbsoluteColor, dest: &mut W) -> fmt::Result
 where
     W: fmt::Write,
 {
-    let red = color.red;
-    let green = color.green;
-    let blue = color.blue;
-
-    if color.alpha == 255 {
+    let srgb = match color.color_space {
+        ColorSpace::Srgb if color.flags.contains(ColorFlags::IS_LEGACY_SRGB) => *color,
+        ColorSpace::Hsl | ColorSpace::Hwb => color.into_srgb_legacy(),
+        _ => return color.to_css(&mut CssWriter::new(dest)),
+    };
+    debug_assert!(srgb.flags.contains(ColorFlags::IS_LEGACY_SRGB));
+    let red = clamp_unit_f32(srgb.components.0);
+    let green = clamp_unit_f32(srgb.components.1);
+    let blue = clamp_unit_f32(srgb.components.2);
+    let alpha = srgb.alpha;
+    if alpha == 1.0 {
         write!(
             dest,
             "#{:x}{:x}{:x}{:x}{:x}{:x}",
@@ -1743,14 +1787,7 @@ where
             blue & 0xF
         )
     } else {
-        write!(
-            dest,
-            "rgba({}, {}, {}, {})",
-            red,
-            green,
-            blue,
-            color.alpha_f32()
-        )
+        write!(dest, "rgba({}, {}, {}, {})", red, green, blue, alpha)
     }
 }
 
@@ -1773,7 +1810,7 @@ fn serialize_font<W>(style: &Font, dest: &mut W) -> fmt::Result
 where
     W: fmt::Write,
 {
-    if style.font_style == FontStyle::Italic {
+    if style.font_style == FontStyle::ITALIC {
         write!(dest, "{} ", style.font_style.to_css_string())?;
     }
     if style.font_weight.is_bold() {

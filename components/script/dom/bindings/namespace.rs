@@ -4,12 +4,16 @@
 
 //! Machinery to initialise namespace objects.
 
+use std::ffi::CStr;
+use std::ptr;
+
+use js::jsapi::{JSClass, JSFunctionSpec};
+use js::rust::{HandleObject, MutableHandleObject};
+
+use super::constant::ConstantSpec;
 use crate::dom::bindings::guard::Guard;
 use crate::dom::bindings::interface::{create_object, define_on_global_object};
 use crate::script_runtime::JSContext;
-use js::jsapi::{JSClass, JSFunctionSpec};
-use js::rust::{HandleObject, MutableHandleObject};
-use std::ptr;
 
 /// The class of a namespace object.
 #[derive(Clone, Copy)]
@@ -19,9 +23,9 @@ unsafe impl Sync for NamespaceObjectClass {}
 
 impl NamespaceObjectClass {
     /// Create a new `NamespaceObjectClass` structure.
-    pub const unsafe fn new(name: &'static [u8]) -> Self {
+    pub const unsafe fn new(name: &'static CStr) -> Self {
         NamespaceObjectClass(JSClass {
-            name: name as *const _ as *const libc::c_char,
+            name: name.as_ptr(),
             flags: 0,
             cOps: 0 as *mut _,
             spec: ptr::null(),
@@ -32,15 +36,17 @@ impl NamespaceObjectClass {
 }
 
 /// Create a new namespace object.
+#[allow(clippy::too_many_arguments)]
 pub fn create_namespace_object(
     cx: JSContext,
     global: HandleObject,
     proto: HandleObject,
     class: &'static NamespaceObjectClass,
     methods: &[Guard<&'static [JSFunctionSpec]>],
-    name: &[u8],
+    constants: &[Guard<&'static [ConstantSpec]>],
+    name: &CStr,
     rval: MutableHandleObject,
 ) {
-    create_object(cx, global, proto, &class.0, methods, &[], &[], rval);
+    create_object(cx, global, proto, &class.0, methods, &[], constants, rval);
     define_on_global_object(cx, global, name, rval.handle());
 }

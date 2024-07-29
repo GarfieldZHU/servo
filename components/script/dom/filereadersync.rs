@@ -2,21 +2,24 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::ptr;
+
+use dom_struct::dom_struct;
+use js::jsapi::JSObject;
+use js::rust::HandleObject;
+use js::typedarray::{ArrayBuffer, ArrayBufferU8};
+
+use crate::dom::bindings::buffer_source::create_buffer_source;
 use crate::dom::bindings::codegen::Bindings::BlobBinding::BlobMethods;
 use crate::dom::bindings::codegen::Bindings::FileReaderSyncBinding::FileReaderSyncMethods;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::blob::Blob;
 use crate::dom::filereader::FileReaderSharedFunctionality;
 use crate::dom::globalscope::GlobalScope;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsapi::JSObject;
-use js::typedarray::{ArrayBuffer, CreateWith};
-use std::ptr;
-use std::ptr::NonNull;
 
 #[dom_struct]
 pub struct FileReaderSync {
@@ -30,13 +33,16 @@ impl FileReaderSync {
         }
     }
 
-    pub fn new(global: &GlobalScope) -> DomRoot<FileReaderSync> {
-        reflect_dom_object(Box::new(FileReaderSync::new_inherited()), global)
+    fn new(global: &GlobalScope, proto: Option<HandleObject>) -> DomRoot<FileReaderSync> {
+        reflect_dom_object_with_proto(Box::new(FileReaderSync::new_inherited()), global, proto)
     }
 
     #[allow(non_snake_case)]
-    pub fn Constructor(global: &GlobalScope) -> Fallible<DomRoot<FileReaderSync>> {
-        Ok(FileReaderSync::new(global))
+    pub fn Constructor(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+    ) -> Fallible<DomRoot<FileReaderSync>> {
+        Ok(FileReaderSync::new(global, proto))
     }
 
     fn get_blob_bytes(blob: &Blob) -> Result<Vec<u8>, Error> {
@@ -45,7 +51,7 @@ impl FileReaderSync {
 }
 
 impl FileReaderSyncMethods for FileReaderSync {
-    // https://w3c.github.io/FileAPI/#readAsBinaryStringSyncSection
+    /// <https://w3c.github.io/FileAPI/#readAsBinaryStringSyncSection>
     fn ReadAsBinaryString(&self, blob: &Blob) -> Fallible<DOMString> {
         // step 1
         let blob_contents = FileReaderSync::get_blob_bytes(blob)?;
@@ -54,7 +60,7 @@ impl FileReaderSyncMethods for FileReaderSync {
         Ok(DOMString::from(String::from_utf8_lossy(&blob_contents)))
     }
 
-    // https://w3c.github.io/FileAPI/#readAsTextSync
+    /// <https://w3c.github.io/FileAPI/#readAsTextSync>
     fn ReadAsText(&self, blob: &Blob, label: Option<DOMString>) -> Fallible<DOMString> {
         // step 1
         let blob_contents = FileReaderSync::get_blob_bytes(blob)?;
@@ -69,7 +75,7 @@ impl FileReaderSyncMethods for FileReaderSync {
         Ok(output)
     }
 
-    // https://w3c.github.io/FileAPI/#readAsDataURLSync-section
+    /// <https://w3c.github.io/FileAPI/#readAsDataURLSync-section>
     fn ReadAsDataURL(&self, blob: &Blob) -> Fallible<DOMString> {
         // step 1
         let blob_contents = FileReaderSync::get_blob_bytes(blob)?;
@@ -81,23 +87,15 @@ impl FileReaderSyncMethods for FileReaderSync {
         Ok(output)
     }
 
-    #[allow(unsafe_code)]
-    // https://w3c.github.io/FileAPI/#readAsArrayBufferSyncSection
-    fn ReadAsArrayBuffer(&self, cx: JSContext, blob: &Blob) -> Fallible<NonNull<JSObject>> {
+    /// <https://w3c.github.io/FileAPI/#readAsArrayBufferSyncSection>
+    fn ReadAsArrayBuffer(&self, cx: JSContext, blob: &Blob) -> Fallible<ArrayBuffer> {
         // step 1
         let blob_contents = FileReaderSync::get_blob_bytes(blob)?;
 
         // step 2
-        unsafe {
-            rooted!(in(*cx) let mut array_buffer = ptr::null_mut::<JSObject>());
-            assert!(ArrayBuffer::create(
-                *cx,
-                CreateWith::Slice(&blob_contents),
-                array_buffer.handle_mut()
-            )
-            .is_ok());
+        rooted!(in(*cx) let mut array_buffer = ptr::null_mut::<JSObject>());
 
-            Ok(NonNull::new_unchecked(array_buffer.get()))
-        }
+        create_buffer_source::<ArrayBufferU8>(cx, &blob_contents, array_buffer.handle_mut())
+            .map_err(|_| Error::JSFailed)
     }
 }

@@ -4,6 +4,10 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+
+use malloc_size_of::malloc_size_of_is_0;
+use malloc_size_of_derive::MallocSizeOf;
+use serde::{Deserialize, Serialize};
 use url::{Host, Origin};
 use uuid::Uuid;
 
@@ -88,7 +92,7 @@ pub struct OpaqueOrigin(Uuid);
 malloc_size_of_is_0!(OpaqueOrigin);
 
 /// A representation of an [origin](https://html.spec.whatwg.org/multipage/#origin-2).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MutableOrigin(Rc<(ImmutableOrigin, RefCell<Option<Host>>)>);
 
 malloc_size_of_is_0!(MutableOrigin);

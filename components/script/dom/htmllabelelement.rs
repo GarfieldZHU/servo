@@ -2,6 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use style::attr::AttrValue;
+
 use crate::dom::activation::Activatable;
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
@@ -20,9 +25,6 @@ use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmlformelement::{FormControl, FormControlElementHelpers, HTMLFormElement};
 use crate::dom::node::{Node, ShadowIncluding};
 use crate::dom::virtualmethods::VirtualMethods;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use style::attr::AttrValue;
 
 #[dom_struct]
 pub struct HTMLLabelElement {
@@ -40,17 +42,19 @@ impl HTMLLabelElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLLabelElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLLabelElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 }
@@ -152,11 +156,8 @@ impl VirtualMethods for HTMLLabelElement {
 
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
-        match attr.local_name() {
-            &local_name!("form") => {
-                self.form_attribute_mutated(mutation);
-            },
-            _ => {},
+        if *attr.local_name() == local_name!("form") {
+            self.form_attribute_mutated(mutation);
         }
     }
 }
@@ -166,8 +167,7 @@ impl HTMLLabelElement {
         self.upcast::<Node>()
             .traverse_preorder(ShadowIncluding::No)
             .filter_map(DomRoot::downcast::<HTMLElement>)
-            .filter(|elem| elem.is_labelable_element())
-            .next()
+            .find(|elem| elem.is_labelable_element())
     }
 }
 
@@ -186,7 +186,7 @@ impl FormControl for HTMLLabelElement {
         // form owner. Therefore it doesn't hold form owner itself.
     }
 
-    fn to_element<'a>(&'a self) -> &'a Element {
+    fn to_element(&self) -> &Element {
         self.upcast::<Element>()
     }
 }

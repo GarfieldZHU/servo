@@ -2,12 +2,7 @@
 skip-check-length = false
 skip-check-licenses = false
 check-alphabetical-order = true
-check-ordered-json-keys = [
-  "./resources/prefs.json",
-]
-lint-scripts = [
-  "./python/servo/lints/wpt_lint.py",
-]
+check-ordered-json-keys = ["./resources/prefs.json"]
 
 # Packages which we avoid using in Servo.
 # For each blocked package, we can list the exceptions,
@@ -15,141 +10,102 @@ lint-scripts = [
 [blocked-packages]
 num = []
 rand = [
-  "hashglobe", # Only used in tests
-  "ipc-channel",
-  "phf_generator",
-  "quickcheck", # Only used in tests
-  "servo_rand",
-  "tempfile",
-  "uuid",
-  "tungstenite",
-  "ws",
+    "ipc-channel",
+    "phf_generator",
+    "quickcheck", # Only used in tests
+    "servo_rand",
+    "tungstenite",
 ]
 
 [ignore]
 # Ignored packages with duplicated versions
 packages = [
-  "arrayvec",
-  "base64",
-  "cfg-if",
-  "cloudabi",
-  "cocoa",
-  "crossbeam-channel",
-  "crossbeam-deque",
-  "crossbeam-epoch",
-  "crossbeam-utils",
-  "env_logger",
-  "fixedbitset",
-  "gleam",
-  "libloading",
-  "lock_api",
-  "memoffset",
-  "metal",
-  "miniz_oxide",
-  "num-rational",
-  "parking_lot",
-  "parking_lot_core",
-  "petgraph",
-  "ron",
-  "wayland-sys",
-  "rustc_version",
-  "semver",
-  "semver-parser",
+    "bitflags",
+    "cfg_aliases",
+    "cookie",
+    "futures",
+    "hermit-abi",
+    "redox_syscall",
+    "syn",
+    "synstructure",
+    "time",
+    "wasi",
+    "wayland-sys",
 
-  # https://github.com/servo/servo/issues/26933
-  "futures",
-  "tokio-openssl",
-  "tokio",
-  "http",
-  "bytes",
+    # New versions of these dependencies is pulled in by GStreamer / GLib.
+    "itertools",
+    "toml",
 
-  # https://github.com/servo/servo/pull/23288#issuecomment-494687746
-  "gl_generator",
+    # Duplicated by winit.
+    "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
 
-  # Lots of crates to update.
-  "smallvec",
+    # wgpu has the latest and greatest.
+    "foreign-types",
+    "foreign-types-shared",
+    "metal",
+    "glow",
 
-  # https://github.com/servo/servo/pull/25518
-  "core-foundation",
-  "core-foundation-sys",
-  "core-graphics",
-  "lyon_geom",
+    # quickcheck (required by layout_2020 for tests) is
+    # stuck on 0.8.4 with no new releases.
+    "env_logger",
 
-  # https://github.com/servo/servo/pull/28236
-  "dlib",
-  "nix",
-  "nom",
-  "strsim",
-
-  # Duplicated by webrender debugger via ws
-  "digest",
-  "generic-array",
-  "opaque-debug",
-  "sha-1",
-  "block-buffer",
-
-  # Duplicated by futures
-  "pin-project",
-  "pin-project-internal",
+    # Stylo uses phf 0.11, while script and other dependencies use 0.10.
+    "phf",
+    "phf_generator",
+    "phf_shared",
 ]
 # Files that are ignored for all tidy and lint checks.
 files = [
-  "./components/net/tests/parsable_mime/text",
-  # Mako does not lend itself easily to splitting long lines
-  "./components/style/properties/helpers/animated_properties.mako.rs",
-  "./components/style/properties/shorthands/text.mako.rs",
-  # Long regexes are long.
-  "./components/style/gecko/regen_atoms.py",
-  # Helper macro where actually a pseudo-element per line makes sense.
-  "./components/style/gecko/non_ts_pseudo_class_list.rs",
-  "./resources/hsts_preload.json",
-  "./tests/wpt/metadata/MANIFEST.json",
-  "./tests/wpt/mozilla/meta/MANIFEST.json",
-  # Long encoded string
-  "./tests/wpt/mozilla/tests/mozilla/resources/brotli.py",
-  "./tests/wpt/webgl/meta/MANIFEST.json",
-  "./support/android/openssl.sh",
-  # Upstream code from Khronos/WebGL uses tabs for indentation
-  "./tests/wpt/webgl/tests",
-  # Our import script is not currently respecting the lint.
-  "./tests/wpt/webgl/tools/import-conformance-tests.py",
-  # Ignore those files since the issues reported are on purpose
-  "./tests/html/bad-line-ends.html",
-  "./tests/wpt/mozilla/tests/css/fonts",
-  "./tests/wpt/mozilla/tests/css/pre_with_tab.html",
-  "./tests/wpt/mozilla/tests/mozilla/textarea_placeholder.html",
-  # Python 3 syntax causes "E901 SyntaxError" when flake8 runs in Python 2
-  "./etc/taskcluster/decision_task.py",
-  "./etc/taskcluster/decisionlib.py",
-  "./tests/wpt/reftests-report/gen.py",
-  "./components/style/properties/build.py",
+    "./components/net/tests/parsable_mime/text",
+    "./resources/hsts_preload.json",
+    "./tests/wpt/meta/MANIFEST.json",
+    "./tests/wpt/meta-legacy-layout/MANIFEST.json",
+    "./tests/wpt/mozilla/meta/MANIFEST.json",
+    "./tests/wpt/mozilla/meta-legacy-layout/MANIFEST.json",
+    # Long encoded string
+    "./tests/wpt/mozilla/tests/mozilla/resources/brotli.py",
+    "./tests/wpt/webgl/meta/MANIFEST.json",
+    # Upstream code from Khronos/WebGL uses tabs for indentation
+    "./tests/wpt/webgl/tests",
+    # Vendored from upstream
+    "./tests/wpt/webgpu/tests",
+    # Our import script is not currently respecting the lint.
+    "./tests/wpt/webgl/tools/import-conformance-tests.py",
+    # Ignore those files since the issues reported are on purpose
+    "./tests/html/bad-line-ends.html",
+    "./tests/wpt/mozilla/tests/css/fonts",
+    "./tests/wpt/mozilla/tests/css/pre_with_tab.html",
+    "./tests/wpt/mozilla/tests/mozilla/textarea_placeholder.html",
+    # The tidy tests currently don't pass tidy.
+    "./python/tidy/test.py",
 ]
 # Directories that are ignored for the non-WPT tidy check.
 directories = [
-  # Upstream
-  "./support/android/apk",
-  "./support/hololens",
-  "./support/linux/gstreamer",
-  "./support/magicleap/Servo2D/.vscode",
-  "./support/magicleap/Servo2D/code/inc.gen",
-  "./support/magicleap/Servo2D/code/src.gen",
-  "./support/magicleap/Servo2D/pipeline",
-  "./tests/wpt/harness",
-  "./tests/wpt/update",
-  "./tests/wpt/web-platform-tests",
-  "./tests/wpt/mozilla/tests/mozilla/referrer-policy",
-  "./tests/wpt/mozilla/tests/webgl",
-  "./tests/wpt/sync",
-  "./python/tidy/servo_tidy_tests",
-  "./components/script/dom/bindings/codegen/parser",
-  "./components/script/dom/bindings/codegen/ply",
-  "./python/_virtualenv*",
-  "./components/hashglobe/src",
-  # Generated and upstream code combined with our own. Could use cleanup
-  "./target",
+    # Test have expectations in them, causing tidy to fail.
+    "./support/crown/tests",
+    # Upstream
+    "./support/android/apk",
+    "./tests/wpt/harness",
+    "./tests/wpt/tests",
+    "./tests/wpt/mozilla/tests/mozilla/referrer-policy",
+    "./tests/wpt/mozilla/tests/webgl",
+    "./python/tidy/tests",
+    "./python/_v*",
+    "./python/mach",
+    # Generated and upstream code combined with our own. Could use cleanup
+    "./target",
+    "./third_party",
 ]
 
 # Directories that are checked for correct file extension
 [check_ext]
 # directory, list of expected file extensions
-"./components/script/dom/webidls" = [".webidl"]
+"./components/script/dom/webidls" = [".webidl", "noidl"]

@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::DomRoot;
@@ -12,8 +16,6 @@ use crate::dom::htmlmetaelement::HTMLMetaElement;
 use crate::dom::node::{document_from_node, BindContext, Node, ShadowIncluding};
 use crate::dom::userscripts::load_script;
 use crate::dom::virtualmethods::VirtualMethods;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
 
 #[dom_struct]
 pub struct HTMLHeadElement {
@@ -31,15 +33,17 @@ impl HTMLHeadElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLHeadElement> {
-        let n = Node::reflect_node(
+        let n = Node::reflect_node_with_proto(
             Box::new(HTMLHeadElement::new_inherited(local_name, prefix, document)),
             document,
+            proto,
         );
 
         n.upcast::<Node>().set_weird_parser_insertion_mode();
@@ -83,7 +87,7 @@ impl VirtualMethods for HTMLHeadElement {
         Some(self.upcast::<HTMLElement>() as &dyn VirtualMethods)
     }
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
         load_script(self);

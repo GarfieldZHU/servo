@@ -6,6 +6,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use ipc_channel::ipc::IpcSender;
+use ipc_channel::router::ROUTER;
+use profile_traits::ipc;
+use webxr_api::{self, Error as XRError, MockDeviceInit, MockDeviceMsg};
+
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::FunctionBinding::Function;
@@ -19,12 +27,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::script_thread::ScriptThread;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use ipc_channel::ipc::IpcSender;
-use ipc_channel::router::ROUTER;
-use profile_traits::ipc;
-use std::rc::Rc;
-use webxr_api::{self, Error as XRError, MockDeviceInit, MockDeviceMsg};
 
 #[dom_struct]
 pub struct XRTest {
@@ -63,14 +65,14 @@ impl XRTest {
 }
 
 impl XRTestMethods for XRTest {
-    /// https://github.com/immersive-web/webxr-test-api/blob/master/explainer.md
+    /// <https://github.com/immersive-web/webxr-test-api/blob/master/explainer.md>
     #[allow(unsafe_code)]
     fn SimulateDeviceConnection(&self, init: &FakeXRDeviceInit) -> Rc<Promise> {
         let global = self.global();
         let p = Promise::new(&global);
 
         let origin = if let Some(ref o) = init.viewerOrigin {
-            match get_origin(&o) {
+            match get_origin(o) {
                 Ok(origin) => Some(origin),
                 Err(e) => {
                     p.reject_error(e);
@@ -82,7 +84,7 @@ impl XRTestMethods for XRTest {
         };
 
         let floor_origin = if let Some(ref o) = init.floorOrigin {
-            match get_origin(&o) {
+            match get_origin(o) {
                 Ok(origin) => Some(origin),
                 Err(e) => {
                     p.reject_error(e);
@@ -178,14 +180,14 @@ impl XRTestMethods for XRTest {
         p
     }
 
-    /// https://github.com/immersive-web/webxr-test-api/blob/master/explainer.md
+    /// <https://github.com/immersive-web/webxr-test-api/blob/master/explainer.md>
     fn SimulateUserActivation(&self, f: Rc<Function>) {
         ScriptThread::set_user_interacting(true);
         let _ = f.Call__(vec![], ExceptionHandling::Rethrow);
         ScriptThread::set_user_interacting(false);
     }
 
-    /// https://github.com/immersive-web/webxr-test-api/blob/master/explainer.md
+    /// <https://github.com/immersive-web/webxr-test-api/blob/master/explainer.md>
     fn DisconnectAllDevices(&self) -> Rc<Promise> {
         // XXXManishearth implement device disconnection and session ending
         let global = self.global();

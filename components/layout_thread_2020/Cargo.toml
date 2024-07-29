@@ -1,48 +1,43 @@
 [package]
 name = "layout_thread_2020"
-version = "0.0.1"
-authors = ["The Servo Project Developers"]
-license = "MPL-2.0"
-edition = "2018"
-publish = false
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lib]
-name = "layout_thread"
+name = "layout_thread_2020"
 path = "lib.rs"
 
 [dependencies]
-app_units = "0.7"
-atomic_refcell = "0.1"
-crossbeam-channel = "0.4"
-embedder_traits = { path = "../embedder_traits" }
-euclid = "0.20"
-fnv = "1.0"
-fxhash = "0.2"
-gfx = { path = "../gfx" }
-gfx_traits = { path = "../gfx_traits" }
-html5ever = "0.25"
-ipc-channel = "0.14"
+app_units = { workspace = true }
+base = { workspace = true }
+embedder_traits = { workspace = true }
+euclid = { workspace = true }
+fnv = { workspace = true }
+fxhash = { workspace = true }
+fonts = { path = "../fonts" }
+fonts_traits = { workspace = true }
+ipc-channel = { workspace = true }
 layout = { path = "../layout_2020", package = "layout_2020" }
-layout_traits = { path = "../layout_traits" }
-lazy_static = "1"
-libc = "0.2"
-log = "0.4"
-malloc_size_of = { path = "../malloc_size_of" }
+lazy_static = { workspace = true }
+log = { workspace = true }
+malloc_size_of = { workspace = true }
 metrics = { path = "../metrics" }
-msg = { path = "../msg" }
-net_traits = { path = "../net_traits" }
-parking_lot = { version = "0.10" }
-profile_traits = { path = "../profile_traits" }
-range = { path = "../range" }
+net_traits = { workspace = true }
+parking_lot = { workspace = true }
+profile_traits = { workspace = true }
 script = { path = "../script" }
-script_layout_interface = { path = "../script_layout_interface" }
-script_traits = { path = "../script_traits" }
-selectors = { path = "../selectors" }
+script_layout_interface = { workspace = true }
+script_traits = { workspace = true }
 servo_allocator = { path = "../allocator" }
-servo_arc = { path = "../servo_arc" }
-servo_atoms = { path = "../atoms" }
+servo_arc = { workspace = true }
+servo_atoms = { workspace = true }
 servo_config = { path = "../config" }
 servo_url = { path = "../url" }
-style = { path = "../style" }
-style_traits = { path = "../style_traits" }
-webrender_api = { git = "https://github.com/servo/webrender" }
+style = { workspace = true }
+style_traits = { workspace = true }
+url = { workspace = true }
+webrender_api = { workspace = true }
+webrender_traits = { workspace = true }

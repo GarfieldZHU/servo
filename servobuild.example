@@ -4,15 +4,6 @@
 
 # Tool options
 [tools]
-# If use-rustup is set to false, mach will run for example "cargo build"
-# instead of "rustup run --install <toolchain> cargo build"
-# It is then the user’s responsibility to ensure that cargo and especially rustc
-# in $PATH are versions compatible with Servo.
-use-rustup = true
-
-# If rustc-with-gold is true, will try to find and use gold linker with rustc.
-# Defaults to true
-rustc-with-gold = true
 
 # If uncommented, this command is used instead of the platform’s default
 # to notify at the end of a compilation that took a long time.
@@ -30,7 +21,7 @@ rustc-with-gold = true
 android = false
 
 # Enable `debug_assert!` macros in release mode
-debug-assertions = false
+debug-assertions = true
 
 # Set "debug-mozjs" or use `mach build --debug-mozjs` to build a debug spidermonkey.
 debug-mozjs = false
@@ -44,7 +35,7 @@ webgl-backtrace = false
 dom-backtrace = false
 
 # Default to the “2020” implementation of CSS layout instead of the “2013” one.
-layout-2020 = false
+layout-2020 = true
 
 # Pick a media stack based on the target. Other values are "gstreamer" and "dummy"
 media-stack = "auto"
@@ -63,13 +54,13 @@ media-stack = "auto"
 #incremental = false
 #incremental = true
 
-# Whether to use ThinLTO or not
-#thinlto = false
-
 # Android information
 [android]
-# Defaults to the value of $ANDROID_SDK, $ANDROID_NDK, $ANDROID_TOOLCHAIN, $ANDROID_PLATFORM respectively
+# Defaults to the value of $ANDROID_SDK_ROOT, $ANDROID_NDK_ROOT respectively
 #sdk = "/opt/android-sdk"
 #ndk = "/opt/android-ndk"
-#toolchain = "/opt/android-toolchain"
-#platform = "android-18"
+
+# OpenHarmony
+[ohos]
+# Defaults to the value of $OHOS_SDK_NATIVE
+#ndk = "/path/to/ohos-sdk/<host-os>/native"

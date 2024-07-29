@@ -4,14 +4,11 @@
 
 #![deny(unsafe_code)]
 
-#[macro_use]
-extern crate malloc_size_of_derive;
-#[macro_use]
-extern crate serde;
-
 use std::cmp::{self, max, min};
-use std::fmt;
-use std::ops;
+use std::{fmt, ops};
+
+use malloc_size_of_derive::MallocSizeOf;
+use serde::{Deserialize, Serialize};
 
 pub trait Int:
     Copy + ops::Add<Self, Output = Self> + ops::Sub<Self, Output = Self> + cmp::Ord
@@ -207,10 +204,7 @@ impl<I: RangeIndex> Range<I> {
     /// ~~~
     #[inline]
     pub fn new(begin: I, length: I) -> Range<I> {
-        Range {
-            begin: begin,
-            length: length,
-        }
+        Range { begin, length }
     }
 
     #[inline]

@@ -1,29 +1,31 @@
 [package]
 name = "devtools"
-version = "0.0.1"
-authors = ["The Servo Project Developers"]
-license = "MPL-2.0"
-edition = "2018"
-publish = false
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lib]
 name = "devtools"
 path = "lib.rs"
 
+[build-dependencies]
+chrono = { workspace = true }
+
 [dependencies]
-crossbeam-channel = "0.4"
-devtools_traits = { path = "../devtools_traits" }
-embedder_traits = { path = "../embedder_traits" }
-headers = "0.2"
-http = "0.1"
-hyper = "0.12"
-ipc-channel = "0.14"
-log = "0.4"
-msg = { path = "../msg" }
-serde = "1.0"
-serde_json = "1.0"
+base = { workspace = true }
+chrono = { workspace = true }
+crossbeam-channel = { workspace = true }
+devtools_traits = { workspace = true }
+embedder_traits = { workspace = true }
+headers = { workspace = true }
+http = { workspace = true }
+ipc-channel = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 servo_config = { path = "../config" }
 servo_rand = { path = "../rand" }
 servo_url = { path = "../url" }
-time = "0.1"
-uuid = { version = "0.8", features = ["v4"] }
+uuid = { workspace = true }

@@ -2,32 +2,31 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::canvas_paint_thread::{AntialiasMode, ImageUpdate, WebrenderApi};
-use crate::raqote_backend::Repetition;
-use canvas_traits::canvas::*;
-use cssparser::RGBA;
-use euclid::default::{Point2D, Rect, Size2D, Transform2D, Vector2D};
-use euclid::{point2, vec2};
-use font_kit::family_name::FamilyName;
-use font_kit::font::Font;
-use font_kit::metrics::Metrics;
-use font_kit::properties::{Properties, Stretch, Style, Weight};
-use font_kit::source::SystemSource;
-use gfx::font::FontHandleMethods;
-use gfx::font_cache_thread::FontCacheThread;
-use gfx::font_context::FontContext;
-use ipc_channel::ipc::{IpcSender, IpcSharedMemory};
-use num_traits::ToPrimitive;
-use servo_arc::Arc as ServoArc;
-use std::cell::RefCell;
-#[allow(unused_imports)]
-use std::marker::PhantomData;
 use std::mem;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use app_units::Au;
+use canvas_traits::canvas::*;
+use euclid::default::{Box2D, Point2D, Rect, Size2D, Transform2D, Vector2D};
+use euclid::point2;
+use fonts::{
+    ByteIndex, FontBaseline, FontCacheThread, FontContext, FontGroup, FontMetrics, FontRef,
+    GlyphInfo, GlyphStore, ShapingFlags, ShapingOptions, LAST_RESORT_GLYPH_ADVANCE,
+};
+use ipc_channel::ipc::{IpcSender, IpcSharedMemory};
+use log::{debug, warn};
+use num_traits::ToPrimitive;
+use range::Range;
+use servo_arc::Arc as ServoArc;
+use style::color::AbsoluteColor;
 use style::properties::style_structs::Font as FontStyleStruct;
-use style::values::computed::font;
-use style_traits::values::ToCss;
-use webrender_api::units::RectExt as RectExt_;
+use unicode_script::Script;
+use webrender_api::units::{DeviceIntSize, RectExt as RectExt_};
+use webrender_api::{ImageData, ImageDescriptor, ImageDescriptorFlags, ImageFormat, ImageKey};
+use webrender_traits::ImageUpdate;
+
+use crate::canvas_paint_thread::{AntialiasMode, WebrenderApi};
+use crate::raqote_backend::Repetition;
 
 /// The canvas data stores a state machine for the current status of
 /// the path data and any relevant transformations that are
@@ -72,23 +71,23 @@ impl PathState {
 pub trait Backend {
     fn get_composition_op(&self, opts: &DrawOptions) -> CompositionOp;
     fn need_to_draw_shadow(&self, color: &Color) -> bool;
-    fn set_shadow_color<'a>(&mut self, color: RGBA, state: &mut CanvasPaintState<'a>);
-    fn set_fill_style<'a>(
+    fn set_shadow_color(&mut self, color: AbsoluteColor, state: &mut CanvasPaintState<'_>);
+    fn set_fill_style(
         &mut self,
         style: FillOrStrokeStyle,
-        state: &mut CanvasPaintState<'a>,
+        state: &mut CanvasPaintState<'_>,
         drawtarget: &dyn GenericDrawTarget,
     );
-    fn set_stroke_style<'a>(
+    fn set_stroke_style(
         &mut self,
         style: FillOrStrokeStyle,
-        state: &mut CanvasPaintState<'a>,
+        state: &mut CanvasPaintState<'_>,
         drawtarget: &dyn GenericDrawTarget,
     );
-    fn set_global_composition<'a>(
+    fn set_global_composition(
         &mut self,
         op: CompositionOrBlending,
-        state: &mut CanvasPaintState<'a>,
+        state: &mut CanvasPaintState<'_>,
     );
     fn create_drawtarget(&self, size: Size2D<u64>) -> Box<dyn GenericDrawTarget>;
     fn recreate_paint_state<'a>(&self, state: &CanvasPaintState<'a>) -> CanvasPaintState<'a>;
@@ -112,6 +111,7 @@ pub trait GenericPathBuilder {
         control_point3: &Point2D<f32>,
     );
     fn close(&mut self);
+    #[allow(clippy::too_many_arguments)]
     fn ellipse(
         &mut self,
         origin: Point2D<f32>,
@@ -193,6 +193,7 @@ impl<'a> PathBuilderRef<'a> {
             .arc(center, radius, start_angle, end_angle, ccw);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn ellipse(
         &mut self,
         center: &Point2D<f32>,
@@ -220,10 +221,9 @@ impl<'a> PathBuilderRef<'a> {
             Some(i) => i,
             None => return None,
         };
-        match self.builder.get_current_point() {
-            Some(point) => Some(inverse.transform_point(Point2D::new(point.x, point.y))),
-            None => None,
-        }
+        self.builder
+            .get_current_point()
+            .map(|point| inverse.transform_point(Point2D::new(point.x, point.y)))
     }
 
     fn close(&mut self) {
@@ -231,10 +231,78 @@ impl<'a> PathBuilderRef<'a> {
     }
 }
 
-// TODO(pylbrecht)
-// This defines required methods for DrawTarget of azure and raqote
-// The prototypes are derived from azure's methods.
-// TODO: De-abstract now that Azure is removed?
+#[derive(Debug, Default)]
+struct UnshapedTextRun<'a> {
+    font: Option<FontRef>,
+    script: Script,
+    string: &'a str,
+}
+
+impl<'a> UnshapedTextRun<'a> {
+    fn script_and_font_compatible(&self, script: Script, other_font: &Option<FontRef>) -> bool {
+        if self.script != script {
+            return false;
+        }
+
+        match (&self.font, other_font) {
+            (Some(font_a), Some(font_b)) => font_a.identifier() == font_b.identifier(),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn into_shaped_text_run(self) -> Option<TextRun> {
+        let font = self.font?;
+        if self.string.is_empty() {
+            return None;
+        }
+
+        let word_spacing = Au::from_f64_px(
+            font.glyph_index(' ')
+                .map(|glyph_id| font.glyph_h_advance(glyph_id))
+                .unwrap_or(LAST_RESORT_GLYPH_ADVANCE),
+        );
+        let options = ShapingOptions {
+            letter_spacing: None,
+            word_spacing,
+            script: self.script,
+            flags: ShapingFlags::empty(),
+        };
+        let glyphs = font.shape_text(self.string, &options);
+        Some(TextRun { font, glyphs })
+    }
+}
+
+pub struct TextRun {
+    pub font: FontRef,
+    pub glyphs: Arc<GlyphStore>,
+}
+
+impl TextRun {
+    fn bounding_box(&self) -> Rect<f32> {
+        let mut bounding_box = None;
+        let mut bounds_offset: f32 = 0.;
+        let glyph_ids = self
+            .glyphs
+            .iter_glyphs_for_byte_range(&Range::new(ByteIndex(0), self.glyphs.len()))
+            .map(GlyphInfo::id);
+        for glyph_id in glyph_ids {
+            let bounds = self.font.typographic_bounds(glyph_id);
+            let amount = Vector2D::new(bounds_offset, 0.);
+            let bounds = bounds.translate(amount);
+            let initiated_bbox = bounding_box.get_or_insert_with(|| {
+                let origin = Point2D::new(bounds.min_x(), 0.);
+                Box2D::new(origin, origin).to_rect()
+            });
+            bounding_box = Some(initiated_bbox.union(&bounds));
+            bounds_offset = bounds.max_x();
+        }
+        bounding_box.unwrap_or_default()
+    }
+}
+
+// This defines required methods for a DrawTarget (currently only implemented for raqote).  The
+// prototypes are derived from the now-removed Azure backend's methods.
 pub trait GenericDrawTarget {
     fn clear_rect(&mut self, rect: &Rect<f32>);
     fn copy_surface(
@@ -243,23 +311,10 @@ pub trait GenericDrawTarget {
         source: Rect<i32>,
         destination: Point2D<i32>,
     );
-    fn create_gradient_stops(
-        &self,
-        gradient_stops: Vec<GradientStop>,
-        extend_mode: ExtendMode,
-    ) -> GradientStops;
+    fn create_gradient_stops(&self, gradient_stops: Vec<GradientStop>) -> GradientStops;
     fn create_path_builder(&self) -> Box<dyn GenericPathBuilder>;
-    fn create_similar_draw_target(
-        &self,
-        size: &Size2D<i32>,
-        format: SurfaceFormat,
-    ) -> Box<dyn GenericDrawTarget>;
-    fn create_source_surface_from_data(
-        &self,
-        data: &[u8],
-        size: Size2D<i32>,
-        stride: i32,
-    ) -> Option<SourceSurface>;
+    fn create_similar_draw_target(&self, size: &Size2D<i32>) -> Box<dyn GenericDrawTarget>;
+    fn create_source_surface_from_data(&self, data: &[u8]) -> Option<SourceSurface>;
     fn draw_surface(
         &mut self,
         surface: SourceSurface,
@@ -280,15 +335,12 @@ pub trait GenericDrawTarget {
     fn fill(&mut self, path: &Path, pattern: Pattern, draw_options: &DrawOptions);
     fn fill_text(
         &mut self,
-        font: &Font,
-        point_size: f32,
-        text: &str,
+        text_runs: Vec<TextRun>,
         start: Point2D<f32>,
         pattern: &Pattern,
         draw_options: &DrawOptions,
     );
     fn fill_rect(&mut self, rect: &Rect<f32>, pattern: Pattern, draw_options: Option<&DrawOptions>);
-    fn get_format(&self) -> SurfaceFormat;
     fn get_size(&self) -> Size2D<i32>;
     fn get_transform(&self) -> Transform2D<f32>;
     fn pop_clip(&mut self);
@@ -321,11 +373,6 @@ pub trait GenericDrawTarget {
     fn snapshot_data_owned(&self) -> Vec<u8>;
 }
 
-#[derive(Clone)]
-pub enum ExtendMode {
-    Raqote(()),
-}
-
 pub enum GradientStop {
     Raqote(raqote::GradientStop),
 }
@@ -344,10 +391,6 @@ pub enum CompositionOp {
     Raqote(raqote::BlendMode),
 }
 
-pub enum SurfaceFormat {
-    Raqote(()),
-}
-
 #[derive(Clone)]
 pub enum SourceSurface {
     Raqote(Vec<u8>), // TODO: See if we can avoid the alloc (probably?)
@@ -363,39 +406,20 @@ pub enum Pattern<'a> {
     Raqote(crate::raqote_backend::Pattern<'a>),
 }
 
-pub enum DrawSurfaceOptions {
-    Raqote(()),
-}
-
 #[derive(Clone)]
 pub enum DrawOptions {
     Raqote(raqote::DrawOptions),
 }
 
 #[derive(Clone)]
-pub enum StrokeOptions<'a> {
-    Raqote(raqote::StrokeStyle, PhantomData<&'a ()>),
+pub enum StrokeOptions {
+    Raqote(raqote::StrokeStyle),
 }
 
 #[derive(Clone, Copy)]
 pub enum Filter {
-    Linear,
-    Point,
-}
-
-pub(crate) type CanvasFontContext = FontContext<FontCacheThread>;
-
-thread_local!(static FONT_CONTEXT: RefCell<Option<CanvasFontContext>> = RefCell::new(None));
-
-pub(crate) fn with_thread_local_font_context<F, R>(canvas_data: &CanvasData, f: F) -> R
-where
-    F: FnOnce(&mut CanvasFontContext) -> R,
-{
-    FONT_CONTEXT.with(|font_context| {
-        f(font_context.borrow_mut().get_or_insert_with(|| {
-            FontContext::new(canvas_data.font_cache_thread.lock().unwrap().clone())
-        }))
-    })
+    Bilinear,
+    Nearest,
 }
 
 pub struct CanvasData<'a> {
@@ -405,12 +429,12 @@ pub struct CanvasData<'a> {
     state: CanvasPaintState<'a>,
     saved_states: Vec<CanvasPaintState<'a>>,
     webrender_api: Box<dyn WebrenderApi>,
-    image_key: Option<webrender_api::ImageKey>,
+    image_key: Option<ImageKey>,
     /// An old webrender image key that can be deleted when the next epoch ends.
-    old_image_key: Option<webrender_api::ImageKey>,
+    old_image_key: Option<ImageKey>,
     /// An old webrender image key that can be deleted when the current epoch ends.
-    very_old_image_key: Option<webrender_api::ImageKey>,
-    font_cache_thread: Mutex<FontCacheThread>,
+    very_old_image_key: Option<ImageKey>,
+    font_context: Arc<FontContext<FontCacheThread>>,
 }
 
 fn create_backend() -> Box<dyn Backend> {
@@ -422,7 +446,7 @@ impl<'a> CanvasData<'a> {
         size: Size2D<u64>,
         webrender_api: Box<dyn WebrenderApi>,
         antialias: AntialiasMode,
-        font_cache_thread: FontCacheThread,
+        font_context: Arc<FontContext<FontCacheThread>>,
     ) -> CanvasData<'a> {
         let backend = create_backend();
         let draw_target = backend.create_drawtarget(size);
@@ -436,23 +460,24 @@ impl<'a> CanvasData<'a> {
             image_key: None,
             old_image_key: None,
             very_old_image_key: None,
-            font_cache_thread: Mutex::new(font_cache_thread),
+            font_context,
         }
     }
 
     pub fn draw_image(
         &mut self,
-        image_data: Vec<u8>,
+        image_data: &[u8],
         image_size: Size2D<f64>,
         dest_rect: Rect<f64>,
         source_rect: Rect<f64>,
         smoothing_enabled: bool,
+        premultiply: bool,
     ) {
         // We round up the floating pixel values to draw the pixels
         let source_rect = source_rect.ceil();
         // It discards the extra pixels (if any) that won't be painted
         let image_data = if Rect::from_size(image_size).contains_rect(&source_rect) {
-            pixels::rgba8_get_rect(&image_data, image_size.to_u64(), source_rect.to_u64()).into()
+            pixels::rgba8_get_rect(image_data, image_size.to_u64(), source_rect.to_u64()).into()
         } else {
             image_data.into()
         };
@@ -465,6 +490,7 @@ impl<'a> CanvasData<'a> {
                 source_rect.size,
                 dest_rect,
                 smoothing_enabled,
+                premultiply,
                 &draw_options,
             );
         };
@@ -494,7 +520,85 @@ impl<'a> CanvasData<'a> {
         }
     }
 
-    // https://html.spec.whatwg.org/multipage/#text-preparation-algorithm
+    pub fn fill_text_with_size(
+        &mut self,
+        text: String,
+        x: f64,
+        y: f64,
+        max_width: Option<f64>,
+        is_rtl: bool,
+        size: f64,
+    ) {
+        // > Step 2: Replace all ASCII whitespace in text with U+0020 SPACE characters.
+        let text = replace_ascii_whitespace(text);
+
+        // > Step 3: Let font be the current font of target, as given by that object's font
+        // > attribute.
+        let Some(ref font_style) = self.state.font_style else {
+            return;
+        };
+
+        let font_group = self
+            .font_context
+            .font_group_with_size(font_style.clone(), Au::from_f64_px(size));
+        let mut font_group = font_group.write();
+        let Some(first_font) = font_group.first(&self.font_context) else {
+            warn!("Could not render canvas text, because there was no first font.");
+            return;
+        };
+
+        let runs = self.build_unshaped_text_runs(&text, &mut font_group);
+        // TODO: This doesn't do any kind of line layout at all. In particular, there needs
+        // to be some alignment along a baseline and also support for bidi text.
+        let shaped_runs: Vec<_> = runs
+            .into_iter()
+            .filter_map(UnshapedTextRun::into_shaped_text_run)
+            .collect();
+        let total_advance = shaped_runs
+            .iter()
+            .map(|run| run.glyphs.total_advance())
+            .sum::<Au>()
+            .to_f64_px();
+
+        // > Step 6: If maxWidth was provided and the hypothetical width of the inline box in the
+        // > hypothetical line box is greater than maxWidth CSS pixels, then change font to have a
+        // > more condensed font (if one is available or if a reasonably readable one can be
+        // > synthesized by applying a horizontal scale factor to the font) or a smaller font, and
+        // > return to the previous step.
+        //
+        // TODO: We only try decreasing the font size here. Eventually it would make sense to use
+        // other methods to try to decrease the size, such as finding a narrower font or decreasing
+        // spacing.
+        if let Some(max_width) = max_width {
+            let new_size = (max_width / total_advance * size).floor().max(5.);
+            if total_advance > max_width && new_size != size {
+                self.fill_text_with_size(text, x, y, Some(max_width), is_rtl, new_size);
+                return;
+            }
+        }
+
+        // > Step 7: Find the anchor point for the line of text.
+        let start = self.find_anchor_point_for_line_of_text(
+            x as f32,
+            y as f32,
+            &first_font.metrics,
+            total_advance as f32,
+            is_rtl,
+        );
+
+        // > Step 8: Let result be an array constructed by iterating over each glyph in the inline box
+        // > from left to right (if any), adding to the array, for each glyph, the shape of the glyph
+        // > as it is in the inline box, positioned on a coordinate space using CSS pixels with its
+        // > origin is at the anchor point.
+        self.drawtarget.fill_text(
+            shaped_runs,
+            start,
+            &self.state.fill_style,
+            &self.state.draw_options,
+        );
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#text-preparation-algorithm>
     pub fn fill_text(
         &mut self,
         text: String,
@@ -503,81 +607,138 @@ impl<'a> CanvasData<'a> {
         max_width: Option<f64>,
         is_rtl: bool,
     ) {
-        // Step 2.
-        let text = replace_ascii_whitespace(text);
-
-        // Step 3.
-        let point_size = self
-            .state
-            .font_style
-            .as_ref()
-            .map_or(10., |style| style.font_size.size().px());
-        let font_style = self.state.font_style.as_ref();
-        let font = font_style.map_or_else(
-            || load_system_font_from_style(None),
-            |style| {
-                with_thread_local_font_context(&self, |font_context| {
-                    let font_group = font_context.font_group(ServoArc::new(style.clone()));
-                    let font = font_group
-                        .borrow_mut()
-                        .first(font_context)
-                        .expect("couldn't find font");
-                    let font = font.borrow_mut();
-                    let template = font.handle.template();
-                    Font::from_bytes(Arc::new(template.bytes()), 0)
-                        .ok()
-                        .or_else(|| load_system_font_from_style(Some(style)))
-                })
-            },
-        );
-        let font = match font {
-            Some(f) => f,
-            None => {
-                error!("Couldn't load desired font or system fallback.");
-                return;
-            },
-        };
-        let font_width = font_width(&text, point_size, &font);
-
-        // Step 6.
-        let max_width = max_width.map(|width| width as f32);
-        let (width, scale_factor) = match max_width {
-            Some(max_width) if max_width > font_width => (max_width, 1.),
-            Some(max_width) => (font_width, max_width / font_width),
-            None => (font_width, 1.),
+        let Some(ref font_style) = self.state.font_style else {
+            return;
         };
 
-        // Step 7.
-        let start = self.text_origin(x as f32, y as f32, &font.metrics(), width, is_rtl);
-
-        // TODO: Bidi text layout
-
-        let old_transform = self.get_transform();
-        self.set_transform(
-            &old_transform
-                .pre_translate(vec2(start.x, 0.))
-                .pre_scale(scale_factor, 1.)
-                .pre_translate(vec2(-start.x, 0.)),
-        );
-
-        // Step 8.
-        self.drawtarget.fill_text(
-            &font,
-            point_size,
-            &text,
-            start,
-            &self.state.fill_style,
-            &self.state.draw_options,
-        );
-
-        self.set_transform(&old_transform);
+        let size = font_style.font_size.computed_size();
+        self.fill_text_with_size(text, x, y, max_width, is_rtl, size.px() as f64);
     }
 
-    fn text_origin(
+    /// <https://html.spec.whatwg.org/multipage/#text-preparation-algorithm>
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-measuretext>
+    pub fn measure_text(&mut self, text: String) -> TextMetrics {
+        // > Step 2: Replace all ASCII whitespace in text with U+0020 SPACE characters.
+        let text = replace_ascii_whitespace(text);
+        let Some(ref font_style) = self.state.font_style else {
+            return TextMetrics::default();
+        };
+
+        let font_group = self.font_context.font_group(font_style.clone());
+        let mut font_group = font_group.write();
+        let font = font_group
+            .first(&self.font_context)
+            .expect("couldn't find font");
+        let ascent = font.metrics.ascent.to_f32_px();
+        let descent = font.metrics.descent.to_f32_px();
+        let runs = self.build_unshaped_text_runs(&text, &mut font_group);
+
+        let shaped_runs: Vec<_> = runs
+            .into_iter()
+            .filter_map(UnshapedTextRun::into_shaped_text_run)
+            .collect();
+        let total_advance = shaped_runs
+            .iter()
+            .map(|run| run.glyphs.total_advance())
+            .sum::<Au>()
+            .to_f32_px();
+        let bounding_box = shaped_runs
+            .iter()
+            .map(TextRun::bounding_box)
+            .reduce(|a, b| {
+                let amount = Vector2D::new(a.max_x(), 0.);
+                let bounding_box = b.translate(amount);
+                a.union(&bounding_box)
+            })
+            .unwrap_or_default();
+
+        let FontBaseline {
+            ideographic_baseline,
+            alphabetic_baseline,
+            hanging_baseline,
+        } = match font.get_baseline() {
+            Some(baseline) => baseline,
+            None => FontBaseline {
+                hanging_baseline: ascent * HANGING_BASELINE_DEFAULT,
+                ideographic_baseline: -descent * IDEOGRAPHIC_BASELINE_DEFAULT,
+                alphabetic_baseline: 0.,
+            },
+        };
+
+        let anchor_x = match self.state.text_align {
+            TextAlign::End => total_advance,
+            TextAlign::Center => total_advance / 2.,
+            TextAlign::Right => total_advance,
+            _ => 0.,
+        };
+        let anchor_y = match self.state.text_baseline {
+            TextBaseline::Top => ascent,
+            TextBaseline::Hanging => hanging_baseline,
+            TextBaseline::Ideographic => ideographic_baseline,
+            TextBaseline::Middle => (ascent - descent) / 2.,
+            TextBaseline::Alphabetic => alphabetic_baseline,
+            TextBaseline::Bottom => -descent,
+        };
+
+        TextMetrics {
+            width: total_advance,
+            actual_boundingbox_left: anchor_x - bounding_box.min_x(),
+            actual_boundingbox_right: bounding_box.max_x() - anchor_x,
+            actual_boundingbox_ascent: bounding_box.max_y() - anchor_y,
+            actual_boundingbox_descent: anchor_y - bounding_box.min_y(),
+            font_boundingbox_ascent: ascent - anchor_y,
+            font_boundingbox_descent: descent + anchor_y,
+            em_height_ascent: ascent - anchor_y,
+            em_height_descent: descent + anchor_y,
+            hanging_baseline: hanging_baseline - anchor_y,
+            alphabetic_baseline: alphabetic_baseline - anchor_y,
+            ideographic_baseline: ideographic_baseline - anchor_y,
+        }
+    }
+
+    fn build_unshaped_text_runs<'b>(
+        &self,
+        text: &'b str,
+        font_group: &mut FontGroup,
+    ) -> Vec<UnshapedTextRun<'b>> {
+        let mut runs = Vec::new();
+        let mut current_text_run = UnshapedTextRun::default();
+        let mut current_text_run_start_index = 0;
+
+        for (index, character) in text.char_indices() {
+            // TODO: This should ultimately handle emoji variation selectors, but raqote does not yet
+            // have support for color glyphs.
+            let script = Script::from(character);
+            let font = font_group.find_by_codepoint(&self.font_context, character, None);
+
+            if !current_text_run.script_and_font_compatible(script, &font) {
+                let previous_text_run = mem::replace(
+                    &mut current_text_run,
+                    UnshapedTextRun {
+                        font: font.clone(),
+                        script,
+                        ..Default::default()
+                    },
+                );
+                current_text_run_start_index = index;
+                runs.push(previous_text_run)
+            }
+
+            current_text_run.string =
+                &text[current_text_run_start_index..index + character.len_utf8()];
+        }
+
+        runs.push(current_text_run);
+        runs
+    }
+
+    /// Find the *anchor_point* for the given parameters of a line of text.
+    /// See <https://html.spec.whatwg.org/multipage/#text-preparation-algorithm>.
+    fn find_anchor_point_for_line_of_text(
         &self,
         x: f32,
         y: f32,
-        metrics: &Metrics,
+        metrics: &FontMetrics,
         width: f32,
         is_rtl: bool,
     ) -> Point2D<f32> {
@@ -594,13 +755,15 @@ impl<'a> CanvasData<'a> {
             _ => 0.,
         };
 
+        let ascent = metrics.ascent.to_f32_px();
+        let descent = metrics.descent.to_f32_px();
         let anchor_y = match self.state.text_baseline {
-            TextBaseline::Top => metrics.ascent,
-            TextBaseline::Hanging => metrics.ascent * HANGING_BASELINE_DEFAULT,
-            TextBaseline::Ideographic => -metrics.descent * IDEOGRAPHIC_BASELINE_DEFAULT,
-            TextBaseline::Middle => (metrics.ascent - metrics.descent) / 2.,
+            TextBaseline::Top => ascent,
+            TextBaseline::Hanging => ascent * HANGING_BASELINE_DEFAULT,
+            TextBaseline::Ideographic => -descent * IDEOGRAPHIC_BASELINE_DEFAULT,
+            TextBaseline::Middle => (ascent - descent) / 2.,
             TextBaseline::Alphabetic => 0.,
-            TextBaseline::Bottom => -metrics.descent,
+            TextBaseline::Bottom => -descent,
         };
 
         point2(x + anchor_x, y + anchor_y)
@@ -674,7 +837,7 @@ impl<'a> CanvasData<'a> {
         }
 
         if self.need_to_draw_shadow() {
-            self.draw_with_shadow(&rect, |new_draw_target: &mut dyn GenericDrawTarget| {
+            self.draw_with_shadow(rect, |new_draw_target: &mut dyn GenericDrawTarget| {
                 new_draw_target.stroke_rect(
                     rect,
                     self.state.stroke_style.clone(),
@@ -941,7 +1104,7 @@ impl<'a> CanvasData<'a> {
             Some(p) => p,
             None => {
                 self.path_builder().move_to(cp1);
-                cp1.clone()
+                *cp1
             },
         };
         let cp1 = *cp1;
@@ -1002,6 +1165,7 @@ impl<'a> CanvasData<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn ellipse(
         &mut self,
         center: &Point2D<f32>,
@@ -1065,7 +1229,7 @@ impl<'a> CanvasData<'a> {
                 }
             },
         }
-        self.state.transform = transform.clone();
+        self.state.transform = *transform;
         self.drawtarget.set_transform(transform)
     }
 
@@ -1077,7 +1241,8 @@ impl<'a> CanvasData<'a> {
         self.backend.set_global_composition(op, &mut self.state);
     }
 
-    pub fn recreate(&mut self, size: Size2D<u64>) {
+    pub fn recreate(&mut self, size: Option<Size2D<u64>>) {
+        let size = size.unwrap_or_else(|| self.drawtarget.get_size().to_u64());
         self.drawtarget = self
             .backend
             .create_drawtarget(Size2D::new(size.width, size.height));
@@ -1107,29 +1272,28 @@ impl<'a> CanvasData<'a> {
     pub fn send_data(&mut self, chan: IpcSender<CanvasImageData>) {
         let size = self.drawtarget.get_size();
 
-        let descriptor = webrender_api::ImageDescriptor {
-            size: webrender_api::units::DeviceIntSize::new(size.width, size.height),
+        let descriptor = ImageDescriptor {
+            size: DeviceIntSize::new(size.width, size.height),
             stride: None,
-            format: webrender_api::ImageFormat::BGRA8,
+            format: ImageFormat::BGRA8,
             offset: 0,
-            flags: webrender_api::ImageDescriptorFlags::empty(),
+            flags: ImageDescriptorFlags::empty(),
         };
         let data = self.drawtarget.snapshot_data_owned();
-        let data = webrender_api::ImageData::Raw(Arc::new(data));
+        let data = ImageData::Raw(Arc::new(data));
 
         let mut updates = vec![];
 
         match self.image_key {
             Some(image_key) => {
                 debug!("Updating image {:?}.", image_key);
-                updates.push(ImageUpdate::Update(image_key, descriptor, data));
+                updates.push(ImageUpdate::UpdateImage(image_key, descriptor, data));
             },
             None => {
-                let key = match self.webrender_api.generate_key() {
-                    Ok(key) => key,
-                    Err(()) => return,
+                let Some(key) = self.webrender_api.generate_key() else {
+                    return;
                 };
-                updates.push(ImageUpdate::Add(key, descriptor, data));
+                updates.push(ImageUpdate::AddImage(key, descriptor, data));
                 self.image_key = Some(key);
                 debug!("New image {:?}.", self.image_key);
             },
@@ -1138,7 +1302,7 @@ impl<'a> CanvasData<'a> {
         if let Some(image_key) =
             mem::replace(&mut self.very_old_image_key, self.old_image_key.take())
         {
-            updates.push(ImageUpdate::Delete(image_key));
+            updates.push(ImageUpdate::DeleteImage(image_key));
         }
 
         self.webrender_api.update_images(updates);
@@ -1156,11 +1320,7 @@ impl<'a> CanvasData<'a> {
         pixels::rgba8_byte_swap_and_premultiply_inplace(&mut imagedata);
         let source_surface = self
             .drawtarget
-            .create_source_surface_from_data(
-                &imagedata,
-                rect.size.to_i32(),
-                rect.size.width as i32 * 4,
-            )
+            .create_source_surface_from_data(&imagedata)
             .unwrap();
         self.drawtarget.copy_surface(
             source_surface,
@@ -1181,12 +1341,12 @@ impl<'a> CanvasData<'a> {
         self.state.shadow_blur = value;
     }
 
-    pub fn set_shadow_color(&mut self, value: RGBA) {
+    pub fn set_shadow_color(&mut self, value: AbsoluteColor) {
         self.backend.set_shadow_color(value, &mut self.state);
     }
 
     pub fn set_font(&mut self, font_style: FontStyleStruct) {
-        self.state.font_style = Some(font_style)
+        self.state.font_style = Some(ServoArc::new(font_style))
     }
 
     pub fn set_text_align(&mut self, text_align: TextAlign) {
@@ -1206,16 +1366,13 @@ impl<'a> CanvasData<'a> {
     }
 
     fn create_draw_target_for_shadow(&self, source_rect: &Rect<f32>) -> Box<dyn GenericDrawTarget> {
-        let mut draw_target = self.drawtarget.create_similar_draw_target(
-            &Size2D::new(
-                source_rect.size.width as i32,
-                source_rect.size.height as i32,
-            ),
-            self.drawtarget.get_format(),
+        let mut draw_target = self.drawtarget.create_similar_draw_target(&Size2D::new(
+            source_rect.size.width as i32,
+            source_rect.size.height as i32,
+        ));
+        let matrix = self.state.transform.then(
+            &Transform2D::identity().pre_translate(-source_rect.origin.to_vector().cast::<f32>()),
         );
-        let matrix = Transform2D::identity()
-            .pre_translate(-source_rect.origin.to_vector().cast::<f32>())
-            .pre_transform(&self.state.transform);
         draw_target.set_transform(&matrix);
         draw_target
     }
@@ -1224,15 +1381,12 @@ impl<'a> CanvasData<'a> {
     where
         F: FnOnce(&mut dyn GenericDrawTarget),
     {
-        let shadow_src_rect = self.state.transform.transform_rect(rect);
+        let shadow_src_rect = self.state.transform.outer_transformed_rect(rect);
         let mut new_draw_target = self.create_draw_target_for_shadow(&shadow_src_rect);
         draw_shadow_source(&mut *new_draw_target);
         self.drawtarget.draw_surface_with_shadow(
             new_draw_target.snapshot(),
-            &Point2D::new(
-                shadow_src_rect.origin.x as f32,
-                shadow_src_rect.origin.y as f32,
-            ),
+            &Point2D::new(shadow_src_rect.origin.x, shadow_src_rect.origin.y),
             &self.state.shadow_color,
             &Vector2D::new(
                 self.state.shadow_offset_x as f32,
@@ -1266,10 +1420,10 @@ impl<'a> Drop for CanvasData<'a> {
     fn drop(&mut self) {
         let mut updates = vec![];
         if let Some(image_key) = self.old_image_key.take() {
-            updates.push(ImageUpdate::Delete(image_key));
+            updates.push(ImageUpdate::DeleteImage(image_key));
         }
         if let Some(image_key) = self.very_old_image_key.take() {
-            updates.push(ImageUpdate::Delete(image_key));
+            updates.push(ImageUpdate::DeleteImage(image_key));
         }
 
         self.webrender_api.update_images(updates);
@@ -1284,14 +1438,14 @@ pub struct CanvasPaintState<'a> {
     pub draw_options: DrawOptions,
     pub fill_style: Pattern<'a>,
     pub stroke_style: Pattern<'a>,
-    pub stroke_opts: StrokeOptions<'a>,
+    pub stroke_opts: StrokeOptions,
     /// The current 2D transform matrix.
     pub transform: Transform2D<f32>,
     pub shadow_offset_x: f64,
     pub shadow_offset_y: f64,
     pub shadow_blur: f64,
     pub shadow_color: Color,
-    pub font_style: Option<FontStyleStruct>,
+    pub font_style: Option<ServoArc<FontStyleStruct>>,
     pub text_align: TextAlign,
     pub text_baseline: TextBaseline,
 }
@@ -1302,17 +1456,24 @@ pub struct CanvasPaintState<'a> {
 /// image_size: The size of the image to be written
 /// dest_rect: Area of the destination target where the pixels will be copied
 /// smoothing_enabled: It determines if smoothing is applied to the image result
+/// premultiply: Determines whenever the image data should be premultiplied or not
 fn write_image(
     draw_target: &mut dyn GenericDrawTarget,
-    image_data: Vec<u8>,
+    mut image_data: Vec<u8>,
     image_size: Size2D<f64>,
     dest_rect: Rect<f64>,
     smoothing_enabled: bool,
+    premultiply: bool,
     draw_options: &DrawOptions,
 ) {
     if image_data.is_empty() {
         return;
     }
+
+    if premultiply {
+        pixels::rgba8_premultiply_inplace(&mut image_data);
+    }
+
     let image_rect = Rect::new(Point2D::zero(), image_size);
 
     // From spec https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage
@@ -1320,14 +1481,13 @@ fn write_image(
     // to apply a smoothing algorithm to the image data when it is scaled.
     // Otherwise, the image must be rendered using nearest-neighbor interpolation.
     let filter = if smoothing_enabled {
-        Filter::Linear
+        Filter::Bilinear
     } else {
-        Filter::Point
+        Filter::Nearest
     };
-    let image_size = image_size.to_i32();
 
     let source_surface = draw_target
-        .create_source_surface_from_data(&image_data, image_size, image_size.width * 4)
+        .create_source_surface_from_data(&image_data)
         .unwrap();
 
     draw_target.draw_surface(source_surface, dest_rect, image_rect, filter, draw_options);
@@ -1376,69 +1536,6 @@ impl RectExt for Rect<u32> {
     }
 }
 
-fn to_font_kit_family(font_family: &font::SingleFontFamily) -> FamilyName {
-    match font_family {
-        font::SingleFontFamily::FamilyName(family_name) => {
-            FamilyName::Title(family_name.to_css_string())
-        },
-        font::SingleFontFamily::Generic(generic) => match generic {
-            font::GenericFontFamily::Serif => FamilyName::Serif,
-            font::GenericFontFamily::SansSerif => FamilyName::SansSerif,
-            font::GenericFontFamily::Monospace => FamilyName::Monospace,
-            font::GenericFontFamily::Fantasy => FamilyName::Fantasy,
-            font::GenericFontFamily::Cursive => FamilyName::Cursive,
-            font::GenericFontFamily::None => unreachable!("Shouldn't appear in computed values"),
-        },
-    }
-}
-
-fn load_system_font_from_style(font_style: Option<&FontStyleStruct>) -> Option<Font> {
-    let mut properties = Properties::new();
-    let style = match font_style {
-        Some(style) => style,
-        None => return load_default_system_fallback_font(&properties),
-    };
-    let family_names = style
-        .font_family
-        .families
-        .iter()
-        .map(to_font_kit_family)
-        .collect::<Vec<_>>();
-    let properties = properties
-        .style(match style.font_style {
-            font::FontStyle::Normal => Style::Normal,
-            font::FontStyle::Italic => Style::Italic,
-            font::FontStyle::Oblique(..) => {
-                // TODO: support oblique angle.
-                Style::Oblique
-            },
-        })
-        .weight(Weight(style.font_weight.0))
-        .stretch(Stretch(style.font_stretch.value()));
-    let font_handle = match SystemSource::new().select_best_match(&family_names, &properties) {
-        Ok(handle) => handle,
-        Err(e) => {
-            error!("error getting font handle for style {:?}: {}", style, e);
-            return load_default_system_fallback_font(&properties);
-        },
-    };
-    match font_handle.load() {
-        Ok(f) => Some(f),
-        Err(e) => {
-            error!("error loading font for style {:?}: {}", style, e);
-            load_default_system_fallback_font(&properties)
-        },
-    }
-}
-
-fn load_default_system_fallback_font(properties: &Properties) -> Option<Font> {
-    SystemSource::new()
-        .select_best_match(&[FamilyName::SansSerif], properties)
-        .ok()?
-        .load()
-        .ok()
-}
-
 fn replace_ascii_whitespace(text: String) -> String {
     text.chars()
         .map(|c| match c {
@@ -1446,19 +1543,4 @@ fn replace_ascii_whitespace(text: String) -> String {
             _ => c,
         })
         .collect()
-}
-
-// TODO: This currently calculates the width using just advances and doesn't
-// determine the fallback font in case a character glyph isn't found.
-fn font_width(text: &str, point_size: f32, font: &Font) -> f32 {
-    let metrics = font.metrics();
-    let mut width = 0.;
-    for c in text.chars() {
-        if let Some(glyph_id) = font.glyph_for_char(c) {
-            if let Ok(advance) = font.advance(glyph_id) {
-                width += advance.x() * point_size / metrics.units_per_em as f32;
-            }
-        }
-    }
-    width
 }

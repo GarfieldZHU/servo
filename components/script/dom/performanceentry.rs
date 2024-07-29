@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
 use crate::dom::bindings::codegen::Bindings::PerformanceEntryBinding::PerformanceEntryMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
@@ -9,7 +11,6 @@ use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::performance::reduce_timing_resolution;
-use dom_struct::dom_struct;
 
 #[dom_struct]
 pub struct PerformanceEntry {
@@ -36,7 +37,7 @@ impl PerformanceEntry {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         global: &GlobalScope,
         name: DOMString,
@@ -68,12 +69,12 @@ impl PerformanceEntry {
 impl PerformanceEntryMethods for PerformanceEntry {
     // https://w3c.github.io/performance-timeline/#dom-performanceentry-name
     fn Name(&self) -> DOMString {
-        DOMString::from(self.name.clone())
+        self.name.clone()
     }
 
     // https://w3c.github.io/performance-timeline/#dom-performanceentry-entrytype
     fn EntryType(&self) -> DOMString {
-        DOMString::from(self.entry_type.clone())
+        self.entry_type.clone()
     }
 
     // https://w3c.github.io/performance-timeline/#dom-performanceentry-starttime

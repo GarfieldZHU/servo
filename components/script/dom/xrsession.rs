@@ -2,19 +2,38 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::f64::consts::{FRAC_PI_2, PI};
+use std::mem;
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use euclid::{RigidTransform3D, Transform3D, Vector3D};
+use ipc_channel::ipc::IpcReceiver;
+use ipc_channel::router::ROUTER;
+use metrics::ToMs;
+use profile_traits::ipc;
+use webxr_api::{
+    self, util, ApiSpace, ContextId as WebXRContextId, Display, EntityTypes, EnvironmentBlendMode,
+    Event as XREvent, Frame, FrameUpdateEvent, HitTestId, HitTestSource, Ray, SelectEvent,
+    SelectKind, Session, SessionId, View, Viewer, Visibility,
+};
+
+use super::bindings::trace::HashMapTracedValues;
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorBinding::NavigatorMethods;
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
-use crate::dom::bindings::codegen::Bindings::XRHitTestSourceBinding::XRHitTestOptionsInit;
-use crate::dom::bindings::codegen::Bindings::XRHitTestSourceBinding::XRHitTestTrackableType;
+use crate::dom::bindings::codegen::Bindings::NavigatorBinding::Navigator_Binding::NavigatorMethods;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
+use crate::dom::bindings::codegen::Bindings::XRHitTestSourceBinding::{
+    XRHitTestOptionsInit, XRHitTestTrackableType,
+};
 use crate::dom::bindings::codegen::Bindings::XRReferenceSpaceBinding::XRReferenceSpaceType;
-use crate::dom::bindings::codegen::Bindings::XRRenderStateBinding::XRRenderStateInit;
-use crate::dom::bindings::codegen::Bindings::XRRenderStateBinding::XRRenderStateMethods;
-use crate::dom::bindings::codegen::Bindings::XRSessionBinding::XREnvironmentBlendMode;
-use crate::dom::bindings::codegen::Bindings::XRSessionBinding::XRFrameRequestCallback;
-use crate::dom::bindings::codegen::Bindings::XRSessionBinding::XRSessionMethods;
-use crate::dom::bindings::codegen::Bindings::XRSessionBinding::XRVisibilityState;
+use crate::dom::bindings::codegen::Bindings::XRRenderStateBinding::{
+    XRRenderStateInit, XRRenderStateMethods,
+};
+use crate::dom::bindings::codegen::Bindings::XRSessionBinding::{
+    XREnvironmentBlendMode, XRFrameRequestCallback, XRSessionMethods, XRVisibilityState,
+};
 use crate::dom::bindings::codegen::Bindings::XRSystemBinding::XRSessionMode;
 use crate::dom::bindings::error::{Error, ErrorResult};
 use crate::dom::bindings::inheritance::Castable;
@@ -36,23 +55,6 @@ use crate::dom::xrsessionevent::XRSessionEvent;
 use crate::dom::xrspace::XRSpace;
 use crate::realms::InRealm;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use euclid::{RigidTransform3D, Transform3D, Vector3D};
-use ipc_channel::ipc::IpcReceiver;
-use ipc_channel::router::ROUTER;
-use metrics::ToMs;
-use profile_traits::ipc;
-use std::cell::Cell;
-use std::collections::HashMap;
-use std::f64::consts::{FRAC_PI_2, PI};
-use std::mem;
-use std::rc::Rc;
-use webxr_api::ContextId as WebXRContextId;
-use webxr_api::{
-    self, util, ApiSpace, Display, EntityTypes, EnvironmentBlendMode, Event as XREvent, Frame,
-    FrameUpdateEvent, HitTestId, HitTestSource, Ray, SelectEvent, SelectKind, Session, SessionId,
-    View, Viewer, Visibility,
-};
 
 #[dom_struct]
 pub struct XRSession {
@@ -62,11 +64,13 @@ pub struct XRSession {
     visibility_state: Cell<XRVisibilityState>,
     viewer_space: MutNullableDom<XRSpace>,
     #[ignore_malloc_size_of = "defined in webxr"]
+    #[no_trace]
     session: DomRefCell<Session>,
     frame_requested: Cell<bool>,
     pending_render_state: MutNullableDom<XRRenderState>,
     active_render_state: MutDom<XRRenderState>,
     /// Cached projection matrix for inline sessions
+    #[no_trace]
     inline_projection_matrix: DomRefCell<Transform3D<f32, Viewer, Display>>,
 
     next_raf_id: Cell<i32>,
@@ -78,14 +82,15 @@ pub struct XRSession {
     // Any promises from calling end()
     #[ignore_malloc_size_of = "promises are hard"]
     end_promises: DomRefCell<Vec<Rc<Promise>>>,
-    /// https://immersive-web.github.io/webxr/#ended
+    /// <https://immersive-web.github.io/webxr/#ended>
     ended: Cell<bool>,
     #[ignore_malloc_size_of = "defined in webxr"]
+    #[no_trace]
     next_hit_test_id: Cell<HitTestId>,
     #[ignore_malloc_size_of = "defined in webxr"]
-    pending_hit_test_promises: DomRefCell<HashMap<HitTestId, Rc<Promise>>>,
+    pending_hit_test_promises: DomRefCell<HashMapTracedValues<HitTestId, Rc<Promise>>>,
     /// Opaque framebuffers need to know the session is "outside of a requestAnimationFrame"
-    /// https://immersive-web.github.io/webxr/#opaque-framebuffer
+    /// <https://immersive-web.github.io/webxr/#opaque-framebuffer>
     outside_raf: Cell<bool>,
 }
 
@@ -115,7 +120,7 @@ impl XRSession {
             end_promises: DomRefCell::new(vec![]),
             ended: Cell::new(false),
             next_hit_test_id: Cell::new(HitTestId(0)),
-            pending_hit_test_promises: DomRefCell::new(HashMap::new()),
+            pending_hit_test_promises: DomRefCell::new(HashMapTracedValues::new()),
             outside_raf: Cell::new(true),
         }
     }
@@ -177,21 +182,12 @@ impl XRSession {
         ROUTER.add_route(
             frame_receiver.to_opaque(),
             Box::new(move |message| {
-                #[allow(unused)]
-                let mut frame: Frame = message.to().unwrap();
-                #[cfg(feature = "xr-profile")]
-                {
-                    let received = time::precise_time_ns();
-                    println!(
-                        "WEBXR PROFILING [raf receive]:\t{}ms",
-                        (received - frame.sent_time) as f64 / 1_000_000.
-                    );
-                    frame.sent_time = received;
-                }
+                let frame: Frame = message.to().unwrap();
+                let time = time::precise_time_ns();
                 let this = this.clone();
                 let _ = task_source.queue_with_canceller(
                     task!(xr_raf_callback: move || {
-                        this.root().raf_callback(frame);
+                        this.root().raf_callback(frame, time);
                     }),
                     &canceller,
                 );
@@ -357,16 +353,9 @@ impl XRSession {
         }
     }
 
-    /// https://immersive-web.github.io/webxr/#xr-animation-frame
-    fn raf_callback(&self, mut frame: Frame) {
+    /// <https://immersive-web.github.io/webxr/#xr-animation-frame>
+    fn raf_callback(&self, mut frame: Frame, time: u64) {
         debug!("WebXR RAF callback {:?}", frame);
-        #[cfg(feature = "xr-profile")]
-        let raf_start = time::precise_time_ns();
-        #[cfg(feature = "xr-profile")]
-        println!(
-            "WEBXR PROFILING [raf queued]:\t{}ms",
-            (raf_start - frame.sent_time) as f64 / 1_000_000.
-        );
 
         // Step 1-2 happen in the xebxr device thread
 
@@ -416,7 +405,7 @@ impl XRSession {
             mem::swap(&mut *self.raf_callback_list.borrow_mut(), &mut current);
         }
         let start = self.global().as_window().get_navigation_start();
-        let time = reduce_timing_resolution((frame.time_ns - start).to_ms());
+        let time = reduce_timing_resolution((time - start).to_ms());
 
         let frame = XRFrame::new(&self.global(), self, frame);
         // Step 8-9
@@ -424,19 +413,16 @@ impl XRSession {
         frame.set_animation_frame(true);
 
         // Step 10
-        self.apply_frame_updates(&*frame);
+        self.apply_frame_updates(&frame);
 
         // TODO: how does this fit with the webxr and xr layers specs?
-        self.layers_begin_frame(&*frame);
+        self.layers_begin_frame(&frame);
 
         // Step 11-12
         self.outside_raf.set(false);
         let len = self.current_raf_callback_list.borrow().len();
         for i in 0..len {
-            let callback = self.current_raf_callback_list.borrow()[i]
-                .1
-                .as_ref()
-                .map(|callback| Rc::clone(callback));
+            let callback = self.current_raf_callback_list.borrow()[i].1.clone();
             if let Some(callback) = callback {
                 let _ = callback.Call__(time, &frame, ExceptionHandling::Report);
             }
@@ -445,19 +431,13 @@ impl XRSession {
         *self.current_raf_callback_list.borrow_mut() = vec![];
 
         // TODO: how does this fit with the webxr and xr layers specs?
-        self.layers_end_frame(&*frame);
+        self.layers_end_frame(&frame);
 
         // Step 13
         frame.set_active(false);
 
         // TODO: how does this fit the webxr spec?
         self.session.borrow_mut().render_animation_frame();
-
-        #[cfg(feature = "xr-profile")]
-        println!(
-            "WEBXR PROFILING [raf execute]:\t{}ms",
-            (time::precise_time_ns() - raf_start) as f64 / 1_000_000.
-        );
     }
 
     fn update_inline_projection_matrix(&self) {
@@ -528,7 +508,7 @@ impl XRSession {
         });
     }
 
-    /// https://immersive-web.github.io/webxr/#xrframe-apply-frame-updates
+    /// <https://immersive-web.github.io/webxr/#xrframe-apply-frame-updates>
     fn apply_frame_updates(&self, _frame: &XRFrame) {
         // TODO: add a comment about why this is empty right now!
     }
@@ -537,7 +517,7 @@ impl XRSession {
         match event {
             FrameUpdateEvent::HitTestSourceAdded(id) => {
                 if let Some(promise) = self.pending_hit_test_promises.borrow_mut().remove(&id) {
-                    promise.resolve_native(&XRHitTestSource::new(&self.global(), id, &self));
+                    promise.resolve_native(&XRHitTestSource::new(&self.global(), id, self));
                 } else {
                     warn!(
                         "received hit test add request for unknown hit test {:?}",
@@ -591,7 +571,7 @@ impl XRSessionMethods for XRSession {
         self.active_render_state.get()
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrsession-updaterenderstate
+    /// <https://immersive-web.github.io/webxr/#dom-xrsession-updaterenderstate>
     fn UpdateRenderState(&self, init: &XRRenderStateInit, _: InRealm) -> ErrorResult {
         // Step 2
         if self.ended.get() {
@@ -720,7 +700,7 @@ impl XRSessionMethods for XRSession {
         Ok(())
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrsession-requestanimationframe
+    /// <https://immersive-web.github.io/webxr/#dom-xrsession-requestanimationframe>
     fn RequestAnimationFrame(&self, callback: Rc<XRFrameRequestCallback>) -> i32 {
         // queue up RAF callback, obtain ID
         let raf_id = self.next_raf_id.get();
@@ -732,7 +712,7 @@ impl XRSessionMethods for XRSession {
         raf_id
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrsession-cancelanimationframe
+    /// <https://immersive-web.github.io/webxr/#dom-xrsession-cancelanimationframe>
     fn CancelAnimationFrame(&self, frame: i32) {
         let mut list = self.raf_callback_list.borrow_mut();
         if let Some(pair) = list.iter_mut().find(|pair| pair.0 == frame) {
@@ -745,19 +725,19 @@ impl XRSessionMethods for XRSession {
         }
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrsession-environmentblendmode
+    /// <https://immersive-web.github.io/webxr/#dom-xrsession-environmentblendmode>
     fn EnvironmentBlendMode(&self) -> XREnvironmentBlendMode {
         self.blend_mode
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrsession-visibilitystate
+    /// <https://immersive-web.github.io/webxr/#dom-xrsession-visibilitystate>
     fn VisibilityState(&self) -> XRVisibilityState {
         self.visibility_state.get()
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrsession-requestreferencespace
+    /// <https://immersive-web.github.io/webxr/#dom-xrsession-requestreferencespace>
     fn RequestReferenceSpace(&self, ty: XRReferenceSpaceType, comp: InRealm) -> Rc<Promise> {
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
 
         // https://immersive-web.github.io/webxr/#create-a-reference-space
 
@@ -774,13 +754,12 @@ impl XRSessionMethods for XRSession {
                     (!self.is_immersive() || ty != XRReferenceSpaceType::Local)
                 {
                     let s = ty.as_str();
-                    if self
+                    if !self
                         .session
                         .borrow()
                         .granted_features()
                         .iter()
-                        .find(|f| &**f == s)
-                        .is_none()
+                        .any(|f| *f == s)
                     {
                         p.reject_error(Error::NotSupported);
                         return p;
@@ -792,12 +771,12 @@ impl XRSessionMethods for XRSession {
         p
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrsession-inputsources
+    /// <https://immersive-web.github.io/webxr/#dom-xrsession-inputsources>
     fn InputSources(&self) -> DomRoot<XRInputSourceArray> {
         DomRoot::from_ref(&*self.input_sources)
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrsession-end
+    /// <https://immersive-web.github.io/webxr/#dom-xrsession-end>
     fn End(&self) -> Rc<Promise> {
         let global = self.global();
         let p = Promise::new(&global);
@@ -828,13 +807,12 @@ impl XRSessionMethods for XRSession {
     fn RequestHitTestSource(&self, options: &XRHitTestOptionsInit) -> Rc<Promise> {
         let p = Promise::new(&self.global());
 
-        if self
+        if !self
             .session
             .borrow()
             .granted_features()
             .iter()
-            .find(|f| &**f == "hit-test")
-            .is_none()
+            .any(|f| f == "hit-test")
         {
             p.reject_error(Error::NotSupported);
             return p;

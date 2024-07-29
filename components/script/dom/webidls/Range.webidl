@@ -9,38 +9,28 @@
  */
 
 [Exposed=Window]
-interface Range {
+interface Range : AbstractRange {
   [Throws] constructor();
-  [Pure]
-  readonly attribute Node startContainer;
-  [Pure]
-  readonly attribute unsigned long startOffset;
-  [Pure]
-  readonly attribute Node endContainer;
-  [Pure]
-  readonly attribute unsigned long endOffset;
-  [Pure]
-  readonly attribute boolean collapsed;
   [Pure]
   readonly attribute Node commonAncestorContainer;
 
   [Throws]
-  void setStart(Node refNode, unsigned long offset);
+  undefined setStart(Node refNode, unsigned long offset);
   [Throws]
-  void setEnd(Node refNode, unsigned long offset);
+  undefined setEnd(Node refNode, unsigned long offset);
   [Throws]
-  void setStartBefore(Node refNode);
+  undefined setStartBefore(Node refNode);
   [Throws]
-  void setStartAfter(Node refNode);
+  undefined setStartAfter(Node refNode);
   [Throws]
-  void setEndBefore(Node refNode);
+  undefined setEndBefore(Node refNode);
   [Throws]
-  void setEndAfter(Node refNode);
-  void collapse(optional boolean toStart = false);
+  undefined setEndAfter(Node refNode);
+  undefined collapse(optional boolean toStart = false);
   [Throws]
-  void selectNode(Node refNode);
+  undefined selectNode(Node refNode);
   [Throws]
-  void selectNodeContents(Node refNode);
+  undefined selectNodeContents(Node refNode);
 
   const unsigned short START_TO_START = 0;
   const unsigned short START_TO_END = 1;
@@ -49,20 +39,20 @@ interface Range {
   [Pure, Throws]
   short compareBoundaryPoints(unsigned short how, Range sourceRange);
   [CEReactions, Throws]
-  void deleteContents();
+  undefined deleteContents();
   [CEReactions, NewObject, Throws]
   DocumentFragment extractContents();
   [CEReactions, NewObject, Throws]
   DocumentFragment cloneContents();
   [CEReactions, Throws]
-  void insertNode(Node node);
+  undefined insertNode(Node node);
   [CEReactions, Throws]
-  void surroundContents(Node newParent);
+  undefined surroundContents(Node newParent);
 
   [NewObject]
   Range cloneRange();
   [Pure]
-  void detach();
+  undefined detach();
 
   [Pure, Throws]
   boolean isPointInRange(Node node, unsigned long offset);

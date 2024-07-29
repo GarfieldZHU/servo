@@ -2,6 +2,42 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use core::ffi::c_void;
+use std::cell::Cell;
+use std::fs::{create_dir_all, read_to_string, File};
+use std::io::{Read, Seek, Write};
+use std::path::PathBuf;
+use std::process::Command;
+use std::ptr;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use base::id::PipelineId;
+use content_security_policy as csp;
+use dom_struct::dom_struct;
+use encoding_rs::Encoding;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use js::jsapi::{CanCompileOffThread, CompileToStencilOffThread1, OffThreadToken};
+use js::jsval::UndefinedValue;
+use js::rust::{
+    transform_str_to_source_text, CompileOptionsWrapper, FinishOffThreadStencil, HandleObject,
+    Stencil,
+};
+use net_traits::request::{
+    CorsSettings, CredentialsMode, Destination, ParserMetadata, RequestBuilder,
+};
+use net_traits::{
+    FetchMetadata, FetchResponseListener, Metadata, NetworkError, ResourceFetchTiming,
+    ResourceTimingType,
+};
+use servo_atoms::Atom;
+use servo_config::pref;
+use servo_url::{ImmutableOrigin, ServoUrl};
+use style::str::{StaticStringVec, HTML_SPACE_CHARACTERS};
+use uuid::Uuid;
+
 use crate::document_loader::LoadType;
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
@@ -13,63 +49,30 @@ use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::settings_stack::AutoEntryScript;
 use crate::dom::bindings::str::{DOMString, USVString};
-use crate::dom::bindings::trace::RootedTraceableBox;
+use crate::dom::bindings::trace::NoTrace;
 use crate::dom::document::Document;
 use crate::dom::element::{
     cors_setting_for_element, referrer_policy_for_element, reflect_cross_origin_attribute,
-    reflect_referrer_policy_attribute, set_cross_origin_attribute,
+    reflect_referrer_policy_attribute, set_cross_origin_attribute, AttributeMutation, Element,
+    ElementCreator,
 };
-use crate::dom::element::{AttributeMutation, Element, ElementCreator};
 use crate::dom::event::{Event, EventBubbles, EventCancelable, EventStatus};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlelement::HTMLElement;
-use crate::dom::node::{document_from_node, window_from_node};
-use crate::dom::node::{BindContext, ChildrenMutation, CloneChildrenFlag, Node};
+use crate::dom::node::{
+    document_from_node, window_from_node, BindContext, ChildrenMutation, CloneChildrenFlag, Node,
+};
 use crate::dom::performanceresourcetiming::InitiatorType;
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::fetch::create_a_potential_cors_request;
 use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
 use crate::realms::enter_realm;
-use crate::script_module::fetch_inline_module_script;
-use crate::script_module::{fetch_external_module_script, ModuleOwner, ScriptFetchOptions};
+use crate::script_module::{
+    fetch_external_module_script, fetch_inline_module_script, ModuleOwner, ScriptFetchOptions,
+};
 use crate::task::TaskCanceller;
 use crate::task_source::dom_manipulation::DOMManipulationTaskSource;
-use crate::task_source::TaskSource;
-use crate::task_source::TaskSourceName;
-use content_security_policy as csp;
-use core::ffi::c_void;
-use dom_struct::dom_struct;
-use encoding_rs::Encoding;
-use html5ever::{LocalName, Prefix};
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use js::jsapi::{
-    CanCompileOffThread, CompileOffThread1, FinishOffThreadScript, Heap, JSScript, OffThreadToken,
-};
-use js::jsval::UndefinedValue;
-use js::rust::{transform_str_to_source_text, CompileOptionsWrapper};
-use msg::constellation_msg::PipelineId;
-use net_traits::request::{
-    CorsSettings, CredentialsMode, Destination, ParserMetadata, RequestBuilder,
-};
-use net_traits::{
-    FetchMetadata, FetchResponseListener, Metadata, NetworkError, ResourceFetchTiming,
-    ResourceTimingType,
-};
-use servo_atoms::Atom;
-use servo_config::pref;
-use servo_url::ImmutableOrigin;
-use servo_url::ServoUrl;
-use std::cell::Cell;
-use std::fs::{create_dir_all, read_to_string, File};
-use std::io::{Read, Seek, Write};
-use std::mem::replace;
-use std::path::PathBuf;
-use std::process::Command;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
-use style::str::{StaticStringVec, HTML_SPACE_CHARACTERS};
-use uuid::Uuid;
+use crate::task_source::{TaskSource, TaskSourceName};
 
 pub struct OffThreadCompilationContext {
     script_element: Trusted<HTMLScriptElement>,
@@ -101,8 +104,8 @@ unsafe extern "C" fn off_thread_compilation_callback(
     let url = context.url.clone();
     let final_url = context.final_url.clone();
     let script_element = context.script_element.clone();
-    let script_kind = context.script_kind.clone();
-    let script = replace(&mut context.script_text, String::new());
+    let script_kind = context.script_kind;
+    let script = std::mem::take(&mut context.script_text);
     let fetch_options = context.fetch_options.clone();
 
     // Continue with <https://html.spec.whatwg.org/multipage/#fetch-a-classic-script>
@@ -110,24 +113,23 @@ unsafe extern "C" fn off_thread_compilation_callback(
         task!(off_thread_compile_continue: move || {
             let elem = script_element.root();
             let global = elem.global();
-            let cx = global.get_cx();
+            let cx = GlobalScope::get_cx();
             let _ar = enter_realm(&*global);
 
-            rooted!(in(*cx)
-                let compiled_script = FinishOffThreadScript(*cx, token.0)
-            );
+            // TODO: This is necessary because the rust compiler will otherwise try to move the *mut
+            // OffThreadToken directly, which isn't marked as Send. The correct fix is that this
+            // type is marked as Send in mozjs.
+            let used_token = token;
 
-            let load = if compiled_script.get().is_null() {
-                Err(NetworkError::Internal(
+            let compiled_script = FinishOffThreadStencil(*cx, used_token.0, ptr::null_mut());
+            let load = if compiled_script.is_null() {
+                Err(NoTrace(NetworkError::Internal(
                     "Off-thread compilation failed.".into(),
-                ))
+                )))
             } else {
                 let script_text = DOMString::from(script);
-                let heap = Heap::default();
-                let source_code = RootedTraceableBox::new(heap);
-                source_code.set(compiled_script.get());
                 let code = SourceCode::Compiled(CompiledSourceCode {
-                    source_code: source_code,
+                    source_code: compiled_script,
                     original_text: Rc::new(script_text),
                 });
 
@@ -135,12 +137,12 @@ unsafe extern "C" fn off_thread_compilation_callback(
                     code,
                     url: final_url,
                     external: true,
-                    fetch_options: fetch_options,
+                    fetch_options,
                     type_: ScriptType::Classic,
                 })
             };
 
-            finish_fetching_a_classic_script(&*elem, script_kind, url, load);
+            finish_fetching_a_classic_script(&elem, script_kind, url, load);
         }),
         &context.canceller,
     );
@@ -148,7 +150,7 @@ unsafe extern "C" fn off_thread_compilation_callback(
 
 /// An unique id for script element.
 #[derive(Clone, Copy, Debug, Eq, Hash, JSTraceable, PartialEq)]
-pub struct ScriptId(Uuid);
+pub struct ScriptId(#[no_trace] Uuid);
 
 #[dom_struct]
 pub struct HTMLScriptElement {
@@ -194,23 +196,25 @@ impl HTMLScriptElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
         creator: ElementCreator,
     ) -> DomRoot<HTMLScriptElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLScriptElement::new_inherited(
                 local_name, prefix, document, creator,
             )),
             document,
+            proto,
         )
     }
 
     pub fn get_script_id(&self) -> ScriptId {
-        self.id.clone()
+        self.id
     }
 }
 
@@ -244,7 +248,7 @@ pub enum ScriptType {
 #[derive(JSTraceable, MallocSizeOf)]
 pub struct CompiledSourceCode {
     #[ignore_malloc_size_of = "SM handles JS values"]
-    pub source_code: RootedTraceableBox<Heap<*mut JSScript>>,
+    pub source_code: Stencil,
     #[ignore_malloc_size_of = "Rc is hard"]
     pub original_text: Rc<DOMString>,
 }
@@ -259,6 +263,7 @@ pub enum SourceCode {
 pub struct ScriptOrigin {
     #[ignore_malloc_size_of = "Rc is hard"]
     code: SourceCode,
+    #[no_trace]
     url: ServoUrl,
     external: bool,
     fetch_options: ScriptFetchOptions,
@@ -274,7 +279,7 @@ impl ScriptOrigin {
     ) -> ScriptOrigin {
         ScriptOrigin {
             code: SourceCode::Text(text),
-            url: url,
+            url,
             external: false,
             fetch_options,
             type_,
@@ -289,7 +294,7 @@ impl ScriptOrigin {
     ) -> ScriptOrigin {
         ScriptOrigin {
             code: SourceCode::Text(text),
-            url: url,
+            url,
             external: true,
             fetch_options,
             type_,
@@ -298,7 +303,7 @@ impl ScriptOrigin {
 
     pub fn text(&self) -> Rc<DOMString> {
         match &self.code {
-            SourceCode::Text(text) => Rc::clone(&text),
+            SourceCode::Text(text) => Rc::clone(text),
             SourceCode::Compiled(compiled_script) => Rc::clone(&compiled_script.original_text),
         }
     }
@@ -314,21 +319,21 @@ fn finish_fetching_a_classic_script(
     // Step 11, Asynchronously complete this algorithm with script,
     // which refers to step 26.6 "When the chosen algorithm asynchronously completes",
     // of https://html.spec.whatwg.org/multipage/#prepare-a-script
-    let document = document_from_node(&*elem);
+    let document = document_from_node(elem);
 
     match script_kind {
-        ExternalScriptKind::Asap => document.asap_script_loaded(&elem, load),
-        ExternalScriptKind::AsapInOrder => document.asap_in_order_script_loaded(&elem, load),
-        ExternalScriptKind::Deferred => document.deferred_script_loaded(&elem, load),
+        ExternalScriptKind::Asap => document.asap_script_loaded(elem, load),
+        ExternalScriptKind::AsapInOrder => document.asap_in_order_script_loaded(elem, load),
+        ExternalScriptKind::Deferred => document.deferred_script_loaded(elem, load),
         ExternalScriptKind::ParsingBlocking => {
-            document.pending_parsing_blocking_script_loaded(&elem, load)
+            document.pending_parsing_blocking_script_loaded(elem, load)
         },
     }
 
     document.finish_load(LoadType::Script(url));
 }
 
-pub type ScriptResult = Result<ScriptOrigin, NetworkError>;
+pub type ScriptResult = Result<ScriptOrigin, NoTrace<NetworkError>>;
 
 /// The context required for asynchronously loading an external script source.
 struct ClassicContext {
@@ -399,10 +404,10 @@ impl FetchResponseListener for ClassicContext {
             (Err(err), _) | (_, Err(err)) => {
                 // Step 6, response is an error.
                 finish_fetching_a_classic_script(
-                    &*self.elem.root(),
-                    self.kind.clone(),
+                    &self.elem.root(),
+                    self.kind,
                     self.url.clone(),
-                    Err(err.clone()),
+                    Err(NoTrace(err.clone())),
                 );
                 return;
             },
@@ -423,7 +428,7 @@ impl FetchResponseListener for ClassicContext {
 
         let elem = self.elem.root();
         let global = elem.global();
-        let cx = global.get_cx();
+        let cx = GlobalScope::get_cx();
         let _ar = enter_realm(&*global);
 
         let options = unsafe { CompileOptionsWrapper::new(*cx, final_url.as_str(), 1) };
@@ -436,7 +441,7 @@ impl FetchResponseListener for ClassicContext {
 
             let context = Box::new(OffThreadCompilationContext {
                 script_element: self.elem.clone(),
-                script_kind: self.kind.clone(),
+                script_kind: self.kind,
                 final_url,
                 url: self.url.clone(),
                 task_source: global.dom_manipulation_task_source(),
@@ -446,7 +451,7 @@ impl FetchResponseListener for ClassicContext {
             });
 
             unsafe {
-                assert!(!CompileOffThread1(
+                assert!(!CompileToStencilOffThread1(
                     *cx,
                     options.ptr as *const _,
                     &mut transform_str_to_source_text(&context.script_text) as *mut _,
@@ -462,7 +467,7 @@ impl FetchResponseListener for ClassicContext {
                 self.fetch_options.clone(),
                 ScriptType::Classic,
             );
-            finish_fetching_a_classic_script(&*elem, self.kind.clone(), self.url.clone(), Ok(load));
+            finish_fetching_a_classic_script(&elem, self.kind, self.url.clone(), Ok(load));
         }
     }
 
@@ -547,8 +552,8 @@ fn fetch_a_classic_script(
 
     let context = Arc::new(Mutex::new(ClassicContext {
         elem: Trusted::new(script),
-        kind: kind,
-        character_encoding: character_encoding,
+        kind,
+        character_encoding,
         data: vec![],
         metadata: None,
         url: url.clone(),
@@ -626,7 +631,7 @@ impl HTMLScriptElement {
 
         // Step 12.
         let doc = document_from_node(self);
-        if self.parser_inserted.get() && &*self.parser_document != &*doc {
+        if self.parser_inserted.get() && *self.parser_document != *doc {
             return;
         }
 
@@ -643,7 +648,7 @@ impl HTMLScriptElement {
         // Step 15.
         if !element.has_attribute(&local_name!("src")) &&
             doc.should_elements_inline_type_behavior_be_blocked(
-                &element,
+                element,
                 csp::InlineCheckType::Script,
                 &text,
             ) == csp::CheckResult::Blocked
@@ -656,21 +661,20 @@ impl HTMLScriptElement {
         if script_type == ScriptType::Classic {
             let for_attribute = element.get_attribute(&ns!(), &local_name!("for"));
             let event_attribute = element.get_attribute(&ns!(), &local_name!("event"));
-            match (for_attribute, event_attribute) {
-                (Some(ref for_attribute), Some(ref event_attribute)) => {
-                    let for_value = for_attribute.value().to_ascii_lowercase();
-                    let for_value = for_value.trim_matches(HTML_SPACE_CHARACTERS);
-                    if for_value != "window" {
-                        return;
-                    }
+            if let (Some(ref for_attribute), Some(ref event_attribute)) =
+                (for_attribute, event_attribute)
+            {
+                let for_value = for_attribute.value().to_ascii_lowercase();
+                let for_value = for_value.trim_matches(HTML_SPACE_CHARACTERS);
+                if for_value != "window" {
+                    return;
+                }
 
-                    let event_value = event_attribute.value().to_ascii_lowercase();
-                    let event_value = event_value.trim_matches(HTML_SPACE_CHARACTERS);
-                    if event_value != "onload" && event_value != "onload()" {
-                        return;
-                    }
-                },
-                (_, _) => (),
+                let event_value = event_attribute.value().to_ascii_lowercase();
+                let event_value = event_value.trim_matches(HTML_SPACE_CHARACTERS);
+                if event_value != "onload" && event_value != "onload()" {
+                    return;
+                }
             }
         }
 
@@ -814,7 +818,7 @@ impl HTMLScriptElement {
                 Rc::clone(&text_rc),
                 base_url.clone(),
                 options.clone(),
-                script_type.clone(),
+                script_type,
             ));
 
             // Step 27-2.
@@ -848,7 +852,7 @@ impl HTMLScriptElement {
                         ModuleOwner::Window(Trusted::new(self)),
                         text_rc,
                         base_url.clone(),
-                        self.id.clone(),
+                        self.id,
                         options,
                     );
                 },
@@ -897,15 +901,15 @@ impl HTMLScriptElement {
             warn!("Error creating input and output files for unminify");
         }
 
-        let path;
-        match window_from_node(self).unminified_js_dir() {
-            Some(unminified_js_dir) => path = PathBuf::from(unminified_js_dir),
+        let path = match window_from_node(self).unminified_js_dir() {
+            Some(unminified_js_dir) => PathBuf::from(unminified_js_dir),
             None => {
                 warn!("Unminified script directory not found");
                 return;
             },
-        }
-        let (base, has_name) = match script.url.as_str().ends_with("/") {
+        };
+
+        let (base, has_name) = match script.url.as_str().ends_with('/') {
             true => (
                 path.join(&script.url[url::Position::BeforeHost..])
                     .as_path()
@@ -981,7 +985,7 @@ impl HTMLScriptElement {
     pub fn execute(&self, result: ScriptResult) {
         // Step 1.
         let doc = document_from_node(self);
-        if self.parser_inserted.get() && &*doc != &*self.parser_document {
+        if self.parser_inserted.get() && *doc != *self.parser_document {
             return;
         }
 
@@ -1058,7 +1062,7 @@ impl HTMLScriptElement {
         } else {
             self.line_number as u32
         };
-        rooted!(in(*window.get_cx()) let mut rval = UndefinedValue());
+        rooted!(in(*GlobalScope::get_cx()) let mut rval = UndefinedValue());
         let global = window.upcast::<GlobalScope>();
         global.evaluate_script_on_global_with_result(
             &script.code,
@@ -1071,7 +1075,7 @@ impl HTMLScriptElement {
     }
 
     #[allow(unsafe_code)]
-    /// https://html.spec.whatwg.org/multipage/#run-a-module-script
+    /// <https://html.spec.whatwg.org/multipage/#run-a-module-script>
     pub fn run_a_module_script(&self, script: &ScriptOrigin, _rethrow_errors: bool) {
         // TODO use a settings object rather than this element's document/window
         // Step 2
@@ -1083,7 +1087,7 @@ impl HTMLScriptElement {
         // Step 4
         let window = window_from_node(self);
         let global = window.upcast::<GlobalScope>();
-        let _aes = AutoEntryScript::new(&global);
+        let _aes = AutoEntryScript::new(global);
 
         let tree = if script.external {
             global.get_module_map().borrow().get(&script.url).cloned()
@@ -1101,7 +1105,7 @@ impl HTMLScriptElement {
                 let module_error = module_tree.get_rethrow_error().borrow();
                 let network_error = module_tree.get_network_error().borrow();
                 if module_error.is_some() && network_error.is_none() {
-                    module_tree.report_error(&global);
+                    module_tree.report_error(global);
                     return;
                 }
             }
@@ -1113,12 +1117,13 @@ impl HTMLScriptElement {
                 .map(|record| record.handle());
 
             if let Some(record) = record {
-                let evaluated = module_tree.execute_module(global, record);
+                rooted!(in(*GlobalScope::get_cx()) let mut rval = UndefinedValue());
+                let evaluated =
+                    module_tree.execute_module(global, record, rval.handle_mut().into());
 
                 if let Err(exception) = evaluated {
                     module_tree.set_rethrow_error(exception);
-                    module_tree.report_error(&global);
-                    return;
+                    module_tree.report_error(global);
                 }
             }
         }
@@ -1184,7 +1189,7 @@ impl HTMLScriptElement {
             (Some(ref ty), _) => {
                 debug!("script type={}", &***ty);
 
-                if &***ty == String::from("module") {
+                if ty.to_ascii_lowercase().trim_matches(HTML_SPACE_CHARACTERS) == "module" {
                     return Some(ScriptType::Module);
                 }
 
@@ -1237,20 +1242,17 @@ impl VirtualMethods for HTMLScriptElement {
 
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
-        match *attr.local_name() {
-            local_name!("src") => {
-                if let AttributeMutation::Set(_) = mutation {
-                    if !self.parser_inserted.get() && self.upcast::<Node>().is_connected() {
-                        self.prepare();
-                    }
+        if *attr.local_name() == local_name!("src") {
+            if let AttributeMutation::Set(_) = mutation {
+                if !self.parser_inserted.get() && self.upcast::<Node>().is_connected() {
+                    self.prepare();
                 }
-            },
-            _ => {},
+            }
         }
     }
 
     fn children_changed(&self, mutation: &ChildrenMutation) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.children_changed(mutation);
         }
         if !self.parser_inserted.get() && self.upcast::<Node>().is_connected() {
@@ -1259,7 +1261,7 @@ impl VirtualMethods for HTMLScriptElement {
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
 
@@ -1277,7 +1279,7 @@ impl VirtualMethods for HTMLScriptElement {
         maybe_doc: Option<&Document>,
         clone_children: CloneChildrenFlag,
     ) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.cloning_steps(copy, maybe_doc, clone_children);
         }
 

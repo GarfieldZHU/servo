@@ -2,27 +2,32 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::f32;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_media::audio::buffer_source_node::{
+    AudioBufferSourceNodeMessage, AudioBufferSourceNodeOptions,
+};
+use servo_media::audio::node::{AudioNodeInit, AudioNodeMessage, AudioNodeType};
+use servo_media::audio::param::ParamType;
+
 use crate::dom::audiobuffer::AudioBuffer;
 use crate::dom::audioparam::AudioParam;
 use crate::dom::audioscheduledsourcenode::AudioScheduledSourceNode;
 use crate::dom::baseaudiocontext::BaseAudioContext;
-use crate::dom::bindings::codegen::Bindings::AudioBufferSourceNodeBinding::AudioBufferSourceNodeMethods;
-use crate::dom::bindings::codegen::Bindings::AudioBufferSourceNodeBinding::AudioBufferSourceOptions;
+use crate::dom::bindings::codegen::Bindings::AudioBufferSourceNodeBinding::{
+    AudioBufferSourceNodeMethods, AudioBufferSourceOptions,
+};
 use crate::dom::bindings::codegen::Bindings::AudioParamBinding::AutomationRate;
 use crate::dom::bindings::codegen::Bindings::AudioScheduledSourceNodeBinding::AudioScheduledSourceNodeMethods;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_media::audio::buffer_source_node::AudioBufferSourceNodeMessage;
-use servo_media::audio::buffer_source_node::AudioBufferSourceNodeOptions;
-use servo_media::audio::node::{AudioNodeInit, AudioNodeMessage};
-use servo_media::audio::param::ParamType;
-use std::cell::Cell;
-use std::f32;
 
 #[dom_struct]
 pub struct AudioBufferSourceNode {
@@ -37,7 +42,7 @@ pub struct AudioBufferSourceNode {
 }
 
 impl AudioBufferSourceNode {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(
         window: &Window,
         context: &BaseAudioContext,
@@ -53,9 +58,10 @@ impl AudioBufferSourceNode {
         )?;
         let node_id = source_node.node().node_id();
         let playback_rate = AudioParam::new(
-            &window,
+            window,
             context,
             node_id,
+            AudioNodeType::AudioBufferSourceNode,
             ParamType::PlaybackRate,
             AutomationRate::K_rate,
             *options.playbackRate,
@@ -63,9 +69,10 @@ impl AudioBufferSourceNode {
             f32::MAX,
         );
         let detune = AudioParam::new(
-            &window,
+            window,
             context,
             node_id,
+            AudioNodeType::AudioBufferSourceNode,
             ParamType::Detune,
             AutomationRate::K_rate,
             *options.detune,
@@ -82,33 +89,39 @@ impl AudioBufferSourceNode {
             loop_start: Cell::new(*options.loopStart),
             loop_end: Cell::new(*options.loopEnd),
         };
-        if let Some(ref buffer) = options.buffer {
-            if let Some(ref buffer) = buffer {
-                if let Err(err) = node.SetBuffer(Some(&**buffer)) {
-                    return Err(err);
-                }
-            }
+        if let Some(Some(ref buffer)) = options.buffer {
+            node.SetBuffer(Some(buffer))?;
         }
         Ok(node)
     }
 
-    #[allow(unrooted_must_root)]
     pub fn new(
         window: &Window,
         context: &BaseAudioContext,
         options: &AudioBufferSourceOptions,
     ) -> Fallible<DomRoot<AudioBufferSourceNode>> {
+        Self::new_with_proto(window, None, context, options)
+    }
+
+    #[allow(crown::unrooted_must_root)]
+    fn new_with_proto(
+        window: &Window,
+        proto: Option<HandleObject>,
+        context: &BaseAudioContext,
+        options: &AudioBufferSourceOptions,
+    ) -> Fallible<DomRoot<AudioBufferSourceNode>> {
         let node = AudioBufferSourceNode::new_inherited(window, context, options)?;
-        Ok(reflect_dom_object(Box::new(node), window))
+        Ok(reflect_dom_object_with_proto(Box::new(node), window, proto))
     }
 
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         context: &BaseAudioContext,
         options: &AudioBufferSourceOptions,
     ) -> Fallible<DomRoot<AudioBufferSourceNode>> {
-        AudioBufferSourceNode::new(window, context, options)
+        AudioBufferSourceNode::new_with_proto(window, proto, context, options)
     }
 }
 
@@ -252,15 +265,10 @@ impl AudioBufferSourceNodeMethods for AudioBufferSourceNode {
 impl<'a> From<&'a AudioBufferSourceOptions> for AudioBufferSourceNodeOptions {
     fn from(options: &'a AudioBufferSourceOptions) -> Self {
         Self {
-            buffer: if let Some(ref buffer) = options.buffer {
-                if let Some(ref buffer) = buffer {
-                    (*buffer.get_channels()).clone()
-                } else {
-                    None
-                }
-            } else {
-                None
-            },
+            buffer: options
+                .buffer
+                .as_ref()
+                .and_then(|b| (*b.as_ref()?.get_channels()).clone()),
             detune: *options.detune,
             loop_enabled: options.loop_,
             loop_end: Some(*options.loopEnd),

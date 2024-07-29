@@ -2,23 +2,27 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use webgpu::{WebGPU, WebGPUDevice, WebGPURenderBundle, WebGPURequest};
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::GPURenderBundleBinding::GPURenderBundleMethods;
+use crate::dom::bindings::codegen::Bindings::WebGPUBinding::GPURenderBundleMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::USVString;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
-use webgpu::{WebGPU, WebGPUDevice, WebGPURenderBundle};
 
 #[dom_struct]
 pub struct GPURenderBundle {
     reflector_: Reflector,
     #[ignore_malloc_size_of = "channels are hard"]
+    #[no_trace]
     channel: WebGPU,
+    #[no_trace]
     device: WebGPUDevice,
+    #[no_trace]
     render_bundle: WebGPURenderBundle,
-    label: DomRefCell<Option<USVString>>,
+    label: DomRefCell<USVString>,
 }
 
 impl GPURenderBundle {
@@ -26,7 +30,7 @@ impl GPURenderBundle {
         render_bundle: WebGPURenderBundle,
         device: WebGPUDevice,
         channel: WebGPU,
-        label: Option<USVString>,
+        label: USVString,
     ) -> Self {
         Self {
             reflector_: Reflector::new(),
@@ -42,7 +46,7 @@ impl GPURenderBundle {
         render_bundle: WebGPURenderBundle,
         device: WebGPUDevice,
         channel: WebGPU,
-        label: Option<USVString>,
+        label: USVString,
     ) -> DomRoot<Self> {
         reflect_dom_object(
             Box::new(GPURenderBundle::new_inherited(
@@ -63,13 +67,28 @@ impl GPURenderBundle {
 }
 
 impl GPURenderBundleMethods for GPURenderBundle {
-    /// https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label
-    fn GetLabel(&self) -> Option<USVString> {
+    /// <https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label>
+    fn Label(&self) -> USVString {
         self.label.borrow().clone()
     }
 
-    /// https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label
-    fn SetLabel(&self, value: Option<USVString>) {
+    /// <https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label>
+    fn SetLabel(&self, value: USVString) {
         *self.label.borrow_mut() = value;
+    }
+}
+
+impl Drop for GPURenderBundle {
+    fn drop(&mut self) {
+        if let Err(e) = self
+            .channel
+            .0
+            .send(WebGPURequest::DropRenderBundle(self.render_bundle.0))
+        {
+            warn!(
+                "Failed to send DropRenderBundle ({:?}) ({})",
+                self.render_bundle.0, e
+            );
+        }
     }
 }

@@ -2,13 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::pipeline::Pipeline;
-use euclid::Size2D;
-use msg::constellation_msg::{
-    BrowsingContextGroupId, BrowsingContextId, PipelineId, TopLevelBrowsingContextId,
-};
 use std::collections::{HashMap, HashSet};
+
+use base::id::{BrowsingContextGroupId, BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
+use euclid::Size2D;
+use log::warn;
 use style_traits::CSSPixel;
+
+use crate::pipeline::Pipeline;
 
 /// Because a browsing context is only constructed once the document that's
 /// going to be in it becomes active (i.e. not when a pipeline is spawned), some
@@ -27,9 +28,9 @@ pub struct NewBrowsingContextInfo {
     /// Whether this browsing context inherits a secure context.
     pub inherited_secure_context: Option<bool>,
 
-    /// Whether this browsing context should be treated as visible for the
-    /// purposes of scheduling and resource management.
-    pub is_visible: bool,
+    /// Whether this browsing context should be throttled, using less resources
+    /// by stopping animations and running timers at a heavily limited rate.
+    pub throttled: bool,
 }
 
 /// The constellation's view of a browsing context.
@@ -57,9 +58,9 @@ pub struct BrowsingContext {
     /// Whether this browsing context inherits a secure context.
     pub inherited_secure_context: Option<bool>,
 
-    /// Whether this browsing context should be treated as visible for the
-    /// purposes of scheduling and resource management.
-    pub is_visible: bool,
+    /// Whether this browsing context should be throttled, using less resources
+    /// by stopping animations and running timers at a heavily limited rate.
+    pub throttled: bool,
 
     /// The pipeline for the current session history entry.
     pub pipeline_id: PipelineId,
@@ -76,6 +77,7 @@ pub struct BrowsingContext {
 impl BrowsingContext {
     /// Create a new browsing context.
     /// Note this just creates the browsing context, it doesn't add it to the constellation's set of browsing contexts.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         bc_group_id: BrowsingContextGroupId,
         id: BrowsingContextId,
@@ -85,7 +87,7 @@ impl BrowsingContext {
         size: Size2D<f32, CSSPixel>,
         is_private: bool,
         inherited_secure_context: Option<bool>,
-        is_visible: bool,
+        throttled: bool,
     ) -> BrowsingContext {
         let mut pipelines = HashSet::new();
         pipelines.insert(pipeline_id);
@@ -96,7 +98,7 @@ impl BrowsingContext {
             size,
             is_private,
             inherited_secure_context,
-            is_visible,
+            throttled,
             pipeline_id,
             parent_pipeline_id,
             pipelines,
@@ -195,7 +197,7 @@ impl<'a> Iterator for AllBrowsingContextsIterator<'a> {
             let child_browsing_context_ids = browsing_context
                 .pipelines
                 .iter()
-                .filter_map(|pipeline_id| pipelines.get(&pipeline_id))
+                .filter_map(|pipeline_id| pipelines.get(pipeline_id))
                 .flat_map(|pipeline| pipeline.children.iter());
             self.stack.extend(child_browsing_context_ids);
             return Some(browsing_context);

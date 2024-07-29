@@ -2,23 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::sampler::{NativeStack, Sampler};
-use crossbeam_channel::{after, never, unbounded, Receiver, Sender};
-use ipc_channel::ipc::{IpcReceiver, IpcSender};
-use ipc_channel::router::ROUTER;
-use msg::constellation_msg::MonitoredComponentId;
-use msg::constellation_msg::{
-    BackgroundHangMonitor, BackgroundHangMonitorClone, BackgroundHangMonitorExitSignal,
-    BackgroundHangMonitorRegister,
-};
-use msg::constellation_msg::{
-    BackgroundHangMonitorControlMsg, HangAlert, HangAnnotation, HangMonitorAlert,
-};
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use background_hang_monitor_api::{
+    BackgroundHangMonitor, BackgroundHangMonitorClone, BackgroundHangMonitorControlMsg,
+    BackgroundHangMonitorExitSignal, BackgroundHangMonitorRegister, HangAlert, HangAnnotation,
+    HangMonitorAlert, MonitoredComponentId,
+};
+use crossbeam_channel::{after, never, select, unbounded, Receiver, Sender};
+use ipc_channel::ipc::{IpcReceiver, IpcSender};
+use ipc_channel::router::ROUTER;
+use log::warn;
+
+use crate::sampler::{NativeStack, Sampler};
 
 #[derive(Clone)]
 pub struct HangMonitorRegister {
@@ -49,6 +49,7 @@ impl HangMonitorRegister {
         let (tether, tether_port) = unbounded();
 
         let _ = thread::Builder::new()
+            .name("BackgroundHangMonitor".to_owned())
             .spawn(move || {
                 let mut monitor = BackgroundHangMonitorWorker::new(
                     constellation_chan,
@@ -92,16 +93,19 @@ impl BackgroundHangMonitorRegister for HangMonitorRegister {
             target_os = "windows",
             any(target_arch = "x86_64", target_arch = "x86")
         ))]
-        let sampler = crate::sampler_windows::WindowsSampler::new();
+        let sampler = crate::sampler_windows::WindowsSampler::new_boxed();
         #[cfg(target_os = "macos")]
-        let sampler = crate::sampler_mac::MacOsSampler::new();
+        let sampler = crate::sampler_mac::MacOsSampler::new_boxed();
         #[cfg(all(
             target_os = "linux",
             not(any(target_arch = "arm", target_arch = "aarch64"))
         ))]
-        let sampler = crate::sampler_linux::LinuxSampler::new();
-        #[cfg(any(target_os = "android", target_arch = "arm", target_arch = "aarch64"))]
-        let sampler = crate::sampler::DummySampler::new();
+        let sampler = crate::sampler_linux::LinuxSampler::new_boxed();
+        #[cfg(any(
+            target_os = "android",
+            all(target_os = "linux", any(target_arch = "arm", target_arch = "aarch64"))
+        ))]
+        let sampler = crate::sampler::DummySampler::new_boxed();
 
         // When a component is registered, and there's an exit request that
         // reached BHM, we want an exit signal to be delivered to the
@@ -205,7 +209,7 @@ impl BackgroundHangMonitorChan {
         BackgroundHangMonitorChan {
             sender,
             _tether: tether,
-            component_id: component_id,
+            component_id,
             disconnected: Default::default(),
             monitoring_enabled,
         }
@@ -309,14 +313,14 @@ struct BackgroundHangMonitorWorker {
     monitoring_enabled: bool,
 }
 
+type MonitoredComponentSender = Sender<(MonitoredComponentId, MonitoredComponentMsg)>;
+type MonitoredComponentReceiver = Receiver<(MonitoredComponentId, MonitoredComponentMsg)>;
+
 impl BackgroundHangMonitorWorker {
     fn new(
         constellation_chan: IpcSender<HangMonitorAlert>,
         control_port: IpcReceiver<BackgroundHangMonitorControlMsg>,
-        (port_sender, port): (
-            Arc<Sender<(MonitoredComponentId, MonitoredComponentMsg)>>,
-            Receiver<(MonitoredComponentId, MonitoredComponentMsg)>,
-        ),
+        (port_sender, port): (Arc<MonitoredComponentSender>, MonitoredComponentReceiver),
         tether_port: Receiver<Never>,
         monitoring_enabled: bool,
     ) -> Self {
@@ -357,7 +361,7 @@ impl BackgroundHangMonitorWorker {
             let profile = stack.to_hangprofile();
             let name = match self.component_names.get(&id) {
                 Some(ref s) => format!("\"{}\"", s),
-                None => format!("null"),
+                None => "null".to_string(),
             };
             let json = format!(
                 "{}{{ \"name\": {}, \"namespace\": {}, \"index\": {}, \"type\": \"{:?}\", \
@@ -386,12 +390,10 @@ impl BackgroundHangMonitorWorker {
                 .checked_sub(Instant::now() - self.last_sample)
                 .unwrap_or_else(|| Duration::from_millis(0));
             after(duration)
+        } else if self.monitoring_enabled {
+            after(Duration::from_millis(100))
         } else {
-            if self.monitoring_enabled {
-                after(Duration::from_millis(100))
-            } else {
-                never()
-            }
+            never()
         };
 
         let received = select! {
@@ -400,13 +402,8 @@ impl BackgroundHangMonitorWorker {
                 // gets disconnected.
                 Some(event.unwrap())
             },
-            recv(self.tether_port) -> event => {
+            recv(self.tether_port) -> _ => {
                 // This arm can only reached by a tether disconnection
-                match event {
-                    Ok(x) => match x {}
-                    Err(_) => {}
-                }
-
                 // All associated `HangMonitorRegister` and
                 // `BackgroundHangMonitorChan` have been dropped. Suppress
                 // `signal_to_exit` and exit the BHM.

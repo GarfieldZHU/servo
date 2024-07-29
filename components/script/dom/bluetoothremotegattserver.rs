@@ -2,10 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use bluetooth_traits::{BluetoothRequest, BluetoothResponse, GATTType};
+use dom_struct::dom_struct;
+use ipc_channel::ipc::IpcSender;
+
 use crate::dom::bindings::codegen::Bindings::BluetoothDeviceBinding::BluetoothDeviceMethods;
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTServerBinding::BluetoothRemoteGATTServerMethods;
-use crate::dom::bindings::error::Error;
-use crate::dom::bindings::error::ErrorResult;
+use crate::dom::bindings::error::{Error, ErrorResult};
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bluetooth::{get_gatt_children, response_async, AsyncBluetoothListener};
@@ -14,11 +20,6 @@ use crate::dom::bluetoothuuid::{BluetoothServiceUUID, BluetoothUUID};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::realms::InRealm;
-use bluetooth_traits::{BluetoothRequest, BluetoothResponse, GATTType};
-use dom_struct::dom_struct;
-use ipc_channel::ipc::IpcSender;
-use std::cell::Cell;
-use std::rc::Rc;
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothremotegattserver
 #[dom_struct]
@@ -71,7 +72,7 @@ impl BluetoothRemoteGATTServerMethods for BluetoothRemoteGATTServer {
     #[allow(unsafe_code)]
     fn Connect(&self, comp: InRealm) -> Rc<Promise> {
         // Step 1.
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
         let sender = response_async(&p, self);
 
         // TODO: Step 3: Check if the UA is currently using the Bluetooth system.
@@ -89,7 +90,7 @@ impl BluetoothRemoteGATTServerMethods for BluetoothRemoteGATTServer {
             ))
             .unwrap();
         // Step 5: return promise.
-        return p;
+        p
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattserver-disconnect
@@ -145,7 +146,7 @@ impl AsyncBluetoothListener for BluetoothRemoteGATTServer {
                 // Step 5.2.3
                 if self.Device().is_represented_device_null() {
                     if let Err(e) = self.Device().garbage_collect_the_connection() {
-                        return promise.reject_error(Error::from(e));
+                        return promise.reject_error(e);
                     }
                     return promise.reject_error(Error::Network);
                 }
@@ -161,12 +162,12 @@ impl AsyncBluetoothListener for BluetoothRemoteGATTServer {
             BluetoothResponse::GetPrimaryServices(services_vec, single) => {
                 let device = self.Device();
                 if single {
-                    promise.resolve_native(&device.get_or_create_service(&services_vec[0], &self));
+                    promise.resolve_native(&device.get_or_create_service(&services_vec[0], self));
                     return;
                 }
                 let mut services = vec![];
                 for service in services_vec {
-                    let bt_service = device.get_or_create_service(&service, &self);
+                    let bt_service = device.get_or_create_service(&service, self);
                     services.push(bt_service);
                 }
                 promise.resolve_native(&services);

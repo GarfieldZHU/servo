@@ -32,11 +32,11 @@ interface HTMLElement : Element {
   // user interaction
   [CEReactions]
            attribute boolean hidden;
-  void click();
+  undefined click();
   // [CEReactions]
   //         attribute long tabIndex;
-  void focus();
-  void blur();
+  undefined focus();
+  undefined blur();
   // [CEReactions]
   //         attribute DOMString accessKey;
   //readonly attribute DOMString accessKeyLabel;
@@ -48,7 +48,9 @@ interface HTMLElement : Element {
   //         attribute boolean spellcheck;
   // void forceSpellCheck();
 
-  attribute [TreatNullAs=EmptyString] DOMString innerText;
+  attribute [LegacyNullToEmptyString] DOMString innerText;
+
+  [Throws] ElementInternals attachInternals();
 
   // command API
   // readonly attribute DOMString? commandType;
@@ -73,3 +75,4 @@ HTMLElement includes GlobalEventHandlers;
 HTMLElement includes DocumentAndElementEventHandlers;
 HTMLElement includes ElementContentEditable;
 HTMLElement includes ElementCSSInlineStyle;
+HTMLElement includes HTMLOrSVGElement;

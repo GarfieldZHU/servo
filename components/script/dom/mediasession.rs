@@ -2,16 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use embedder_traits::{MediaMetadata as EmbedderMediaMetadata, MediaSessionEvent};
+use script_traits::{MediaSessionActionType, ScriptMsg};
+
+use super::bindings::trace::HashMapTracedValues;
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HTMLMediaElementBinding::HTMLMediaElementMethods;
-use crate::dom::bindings::codegen::Bindings::MediaMetadataBinding::MediaMetadataInit;
-use crate::dom::bindings::codegen::Bindings::MediaMetadataBinding::MediaMetadataMethods;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaPositionState;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaSessionAction;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaSessionActionHandler;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaSessionMethods;
-use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::MediaSessionPlaybackState;
+use crate::dom::bindings::codegen::Bindings::MediaMetadataBinding::{
+    MediaMetadataInit, MediaMetadataMethods,
+};
+use crate::dom::bindings::codegen::Bindings::MediaSessionBinding::{
+    MediaPositionState, MediaSessionAction, MediaSessionActionHandler, MediaSessionMethods,
+    MediaSessionPlaybackState,
+};
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
@@ -21,41 +28,35 @@ use crate::dom::htmlmediaelement::HTMLMediaElement;
 use crate::dom::mediametadata::MediaMetadata;
 use crate::dom::window::Window;
 use crate::realms::{enter_realm, InRealm};
-use dom_struct::dom_struct;
-use embedder_traits::MediaMetadata as EmbedderMediaMetadata;
-use embedder_traits::MediaSessionEvent;
-use script_traits::MediaSessionActionType;
-use script_traits::ScriptMsg;
-use std::collections::HashMap;
-use std::rc::Rc;
 
 #[dom_struct]
 pub struct MediaSession {
     reflector_: Reflector,
-    /// https://w3c.github.io/mediasession/#dom-mediasession-metadata
+    /// <https://w3c.github.io/mediasession/#dom-mediasession-metadata>
     #[ignore_malloc_size_of = "defined in embedder_traits"]
+    #[no_trace]
     metadata: DomRefCell<Option<EmbedderMediaMetadata>>,
-    /// https://w3c.github.io/mediasession/#dom-mediasession-playbackstate
+    /// <https://w3c.github.io/mediasession/#dom-mediasession-playbackstate>
     playback_state: DomRefCell<MediaSessionPlaybackState>,
-    /// https://w3c.github.io/mediasession/#supported-media-session-actions
+    /// <https://w3c.github.io/mediasession/#supported-media-session-actions>
     #[ignore_malloc_size_of = "Rc"]
-    action_handlers: DomRefCell<HashMap<MediaSessionActionType, Rc<MediaSessionActionHandler>>>,
+    action_handlers:
+        DomRefCell<HashMapTracedValues<MediaSessionActionType, Rc<MediaSessionActionHandler>>>,
     /// The media instance controlled by this media session.
     /// For now only HTMLMediaElements are controlled by media sessions.
     media_instance: MutNullableDom<HTMLMediaElement>,
 }
 
 impl MediaSession {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited() -> MediaSession {
-        let media_session = MediaSession {
+        MediaSession {
             reflector_: Reflector::new(),
             metadata: DomRefCell::new(None),
             playback_state: DomRefCell::new(MediaSessionPlaybackState::None),
-            action_handlers: DomRefCell::new(HashMap::new()),
+            action_handlers: DomRefCell::new(HashMapTracedValues::new()),
             media_instance: Default::default(),
-        };
-        media_session
+        }
     }
 
     pub fn new(window: &Window) -> DomRoot<MediaSession> {
@@ -123,7 +124,7 @@ impl MediaSession {
 }
 
 impl MediaSessionMethods for MediaSession {
-    /// https://w3c.github.io/mediasession/#dom-mediasession-metadata
+    /// <https://w3c.github.io/mediasession/#dom-mediasession-metadata>
     fn GetMetadata(&self) -> Option<DomRoot<MediaMetadata>> {
         if let Some(ref metadata) = *self.metadata.borrow() {
             let mut init = MediaMetadataInit::empty();
@@ -131,15 +132,15 @@ impl MediaSessionMethods for MediaSession {
             init.artist = DOMString::from_string(metadata.artist.clone());
             init.album = DOMString::from_string(metadata.album.clone());
             let global = self.global();
-            Some(MediaMetadata::new(&global.as_window(), &init))
+            Some(MediaMetadata::new(global.as_window(), &init))
         } else {
             None
         }
     }
 
-    /// https://w3c.github.io/mediasession/#dom-mediasession-metadata
+    /// <https://w3c.github.io/mediasession/#dom-mediasession-metadata>
     fn SetMetadata(&self, metadata: Option<&MediaMetadata>) {
-        if let Some(ref metadata) = metadata {
+        if let Some(metadata) = metadata {
             metadata.set_session(self);
         }
 
@@ -166,17 +167,17 @@ impl MediaSessionMethods for MediaSession {
         self.send_event(MediaSessionEvent::SetMetadata(_metadata));
     }
 
-    /// https://w3c.github.io/mediasession/#dom-mediasession-playbackstate
+    /// <https://w3c.github.io/mediasession/#dom-mediasession-playbackstate>
     fn PlaybackState(&self) -> MediaSessionPlaybackState {
         *self.playback_state.borrow()
     }
 
-    /// https://w3c.github.io/mediasession/#dom-mediasession-playbackstate
+    /// <https://w3c.github.io/mediasession/#dom-mediasession-playbackstate>
     fn SetPlaybackState(&self, state: MediaSessionPlaybackState) {
         *self.playback_state.borrow_mut() = state;
     }
 
-    /// https://w3c.github.io/mediasession/#update-action-handler-algorithm
+    /// <https://w3c.github.io/mediasession/#update-action-handler-algorithm>
     fn SetActionHandler(
         &self,
         action: MediaSessionAction,
@@ -191,7 +192,7 @@ impl MediaSessionMethods for MediaSession {
         };
     }
 
-    /// https://w3c.github.io/mediasession/#dom-mediasession-setpositionstate
+    /// <https://w3c.github.io/mediasession/#dom-mediasession-setpositionstate>
     fn SetPositionState(&self, state: &MediaPositionState) -> Fallible<()> {
         // If the state is an empty dictionary then clear the position state.
         if state.duration.is_none() && state.position.is_none() && state.playbackRate.is_none() {
@@ -238,8 +239,7 @@ impl MediaSessionMethods for MediaSession {
         if let Some(media_instance) = self.media_instance.get() {
             media_instance.set_duration(state.duration.map(|v| *v).unwrap());
             // If the playbackRate is not present or its value is null, set it to 1.0.
-            let _ =
-                media_instance.SetPlaybackRate(state.playbackRate.unwrap_or(Finite::wrap(1.0)))?;
+            media_instance.SetPlaybackRate(state.playbackRate.unwrap_or(Finite::wrap(1.0)))?;
             // If the position is not present or its value is null, set it to zero.
             media_instance.SetCurrentTime(state.position.unwrap_or(Finite::wrap(0.0)));
         }

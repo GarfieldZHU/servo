@@ -2,13 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::DOMRectReadOnlyBinding::DOMRectReadOnlyMethods;
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
-use std::cell::Cell;
 
 #[dom_struct]
 pub struct DOMRectReadOnly {
@@ -32,26 +35,29 @@ impl DOMRectReadOnly {
 
     pub fn new(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         x: f64,
         y: f64,
         width: f64,
         height: f64,
     ) -> DomRoot<DOMRectReadOnly> {
-        reflect_dom_object(
+        reflect_dom_object_with_proto(
             Box::new(DOMRectReadOnly::new_inherited(x, y, width, height)),
             global,
+            proto,
         )
     }
 
     #[allow(non_snake_case)]
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         x: f64,
         y: f64,
         width: f64,
         height: f64,
     ) -> Fallible<DomRoot<DOMRectReadOnly>> {
-        Ok(DOMRectReadOnly::new(global, x, y, width, height))
+        Ok(DOMRectReadOnly::new(global, proto, x, y, width, height))
     }
 
     pub fn set_x(&self, value: f64) {

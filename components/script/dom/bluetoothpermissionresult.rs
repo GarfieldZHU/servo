@@ -2,14 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
+use bluetooth_traits::{BluetoothRequest, BluetoothResponse};
+use dom_struct::dom_struct;
+use ipc_channel::ipc::IpcSender;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BluetoothPermissionResultBinding::BluetoothPermissionResultMethods;
-use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorBinding::NavigatorMethods;
-use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionStatusBinding::PermissionStatusMethods;
+use crate::dom::bindings::codegen::Bindings::NavigatorBinding::Navigator_Binding::NavigatorMethods;
+use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionStatus_Binding::PermissionStatusMethods;
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::{
     PermissionName, PermissionState,
 };
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -19,10 +25,6 @@ use crate::dom::bluetoothdevice::BluetoothDevice;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::permissionstatus::PermissionStatus;
 use crate::dom::promise::Promise;
-use bluetooth_traits::{BluetoothRequest, BluetoothResponse};
-use dom_struct::dom_struct;
-use ipc_channel::ipc::IpcSender;
-use std::rc::Rc;
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothpermissionresult
 #[dom_struct]
@@ -32,7 +34,7 @@ pub struct BluetoothPermissionResult {
 }
 
 impl BluetoothPermissionResult {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(status: &PermissionStatus) -> BluetoothPermissionResult {
         let result = BluetoothPermissionResult {
             status: PermissionStatus::new_inherited(status.get_query()),
@@ -72,7 +74,7 @@ impl BluetoothPermissionResult {
         self.status.State()
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn set_devices(&self, devices: Vec<Dom<BluetoothDevice>>) {
         *self.devices.borrow_mut() = devices;
     }
@@ -100,10 +102,10 @@ impl AsyncBluetoothListener for BluetoothPermissionResult {
                 self.set_state(PermissionState::Granted);
                 let bluetooth = self.get_bluetooth();
                 let mut device_instance_map = bluetooth.get_device_map().borrow_mut();
-                if let Some(ref existing_device) = device_instance_map.get(&device.id) {
+                if let Some(existing_device) = device_instance_map.get(&device.id) {
                     // https://webbluetoothcg.github.io/web-bluetooth/#request-the-bluetooth-permission
                     // Step 3.
-                    self.set_devices(vec![Dom::from_ref(&*existing_device)]);
+                    self.set_devices(vec![Dom::from_ref(existing_device)]);
 
                     // https://w3c.github.io/permissions/#dom-permissions-request
                     // Step 8.

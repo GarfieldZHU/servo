@@ -3,12 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::WebGLActiveInfoBinding::WebGLActiveInfoMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
 
 #[dom_struct]
 pub struct WebGLActiveInfo {
@@ -23,9 +24,9 @@ impl WebGLActiveInfo {
     fn new_inherited(size: i32, ty: u32, name: DOMString) -> WebGLActiveInfo {
         WebGLActiveInfo {
             reflector_: Reflector::new(),
-            size: size,
-            ty: ty,
-            name: name,
+            size,
+            ty,
+            name,
         }
     }
 

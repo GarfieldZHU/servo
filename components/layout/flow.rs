@@ -25,10 +25,37 @@
 //!   line breaks and mapping to CSS boxes, for the purpose of handling `getClientRects()` and
 //!   similar methods.
 
+use std::fmt;
+use std::slice::IterMut;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use app_units::Au;
+use base::print_tree::PrintTree;
+use bitflags::bitflags;
+use euclid::default::{Point2D, Rect, Size2D, Vector2D};
+use log::debug;
+use serde::ser::{SerializeStruct, Serializer};
+use serde::Serialize;
+use servo_geometry::{au_rect_to_f32_rect, f32_rect_to_au_rect, MaxRect};
+use style::computed_values::clear::T as Clear;
+use style::computed_values::float::T as Float;
+use style::computed_values::overflow_x::T as StyleOverflow;
+use style::computed_values::position::T as Position;
+use style::computed_values::text_align::T as TextAlign;
+use style::context::SharedStyleContext;
+use style::logical_geometry::{LogicalRect, LogicalSize, WritingMode};
+use style::properties::ComputedValues;
+use style::selector_parser::RestyleDamage;
+use style::servo::restyle_damage::ServoRestyleDamage;
+use webrender_api::units::LayoutTransform;
+
 use crate::block::{BlockFlow, FormattingContextType};
 use crate::context::LayoutContext;
 use crate::display_list::items::ClippingAndScrolling;
-use crate::display_list::{DisplayListBuildState, StackingContextCollectionState};
+use crate::display_list::{
+    DisplayListBuildState, StackingContextCollectionState, StackingContextId,
+};
 use crate::flex::FlexFlow;
 use crate::floats::{Floats, SpeculatedFloatPlacement};
 use crate::flow_list::{FlowList, FlowListIterator, MutFlowListIterator};
@@ -43,34 +70,15 @@ use crate::table_colgroup::TableColGroupFlow;
 use crate::table_row::TableRowFlow;
 use crate::table_rowgroup::TableRowGroupFlow;
 use crate::table_wrapper::TableWrapperFlow;
-use app_units::Au;
-use euclid::default::{Point2D, Rect, Size2D, Vector2D};
-use gfx_traits::print_tree::PrintTree;
-use gfx_traits::StackingContextId;
-use num_traits::cast::FromPrimitive;
-use serde::ser::{Serialize, SerializeStruct, Serializer};
-use servo_geometry::{au_rect_to_f32_rect, f32_rect_to_au_rect, MaxRect};
-use std::fmt;
-use std::slice::IterMut;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use style::computed_values::clear::T as Clear;
-use style::computed_values::float::T as Float;
-use style::computed_values::overflow_x::T as StyleOverflow;
-use style::computed_values::position::T as Position;
-use style::computed_values::text_align::T as TextAlign;
-use style::context::SharedStyleContext;
-use style::logical_geometry::{LogicalRect, LogicalSize, WritingMode};
-use style::properties::ComputedValues;
-use style::selector_parser::RestyleDamage;
-use style::servo::restyle_damage::ServoRestyleDamage;
-use webrender_api::units::LayoutTransform;
 
 /// This marker trait indicates that a type is a struct with `#[repr(C)]` whose first field
 /// is of type `BaseFlow` or some type that also implements this trait.
 ///
-/// In other words, the memory representation of `BaseFlow` must be a prefix
-/// of the memory representation of types implementing `HasBaseFlow`.
+/// # Safety
+///
+/// The memory representation of `BaseFlow` must be a prefix of the memory representation of types
+/// implementing `HasBaseFlow`. If this isn't the case, calling [`GetBaseFlow::base`] or
+/// [`GetBaseFlow::mut_base`] could lead to memory errors.
 #[allow(unsafe_code)]
 pub unsafe trait HasBaseFlow {}
 
@@ -246,7 +254,7 @@ pub trait Flow: HasBaseFlow + fmt::Debug + Sync + Send + 'static {
     fn collect_stacking_contexts(&mut self, state: &mut StackingContextCollectionState);
 
     /// If this is a float, places it. The default implementation does nothing.
-    fn place_float_if_applicable<'a>(&mut self) {}
+    fn place_float_if_applicable(&mut self) {}
 
     /// Assigns block-sizes in-order; or, if this is a float, places the float. The default
     /// implementation simply assigns block-sizes if this flow might have floats in. Returns true
@@ -273,7 +281,7 @@ pub trait Flow: HasBaseFlow + fmt::Debug + Sync + Send + 'static {
         might_have_floats_in_or_out
     }
 
-    fn has_non_invertible_transform(&self) -> bool {
+    fn has_non_invertible_transform_or_zero_scale(&self) -> bool {
         if !self.class().is_block_like() ||
             self.as_block()
                 .fragment
@@ -286,7 +294,9 @@ pub trait Flow: HasBaseFlow + fmt::Debug + Sync + Send + 'static {
             return false;
         }
 
-        self.as_block().fragment.has_non_invertible_transform()
+        self.as_block()
+            .fragment
+            .has_non_invertible_transform_or_zero_scale()
     }
 
     fn get_overflow_in_parent_coordinates(&self) -> Overflow {
@@ -355,10 +365,10 @@ pub trait Flow: HasBaseFlow + fmt::Debug + Sync + Send + 'static {
             .to_untyped();
         let transformed_overflow = Overflow {
             paint: f32_rect_to_au_rect(
-                transform_2d.transform_rect(&au_rect_to_f32_rect(overflow.paint)),
+                transform_2d.outer_transformed_rect(&au_rect_to_f32_rect(overflow.paint)),
             ),
             scroll: f32_rect_to_au_rect(
-                transform_2d.transform_rect(&au_rect_to_f32_rect(overflow.scroll)),
+                transform_2d.outer_transformed_rect(&au_rect_to_f32_rect(overflow.scroll)),
             ),
         };
 
@@ -499,6 +509,7 @@ pub trait Flow: HasBaseFlow + fmt::Debug + Sync + Send + 'static {
     }
 }
 
+#[allow(clippy::wrong_self_convention)]
 pub trait ImmutableFlowUtils {
     // Convenience functions
 
@@ -557,6 +568,11 @@ pub trait MutableOwnedFlowUtils {
     /// Set this flow as the Containing Block for all the absolute descendants.
     fn set_absolute_descendants(&mut self, abs_descendants: AbsoluteDescendants);
 
+    /// Push absolute descendants to this flow.
+    ///
+    /// Set this flow as the Containing Block for the provided absolute descendants.
+    fn push_absolute_descendants(&mut self, abs_descendants: AbsoluteDescendants);
+
     /// Sets the flow as the containing block for all absolute descendants that have been marked
     /// as having reached their containing block. This is needed in order to handle cases like:
     ///
@@ -592,89 +608,69 @@ pub enum FlowClass {
 
 impl FlowClass {
     fn is_block_like(self) -> bool {
-        match self {
+        matches!(
+            self,
             FlowClass::Block |
-            FlowClass::ListItem |
-            FlowClass::Table |
-            FlowClass::TableRowGroup |
-            FlowClass::TableRow |
-            FlowClass::TableCaption |
-            FlowClass::TableCell |
-            FlowClass::TableWrapper |
-            FlowClass::Flex => true,
-            _ => false,
-        }
+                FlowClass::ListItem |
+                FlowClass::Table |
+                FlowClass::TableRowGroup |
+                FlowClass::TableRow |
+                FlowClass::TableCaption |
+                FlowClass::TableCell |
+                FlowClass::TableWrapper |
+                FlowClass::Flex
+        )
     }
 }
 
 bitflags! {
-    #[doc = "Flags used in flows."]
+    /// Flags used in flows.
+    #[derive(Clone, Copy, Debug)]
     pub struct FlowFlags: u32 {
-        // text align flags
-        #[doc = "Whether this flow is absolutely positioned. This is checked all over layout, so a"]
-        #[doc = "virtual call is too expensive."]
+        /// Whether this flow is absolutely positioned. This is checked all over layout, so a
+        /// virtual call is too expensive.
         const IS_ABSOLUTELY_POSITIONED = 0b0000_0000_0000_0000_0100_0000;
-        #[doc = "Whether this flow clears to the left. This is checked all over layout, so a"]
-        #[doc = "virtual call is too expensive."]
+        /// Whether this flow clears to the left. This is checked all over layout, so a
+        /// virtual call is too expensive.
         const CLEARS_LEFT = 0b0000_0000_0000_0000_1000_0000;
-        #[doc = "Whether this flow clears to the right. This is checked all over layout, so a"]
-        #[doc = "virtual call is too expensive."]
+        /// Whether this flow clears to the right. This is checked all over layout, so a
+        /// virtual call is too expensive.
         const CLEARS_RIGHT = 0b0000_0000_0000_0001_0000_0000;
-        #[doc = "Whether this flow is left-floated. This is checked all over layout, so a"]
-        #[doc = "virtual call is too expensive."]
+        /// Whether this flow is left-floated. This is checked all over layout, so a
+        /// virtual call is too expensive.
         const FLOATS_LEFT = 0b0000_0000_0000_0010_0000_0000;
-        #[doc = "Whether this flow is right-floated. This is checked all over layout, so a"]
-        #[doc = "virtual call is too expensive."]
+        /// Whether this flow is right-floated. This is checked all over layout, so a
+        /// virtual call is too expensive.
         const FLOATS_RIGHT = 0b0000_0000_0000_0100_0000_0000;
-        #[doc = "Text alignment. \
-
-                 NB: If you update this, update `TEXT_ALIGN_SHIFT` below."]
-        const TEXT_ALIGN = 0b0000_0000_0111_1000_0000_0000;
-        #[doc = "Whether this flow has a fragment with `counter-reset` or `counter-increment` \
-                 styles."]
-        const AFFECTS_COUNTERS = 0b0000_0000_1000_0000_0000_0000;
-        #[doc = "Whether this flow's descendants have fragments that affect `counter-reset` or \
-                 `counter-increment` styles."]
-        const HAS_COUNTER_AFFECTING_CHILDREN = 0b0000_0001_0000_0000_0000_0000;
-        #[doc = "Whether this flow behaves as though it had `position: static` for the purposes \
-                 of positioning in the inline direction. This is set for flows with `position: \
-                 static` and `position: relative` as well as absolutely-positioned flows with \
-                 unconstrained positions in the inline direction."]
-        const INLINE_POSITION_IS_STATIC = 0b0000_0010_0000_0000_0000_0000;
-        #[doc = "Whether this flow behaves as though it had `position: static` for the purposes \
-                 of positioning in the block direction. This is set for flows with `position: \
-                 static` and `position: relative` as well as absolutely-positioned flows with \
-                 unconstrained positions in the block direction."]
-        const BLOCK_POSITION_IS_STATIC = 0b0000_0100_0000_0000_0000_0000;
+        /// Whether this flow has a fragment with `counter-reset` or `counter-increment`
+        /// styles.
+        const AFFECTS_COUNTERS = 0b0000_0000_0000_1000_0000_0000;
+        /// Whether this flow's descendants have fragments that affect `counter-reset` or
+        //  `counter-increment` styles.
+        const HAS_COUNTER_AFFECTING_CHILDREN = 0b0000_0000_0001_0000_0000_0000;
+        /// Whether this flow behaves as though it had `position: static` for the purposes
+        /// of positioning in the inline direction. This is set for flows with `position:
+        /// static` and `position: relative` as well as absolutely-positioned flows with
+        /// unconstrained positions in the inline direction."]
+        const INLINE_POSITION_IS_STATIC = 0b0000_0000_0010_0000_0000_0000;
+        /// Whether this flow behaves as though it had `position: static` for the purposes
+        /// of positioning in the block direction. This is set for flows with `position:
+        /// static` and `position: relative` as well as absolutely-positioned flows with
+        /// unconstrained positions in the block direction.
+        const BLOCK_POSITION_IS_STATIC = 0b0000_0000_0100_0000_0000_0000;
 
         /// Whether any ancestor is a fragmentation container
-        const CAN_BE_FRAGMENTED = 0b0000_1000_0000_0000_0000_0000;
+        const CAN_BE_FRAGMENTED = 0b0000_0000_1000_0000_0000_0000;
 
         /// Whether this flow contains any text and/or replaced fragments.
-        const CONTAINS_TEXT_OR_REPLACED_FRAGMENTS = 0b0001_0000_0000_0000_0000_0000;
+        const CONTAINS_TEXT_OR_REPLACED_FRAGMENTS = 0b0000_0001_0000_0000_0000_0000;
 
         /// Whether margins are prohibited from collapsing with this flow.
-        const MARGINS_CANNOT_COLLAPSE = 0b0010_0000_0000_0000_0000_0000;
+        const MARGINS_CANNOT_COLLAPSE = 0b0000_0010_0000_0000_0000_0000;
     }
 }
 
-/// The number of bits we must shift off to handle the text alignment field.
-///
-/// NB: If you update this, update `TEXT_ALIGN` above.
-static TEXT_ALIGN_SHIFT: usize = 11;
-
 impl FlowFlags {
-    #[inline]
-    pub fn text_align(self) -> TextAlign {
-        TextAlign::from_u32((self & FlowFlags::TEXT_ALIGN).bits() >> TEXT_ALIGN_SHIFT).unwrap()
-    }
-
-    #[inline]
-    pub fn set_text_align(&mut self, value: TextAlign) {
-        *self = (*self & !FlowFlags::TEXT_ALIGN) |
-            FlowFlags::from_bits((value as u32) << TEXT_ALIGN_SHIFT).unwrap();
-    }
-
     #[inline]
     pub fn float_kind(&self) -> Float {
         if self.contains(FlowFlags::FLOATS_LEFT) {
@@ -748,6 +744,12 @@ impl AbsoluteDescendants {
         for descendant_info in self.descendant_links.iter_mut() {
             descendant_info.has_reached_containing_block = true
         }
+    }
+}
+
+impl Default for AbsoluteDescendants {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -832,6 +834,12 @@ impl LateAbsolutePositionInfo {
         LateAbsolutePositionInfo {
             stacking_relative_position_of_absolute_containing_block: Point2D::zero(),
         }
+    }
+}
+
+impl Default for LateAbsolutePositionInfo {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -931,6 +939,9 @@ pub struct BaseFlow {
     /// Various flags for flows, tightly packed to save space.
     pub flags: FlowFlags,
 
+    /// Text alignment of this flow.
+    pub text_align: TextAlign,
+
     /// The ID of the StackingContext that contains this flow. This is initialized
     /// to 0, but it assigned during the collect_stacking_contexts phase of display
     /// list construction.
@@ -950,7 +961,7 @@ impl fmt::Debug for BaseFlow {
             "".to_owned()
         };
 
-        let absolute_descendants_string = if self.abs_descendants.len() > 0 {
+        let absolute_descendants_string = if !self.abs_descendants.is_empty() {
             format!("\nabs-descendents={}", self.abs_descendants.len())
         } else {
             "".to_owned()
@@ -962,13 +973,23 @@ impl fmt::Debug for BaseFlow {
             "".to_owned()
         };
 
+        let flags_string = if !self.flags.is_empty() {
+            format!("\nflags={:?}", self.flags)
+        } else {
+            "".to_owned()
+        };
+
         write!(
             f,
             "\nsc={:?}\
              \npos={:?}{}{}\
              \nfloatspec-in={:?}\
              \nfloatspec-out={:?}\
-             \noverflow={:?}{}{}{}",
+             \noverflow={:?}\
+             {child_count_string}\
+             {absolute_descendants_string}\
+             {damage_string}\
+             {flags_string}",
             self.stacking_context_id,
             self.position,
             if self.flags.contains(FlowFlags::FLOATS_LEFT) {
@@ -984,9 +1005,6 @@ impl fmt::Debug for BaseFlow {
             self.speculated_float_placement_in,
             self.speculated_float_placement_out,
             self.overflow,
-            child_count_string,
-            absolute_descendants_string,
-            damage_string
         )
     }
 }
@@ -1103,8 +1121,9 @@ impl BaseFlow {
             early_absolute_position_info: EarlyAbsolutePositionInfo::new(writing_mode),
             late_absolute_position_info: LateAbsolutePositionInfo::new(),
             clip: MaxRect::max_rect(),
-            flags: flags,
-            writing_mode: writing_mode,
+            flags,
+            text_align: TextAlign::Start,
+            writing_mode,
             thread_id: 0,
             stacking_context_id: StackingContextId::root(),
             clipping_and_scrolling: None,
@@ -1142,7 +1161,7 @@ impl BaseFlow {
     /// Return a new BaseFlow like this one but with the given children list
     pub fn clone_with_children(&self, children: FlowList) -> BaseFlow {
         BaseFlow {
-            children: children,
+            children,
             restyle_damage: self.restyle_damage |
                 ServoRestyleDamage::REPAINT |
                 ServoRestyleDamage::REFLOW_OUT_OF_FLOW |
@@ -1151,7 +1170,7 @@ impl BaseFlow {
             floats: self.floats.clone(),
             abs_descendants: self.abs_descendants.clone(),
             absolute_cb: self.absolute_cb.clone(),
-            clip: self.clip.clone(),
+            clip: self.clip,
 
             ..*self
         }
@@ -1176,7 +1195,7 @@ impl BaseFlow {
         state: &mut StackingContextCollectionState,
     ) {
         for kid in self.children.iter_mut() {
-            if !kid.has_non_invertible_transform() {
+            if !kid.has_non_invertible_transform_or_zero_scale() {
                 kid.collect_stacking_contexts(state);
             }
         }
@@ -1218,50 +1237,32 @@ impl<'a> ImmutableFlowUtils for &'a dyn Flow {
 
     /// Returns true if this flow is a table row flow.
     fn is_table_row(self) -> bool {
-        match self.class() {
-            FlowClass::TableRow => true,
-            _ => false,
-        }
+        matches!(self.class(), FlowClass::TableRow)
     }
 
     /// Returns true if this flow is a table cell flow.
     fn is_table_cell(self) -> bool {
-        match self.class() {
-            FlowClass::TableCell => true,
-            _ => false,
-        }
+        matches!(self.class(), FlowClass::TableCell)
     }
 
     /// Returns true if this flow is a table colgroup flow.
     fn is_table_colgroup(self) -> bool {
-        match self.class() {
-            FlowClass::TableColGroup => true,
-            _ => false,
-        }
+        matches!(self.class(), FlowClass::TableColGroup)
     }
 
     /// Returns true if this flow is a table flow.
     fn is_table(self) -> bool {
-        match self.class() {
-            FlowClass::Table => true,
-            _ => false,
-        }
+        matches!(self.class(), FlowClass::Table)
     }
 
     /// Returns true if this flow is a table caption flow.
     fn is_table_caption(self) -> bool {
-        match self.class() {
-            FlowClass::TableCaption => true,
-            _ => false,
-        }
+        matches!(self.class(), FlowClass::TableCaption)
     }
 
     /// Returns true if this flow is a table rowgroup flow.
     fn is_table_rowgroup(self) -> bool {
-        match self.class() {
-            FlowClass::TableRowGroup => true,
-            _ => false,
-        }
+        matches!(self.class(), FlowClass::TableRowGroup)
     }
 
     /// Returns the number of children that this flow possesses.
@@ -1271,18 +1272,12 @@ impl<'a> ImmutableFlowUtils for &'a dyn Flow {
 
     /// Returns true if this flow is a block flow.
     fn is_block_flow(self) -> bool {
-        match self.class() {
-            FlowClass::Block => true,
-            _ => false,
-        }
+        matches!(self.class(), FlowClass::Block)
     }
 
     /// Returns true if this flow is an inline flow.
     fn is_inline_flow(self) -> bool {
-        match self.class() {
-            FlowClass::Inline => true,
-            _ => false,
-        }
+        matches!(self.class(), FlowClass::Inline)
     }
 
     /// Dumps the flow tree for debugging.
@@ -1362,6 +1357,30 @@ impl MutableOwnedFlowUtils for FlowRef {
             let descendant_base = FlowRef::deref_mut(&mut descendant_link.flow).mut_base();
             descendant_base.absolute_cb.set(this.clone());
         }
+    }
+
+    /// Push absolute descendants for this flow.
+    ///
+    /// Set yourself as the Containing Block for the provided absolute descendants.
+    ///
+    /// This is called when retreiving layout root if it's not absolute positioned. We can't just
+    /// call `set_absolute_descendants` because it might contain other abs_descendants already.
+    /// We push descendants instead of replace it since it won't cause circular reference.
+    fn push_absolute_descendants(&mut self, mut abs_descendants: AbsoluteDescendants) {
+        let this = self.clone();
+        let base = FlowRef::deref_mut(self).mut_base();
+
+        for descendant_link in abs_descendants.descendant_links.iter_mut() {
+            // TODO(servo#30573) revert to debug_assert!() once underlying bug is fixed
+            #[cfg(debug_assertions)]
+            if descendant_link.has_reached_containing_block {
+                log::warn!("debug assertion failed! !descendant_link.has_reached_containing_block");
+            }
+            let descendant_base = FlowRef::deref_mut(&mut descendant_link.flow).mut_base();
+            descendant_base.absolute_cb.set(this.clone());
+        }
+
+        base.abs_descendants.push_descendants(abs_descendants);
     }
 
     /// Sets the flow as the containing block for all absolute descendants that have been marked

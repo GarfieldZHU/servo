@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::{LocalName, Prefix};
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::HTMLTitleElementBinding::HTMLTitleElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -11,8 +15,6 @@ use crate::dom::document::Document;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::node::{BindContext, ChildrenMutation, Node};
 use crate::dom::virtualmethods::VirtualMethods;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
 
 #[dom_struct]
 pub struct HTMLTitleElement {
@@ -30,17 +32,19 @@ impl HTMLTitleElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLTitleElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLTitleElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 }
@@ -63,7 +67,7 @@ impl VirtualMethods for HTMLTitleElement {
     }
 
     fn children_changed(&self, mutation: &ChildrenMutation) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.children_changed(mutation);
         }
         let node = self.upcast::<Node>();
@@ -73,7 +77,7 @@ impl VirtualMethods for HTMLTitleElement {
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
         let node = self.upcast::<Node>();

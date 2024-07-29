@@ -4,19 +4,16 @@
 
 #![allow(unsafe_code)]
 
-use crate::sampler::{NativeStack, Sampler};
-use libc;
-use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use std::cell::UnsafeCell;
-use std::io;
-use std::mem;
-use std::process;
-use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::thread;
+use std::{cmp, io, mem, process, ptr, thread};
+
+use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use unwind_sys::{
     unw_cursor_t, unw_get_reg, unw_init_local, unw_step, UNW_ESUCCESS, UNW_REG_IP, UNW_REG_SP,
 };
+
+use crate::sampler::{NativeStack, Sampler};
 
 // Hack to workaround broken libunwind pkg-config contents for <1.1-3ubuntu.1.
 // https://bugs.launchpad.net/ubuntu/+source/libunwind/+bug/1336912
@@ -140,7 +137,7 @@ pub struct LinuxSampler {
 
 impl LinuxSampler {
     #[allow(unsafe_code, dead_code)]
-    pub fn new() -> Box<dyn Sampler> {
+    pub fn new_boxed() -> Box<dyn Sampler> {
         let thread_id = unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t };
         let handler = SigHandler::SigAction(sigprof_handler);
         let action = SigAction::new(
@@ -183,12 +180,10 @@ fn step(cursor: *mut unw_cursor_t) -> Result<bool, i32> {
         }
 
         let ret = unw_step(cursor);
-        if ret > 0 {
-            Ok(true)
-        } else if ret == 0 {
-            Ok(false)
-        } else {
-            Err(ret)
+        match ret.cmp(&0) {
+            cmp::Ordering::Less => Err(ret),
+            cmp::Ordering::Greater => Ok(true),
+            cmp::Ordering::Equal => Ok(false),
         }
     }
 }
@@ -209,59 +204,60 @@ impl Sampler for LinuxSampler {
 
         // Safety: non-exclusive reference only
         // since sampled threads are accessing this concurrently
-        let shared_state = unsafe { &*SHARED_STATE.0.get() };
-        shared_state
-            .msg2
-            .as_ref()
-            .unwrap()
-            .wait_through_intr()
-            .expect("msg2 failed");
+        let result;
+        {
+            let shared_state = unsafe { &*SHARED_STATE.0.get() };
+            shared_state
+                .msg2
+                .as_ref()
+                .unwrap()
+                .wait_through_intr()
+                .expect("msg2 failed");
 
-        let context = CONTEXT.load(Ordering::SeqCst);
-        let mut cursor = mem::MaybeUninit::uninit();
-        let ret = unsafe { unw_init_local(cursor.as_mut_ptr(), context) };
-        let result = if ret == UNW_ESUCCESS {
-            let mut native_stack = NativeStack::new();
-            loop {
-                let ip = match get_register(cursor.as_mut_ptr(), RegNum::Ip) {
-                    Ok(ip) => ip,
-                    Err(_) => break,
-                };
-                let sp = match get_register(cursor.as_mut_ptr(), RegNum::Sp) {
-                    Ok(sp) => sp,
-                    Err(_) => break,
-                };
-                if native_stack
-                    .process_register(ip as *mut _, sp as *mut _)
-                    .is_err() ||
-                    !step(cursor.as_mut_ptr()).unwrap_or(false)
-                {
-                    break;
+            let context = CONTEXT.load(Ordering::SeqCst);
+            let mut cursor = mem::MaybeUninit::uninit();
+            let ret = unsafe { unw_init_local(cursor.as_mut_ptr(), context) };
+            result = if ret == UNW_ESUCCESS {
+                let mut native_stack = NativeStack::new();
+                #[allow(clippy::while_let_loop)] // False positive
+                loop {
+                    let ip = match get_register(cursor.as_mut_ptr(), RegNum::Ip) {
+                        Ok(ip) => ip,
+                        Err(_) => break,
+                    };
+                    let sp = match get_register(cursor.as_mut_ptr(), RegNum::Sp) {
+                        Ok(sp) => sp,
+                        Err(_) => break,
+                    };
+                    if native_stack
+                        .process_register(ip as *mut _, sp as *mut _)
+                        .is_err() ||
+                        !step(cursor.as_mut_ptr()).unwrap_or(false)
+                    {
+                        break;
+                    }
                 }
-            }
-            Ok(native_stack)
-        } else {
-            Err(())
-        };
+                Ok(native_stack)
+            } else {
+                Err(())
+            };
 
-        // signal the thread to continue.
-        shared_state
-            .msg3
-            .as_ref()
-            .unwrap()
-            .post()
-            .expect("msg3 failed");
+            // signal the thread to continue.
+            shared_state
+                .msg3
+                .as_ref()
+                .unwrap()
+                .post()
+                .expect("msg3 failed");
 
-        // wait for thread to continue.
-        shared_state
-            .msg4
-            .as_ref()
-            .unwrap()
-            .wait_through_intr()
-            .expect("msg4 failed");
-
-        // No-op, but marks the end of the shared borrow
-        drop(shared_state);
+            // wait for thread to continue.
+            shared_state
+                .msg4
+                .as_ref()
+                .unwrap()
+                .wait_through_intr()
+                .expect("msg4 failed");
+        }
 
         clear_shared_state();
 

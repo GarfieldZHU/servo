@@ -3,23 +3,24 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // check-tidy: no specs after this line
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::TestWorkletBinding::TestWorkletMethods;
-use crate::dom::bindings::codegen::Bindings::WorkletBinding::WorkletBinding::WorkletMethods;
 use crate::dom::bindings::codegen::Bindings::WorkletBinding::WorkletOptions;
+use crate::dom::bindings::codegen::Bindings::WorkletBinding::Worklet_Binding::WorkletMethods;
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::reflector::reflect_dom_object;
-use crate::dom::bindings::reflector::Reflector;
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
-use crate::dom::bindings::str::DOMString;
-use crate::dom::bindings::str::USVString;
+use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::promise::Promise;
 use crate::dom::window::Window;
 use crate::dom::worklet::Worklet;
 use crate::dom::workletglobalscope::WorkletGlobalScopeType;
 use crate::realms::InRealm;
 use crate::script_thread::ScriptThread;
-use dom_struct::dom_struct;
-use std::rc::Rc;
 
 #[dom_struct]
 pub struct TestWorklet {
@@ -35,14 +36,21 @@ impl TestWorklet {
         }
     }
 
-    fn new(window: &Window) -> DomRoot<TestWorklet> {
+    fn new(window: &Window, proto: Option<HandleObject>) -> DomRoot<TestWorklet> {
         let worklet = Worklet::new(window, WorkletGlobalScopeType::Test);
-        reflect_dom_object(Box::new(TestWorklet::new_inherited(&*worklet)), window)
+        reflect_dom_object_with_proto(
+            Box::new(TestWorklet::new_inherited(&worklet)),
+            window,
+            proto,
+        )
     }
 
     #[allow(non_snake_case)]
-    pub fn Constructor(window: &Window) -> Fallible<DomRoot<TestWorklet>> {
-        Ok(TestWorklet::new(window))
+    pub fn Constructor(
+        window: &Window,
+        proto: Option<HandleObject>,
+    ) -> Fallible<DomRoot<TestWorklet>> {
+        Ok(TestWorklet::new(window, proto))
     }
 }
 

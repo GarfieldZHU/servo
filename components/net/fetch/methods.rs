@@ -2,44 +2,56 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::data_loader::decode;
-use crate::fetch::cors_cache::CorsCache;
-use crate::fetch::headers::determine_nosniff;
-use crate::filemanager_thread::{FileManager, FILE_CHUNK_SIZE};
-use crate::http_loader::{determine_requests_referrer, http_fetch, HttpState};
-use crate::http_loader::{set_default_accept, set_default_accept_language};
-use crate::subresource_integrity::is_response_integrity_valid;
+use std::borrow::Cow;
+use std::fs::File;
+use std::io::{self, BufReader, Seek, SeekFrom};
+use std::ops::Bound;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::{mem, str};
+
+use base64::engine::general_purpose;
+use base64::Engine as _;
 use content_security_policy as csp;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::Sender;
 use devtools_traits::DevtoolsControlMsg;
 use headers::{AccessControlExposeHeaders, ContentType, HeaderMapExt, Range};
 use http::header::{self, HeaderMap, HeaderName};
-use hyper::Method;
-use hyper::StatusCode;
+use http::{Method, StatusCode};
 use ipc_channel::ipc::{self, IpcReceiver};
+use lazy_static::lazy_static;
+use log::{debug, warn};
 use mime::{self, Mime};
 use net_traits::blob_url_store::{parse_blob_url, BlobURLStoreError};
 use net_traits::filemanager_thread::{FileTokenCheck, RelativePos};
 use net_traits::request::{
-    is_cors_safelisted_method, is_cors_safelisted_request_header, Origin, ResponseTainting, Window,
-};
-use net_traits::request::{
-    BodyChunkRequest, BodyChunkResponse, CredentialsMode, Destination, Referrer, Request,
-    RequestMode,
+    is_cors_safelisted_method, is_cors_safelisted_request_header, BodyChunkRequest,
+    BodyChunkResponse, CredentialsMode, Destination, Origin, Referrer, Request, RequestMode,
+    ResponseTainting, Window,
 };
 use net_traits::response::{Response, ResponseBody, ResponseType};
-use net_traits::{FetchTaskTarget, NetworkError, ReferrerPolicy, ResourceFetchTiming};
-use net_traits::{ResourceAttribute, ResourceTimeValue, ResourceTimingType};
+use net_traits::{
+    FetchTaskTarget, NetworkError, ReferrerPolicy, ResourceAttribute, ResourceFetchTiming,
+    ResourceTimeValue, ResourceTimingType,
+};
+use rustls::Certificate;
+use serde::{Deserialize, Serialize};
 use servo_arc::Arc as ServoArc;
 use servo_url::ServoUrl;
-use std::borrow::Cow;
-use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
-use std::mem;
-use std::ops::Bound;
-use std::str;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc::{
+    unbounded_channel, UnboundedReceiver as TokioReceiver, UnboundedSender as TokioSender,
+};
+
+use crate::data_loader::decode;
+use crate::fetch::cors_cache::CorsCache;
+use crate::fetch::headers::determine_nosniff;
+use crate::filemanager_thread::{FileManager, FILE_CHUNK_SIZE};
+use crate::http_loader::{
+    determine_requests_referrer, http_fetch, set_default_accept, set_default_accept_language,
+    HttpState,
+};
+use crate::local_directory_listing;
+use crate::subresource_integrity::is_response_integrity_valid;
 
 lazy_static! {
     static ref X_CONTENT_TYPE_OPTIONS: HeaderName =
@@ -48,7 +60,7 @@ lazy_static! {
 
 pub type Target<'a> = &'a mut (dyn FetchTaskTarget + Send);
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
 pub enum Data {
     Payload(Vec<u8>),
     Done,
@@ -58,8 +70,8 @@ pub enum Data {
 pub struct FetchContext {
     pub state: Arc<HttpState>,
     pub user_agent: Cow<'static, str>,
-    pub devtools_chan: Option<Sender<DevtoolsControlMsg>>,
-    pub filemanager: FileManager,
+    pub devtools_chan: Option<Arc<Mutex<Sender<DevtoolsControlMsg>>>>,
+    pub filemanager: Arc<Mutex<FileManager>>,
     pub file_token: FileTokenCheck,
     pub cancellation_listener: Arc<Mutex<CancellationListener>>,
     pub timing: ServoArc<Mutex<ResourceFetchTiming>>,
@@ -73,7 +85,7 @@ pub struct CancellationListener {
 impl CancellationListener {
     pub fn new(cancel_chan: Option<IpcReceiver<()>>) -> Self {
         Self {
-            cancel_chan: cancel_chan,
+            cancel_chan,
             cancelled: false,
         }
     }
@@ -93,10 +105,10 @@ impl CancellationListener {
         }
     }
 }
-pub type DoneChannel = Option<(Sender<Data>, Receiver<Data>)>;
+pub type DoneChannel = Option<(TokioSender<Data>, TokioReceiver<Data>)>;
 
 /// [Fetch](https://fetch.spec.whatwg.org#concept-fetch)
-pub fn fetch(request: &mut Request, target: Target, context: &FetchContext) {
+pub async fn fetch(request: &mut Request, target: Target<'_>, context: &FetchContext) {
     // Steps 7,4 of https://w3c.github.io/resource-timing/#processing-model
     // rev order okay since spec says they're equal - https://w3c.github.io/resource-timing/#dfn-starttime
     context
@@ -110,13 +122,13 @@ pub fn fetch(request: &mut Request, target: Target, context: &FetchContext) {
         .unwrap()
         .set_attribute(ResourceAttribute::StartTime(ResourceTimeValue::FetchStart));
 
-    fetch_with_cors_cache(request, &mut CorsCache::new(), target, context);
+    fetch_with_cors_cache(request, &mut CorsCache::default(), target, context).await;
 }
 
-pub fn fetch_with_cors_cache(
+pub async fn fetch_with_cors_cache(
     request: &mut Request,
     cache: &mut CorsCache,
-    target: Target,
+    target: Target<'_>,
     context: &FetchContext,
 ) {
     // Step 1.
@@ -150,10 +162,10 @@ pub fn fetch_with_cors_cache(
     }
 
     // Step 8.
-    main_fetch(request, cache, false, false, target, &mut None, &context);
+    main_fetch(request, cache, false, false, target, &mut None, context).await;
 }
 
-/// https://www.w3.org/TR/CSP/#should-block-request
+/// <https://www.w3.org/TR/CSP/#should-block-request>
 pub fn should_request_be_blocked_by_csp(request: &Request) -> csp::CheckResult {
     let origin = match &request.origin {
         Origin::Client => return csp::CheckResult::Allowed,
@@ -178,28 +190,35 @@ pub fn should_request_be_blocked_by_csp(request: &Request) -> csp::CheckResult {
 }
 
 /// [Main fetch](https://fetch.spec.whatwg.org/#concept-main-fetch)
-pub fn main_fetch(
+pub async fn main_fetch(
     request: &mut Request,
     cache: &mut CorsCache,
     cors_flag: bool,
     recursive_flag: bool,
-    target: Target,
+    target: Target<'_>,
     done_chan: &mut DoneChannel,
     context: &FetchContext,
 ) -> Response {
     // Step 1.
     let mut response = None;
 
+    // Servo internal: return a crash error when a crash error page is needed
+    if let Some(ref details) = request.crash {
+        response = Some(Response::network_error(NetworkError::Crash(
+            details.clone(),
+        )));
+    }
+
     // Step 2.
-    if request.local_urls_only {
-        if !matches!(
+    if request.local_urls_only &&
+        !matches!(
             request.current_url().scheme(),
             "about" | "blob" | "data" | "filesystem"
-        ) {
-            response = Some(Response::network_error(NetworkError::Internal(
-                "Non-local scheme".into(),
-            )));
-        }
+        )
+    {
+        response = Some(Response::network_error(NetworkError::Internal(
+            "Non-local scheme".into(),
+        )));
     }
 
     // Step 2.2.
@@ -249,7 +268,7 @@ pub fn main_fetch(
             )
         },
     };
-    request.referrer = referrer_url.map_or(Referrer::NoReferrer, |url| Referrer::ReferrerUrl(url));
+    request.referrer = referrer_url.map_or(Referrer::NoReferrer, Referrer::ReferrerUrl);
 
     // Step 9.
     // TODO: handle FTP URLs.
@@ -266,61 +285,67 @@ pub fn main_fetch(
     // Not applicable: see fetch_async.
 
     // Step 12.
-    let mut response = response.unwrap_or_else(|| {
-        let current_url = request.current_url();
-        let same_origin = if let Origin::Origin(ref origin) = request.origin {
-            *origin == current_url.origin()
-        } else {
-            false
-        };
 
-        if (same_origin && !cors_flag) ||
-            current_url.scheme() == "data" ||
-            current_url.scheme() == "chrome"
-        {
-            // Substep 1.
-            request.response_tainting = ResponseTainting::Basic;
+    let mut response = match response {
+        Some(res) => res,
+        None => {
+            let current_url = request.current_url();
+            let same_origin = if let Origin::Origin(ref origin) = request.origin {
+                *origin == current_url.origin()
+            } else {
+                false
+            };
 
-            // Substep 2.
-            scheme_fetch(request, cache, target, done_chan, context)
-        } else if request.mode == RequestMode::SameOrigin {
-            Response::network_error(NetworkError::Internal("Cross-origin response".into()))
-        } else if request.mode == RequestMode::NoCors {
-            // Substep 1.
-            request.response_tainting = ResponseTainting::Opaque;
+            if (same_origin && !cors_flag) ||
+                current_url.scheme() == "data" ||
+                current_url.scheme() == "chrome"
+            {
+                // Substep 1.
+                request.response_tainting = ResponseTainting::Basic;
 
-            // Substep 2.
-            scheme_fetch(request, cache, target, done_chan, context)
-        } else if !matches!(current_url.scheme(), "http" | "https") {
-            Response::network_error(NetworkError::Internal("Non-http scheme".into()))
-        } else if request.use_cors_preflight ||
-            (request.unsafe_request &&
-                (!is_cors_safelisted_method(&request.method) ||
-                    request.headers.iter().any(|(name, value)| {
-                        !is_cors_safelisted_request_header(&name, &value)
-                    })))
-        {
-            // Substep 1.
-            request.response_tainting = ResponseTainting::CorsTainting;
-            // Substep 2.
-            let response = http_fetch(
-                request, cache, true, true, false, target, done_chan, context,
-            );
-            // Substep 3.
-            if response.is_network_error() {
-                // TODO clear cache entries using request
+                // Substep 2.
+                scheme_fetch(request, cache, target, done_chan, context).await
+            } else if request.mode == RequestMode::SameOrigin {
+                Response::network_error(NetworkError::Internal("Cross-origin response".into()))
+            } else if request.mode == RequestMode::NoCors {
+                // Substep 1.
+                request.response_tainting = ResponseTainting::Opaque;
+
+                // Substep 2.
+                scheme_fetch(request, cache, target, done_chan, context).await
+            } else if !matches!(current_url.scheme(), "http" | "https") {
+                Response::network_error(NetworkError::Internal("Non-http scheme".into()))
+            } else if request.use_cors_preflight ||
+                (request.unsafe_request &&
+                    (!is_cors_safelisted_method(&request.method) ||
+                        request.headers.iter().any(|(name, value)| {
+                            !is_cors_safelisted_request_header(&name, &value)
+                        })))
+            {
+                // Substep 1.
+                request.response_tainting = ResponseTainting::CorsTainting;
+                // Substep 2.
+                let response = http_fetch(
+                    request, cache, true, true, false, target, done_chan, context,
+                )
+                .await;
+                // Substep 3.
+                if response.is_network_error() {
+                    // TODO clear cache entries using request
+                }
+                // Substep 4.
+                response
+            } else {
+                // Substep 1.
+                request.response_tainting = ResponseTainting::CorsTainting;
+                // Substep 2.
+                http_fetch(
+                    request, cache, true, false, false, target, done_chan, context,
+                )
+                .await
             }
-            // Substep 4.
-            response
-        } else {
-            // Substep 1.
-            request.response_tainting = ResponseTainting::CorsTainting;
-            // Substep 2.
-            http_fetch(
-                request, cache, true, false, false, target, done_chan, context,
-            )
-        }
-    });
+        },
+    };
 
     // Step 13.
     if recursive_flag {
@@ -347,7 +372,7 @@ pub fn main_fetch(
                         .iter()
                         .map(|(name, _)| name.as_str().to_owned())
                         .collect();
-                }
+                },
                 // Subsubstep 3.
                 Some(list) => {
                     response.cors_exposed_header_name_list =
@@ -389,7 +414,7 @@ pub fn main_fetch(
 
         // Step 16.
         if internal_response.url_list.is_empty() {
-            internal_response.url_list = request.url_list.clone();
+            internal_response.url_list.clone_from(&request.url_list)
         }
 
         // Step 17.
@@ -416,10 +441,7 @@ pub fn main_fetch(
         let not_network_error = !response_is_network_error && !internal_response.is_network_error();
         if not_network_error &&
             (is_null_body_status(&internal_response.status) ||
-                match request.method {
-                    Method::HEAD | Method::CONNECT => true,
-                    _ => false,
-                })
+                matches!(request.method, Method::HEAD | Method::CONNECT))
         {
             // when Fetch is used only asynchronously, we will need to make sure
             // that nothing tries to write to the body at this point
@@ -427,7 +449,7 @@ pub fn main_fetch(
             *body = ResponseBody::Empty;
         }
 
-        internal_response.get_network_error().map(|e| e.clone())
+        internal_response.get_network_error().cloned()
     };
 
     // Execute deferred rebinding of response.
@@ -441,11 +463,11 @@ pub fn main_fetch(
     let mut response_loaded = false;
     let mut response = if !response.is_network_error() && !request.integrity_metadata.is_empty() {
         // Step 19.1.
-        wait_for_response(&mut response, target, done_chan);
+        wait_for_response(&mut response, target, done_chan).await;
         response_loaded = true;
 
         // Step 19.2.
-        let ref integrity_metadata = &request.integrity_metadata;
+        let integrity_metadata = &request.integrity_metadata;
         if response.termination_reason.is_none() &&
             !is_response_integrity_valid(integrity_metadata, &response)
         {
@@ -463,9 +485,9 @@ pub fn main_fetch(
     if request.synchronous {
         // process_response is not supposed to be used
         // by sync fetch, but we overload it here for simplicity
-        target.process_response(&mut response);
+        target.process_response(&response);
         if !response_loaded {
-            wait_for_response(&mut response, target, done_chan);
+            wait_for_response(&mut response, target, done_chan).await;
         }
         // overloaded similarly to process_response
         target.process_response_eof(&response);
@@ -478,8 +500,8 @@ pub fn main_fetch(
         // in http_network_fetch. However, we can't yet follow the request
         // upload progress, so I'm keeping it here for now and pretending
         // the body got sent in one chunk
-        target.process_request_body(&request);
-        target.process_request_eof(&request);
+        target.process_request_body(request);
+        target.process_request_eof(request);
     }
 
     // Step 22.
@@ -487,14 +509,14 @@ pub fn main_fetch(
 
     // Step 23.
     if !response_loaded {
-        wait_for_response(&mut response, target, done_chan);
+        wait_for_response(&mut response, target, done_chan).await;
     }
 
     // Step 24.
     target.process_response_eof(&response);
 
     if let Ok(http_cache) = context.state.http_cache.write() {
-        http_cache.update_awaiting_consumers(&request, &response);
+        http_cache.update_awaiting_consumers(request, &response);
     }
 
     // Steps 25-27.
@@ -502,21 +524,26 @@ pub fn main_fetch(
     response
 }
 
-fn wait_for_response(response: &mut Response, target: Target, done_chan: &mut DoneChannel) {
-    if let Some(ref ch) = *done_chan {
+async fn wait_for_response(
+    response: &mut Response,
+    target: Target<'_>,
+    done_chan: &mut DoneChannel,
+) {
+    if let Some(ref mut ch) = *done_chan {
         loop {
-            match ch
-                .1
-                .recv()
-                .expect("fetch worker should always send Done before terminating")
-            {
-                Data::Payload(vec) => {
+            match ch.1.recv().await {
+                Some(Data::Payload(vec)) => {
                     target.process_response_chunk(vec);
                 },
-                Data::Done => break,
-                Data::Cancelled => {
+                Some(Data::Done) => {
+                    break;
+                },
+                Some(Data::Cancelled) => {
                     response.aborted.store(true, Ordering::Release);
                     break;
+                },
+                _ => {
+                    panic!("fetch worker should always send Done before terminating");
                 },
             }
         }
@@ -543,7 +570,7 @@ pub enum RangeRequestBounds {
 }
 
 impl RangeRequestBounds {
-    pub fn get_final(&self, len: Option<u64>) -> Result<RelativePos, ()> {
+    pub fn get_final(&self, len: Option<u64>) -> Result<RelativePos, &'static str> {
         match self {
             RangeRequestBounds::Final(pos) => {
                 if let Some(len) = len {
@@ -551,7 +578,7 @@ impl RangeRequestBounds {
                         return Ok(pos.clone());
                     }
                 }
-                Err(())
+                Err("Tried to process RangeRequestBounds::Final without len")
             },
             RangeRequestBounds::Pending(offset) => Ok(RelativePos::from_opts(
                 if let Some(len) = len {
@@ -612,11 +639,53 @@ fn create_blank_reply(url: ServoUrl, timing_type: ResourceTimingType) -> Respons
     response
 }
 
+/// Handle a request from the user interface to ignore validation errors for a certificate.
+fn handle_allowcert_request(request: &mut Request, context: &FetchContext) -> io::Result<()> {
+    let error = |string| Err(io::Error::new(io::ErrorKind::Other, string));
+
+    let body = match request.body.as_mut() {
+        Some(body) => body,
+        None => return error("No body found"),
+    };
+
+    let stream = body.take_stream();
+    let stream = stream.lock().unwrap();
+    let (body_chan, body_port) = ipc::channel().unwrap();
+    let _ = stream.send(BodyChunkRequest::Connect(body_chan));
+    let _ = stream.send(BodyChunkRequest::Chunk);
+    let body_bytes = match body_port.recv().ok() {
+        Some(BodyChunkResponse::Chunk(bytes)) => bytes,
+        _ => return error("Certificate not sent in a single chunk"),
+    };
+
+    let split_idx = match body_bytes.iter().position(|b| *b == b'&') {
+        Some(split_idx) => split_idx,
+        None => return error("Could not find ampersand in data"),
+    };
+    let (secret, cert_base64) = body_bytes.split_at(split_idx);
+
+    let secret = str::from_utf8(secret).ok().and_then(|s| s.parse().ok());
+    if secret != Some(*net_traits::PRIVILEGED_SECRET) {
+        return error("Invalid secret sent. Ignoring request");
+    }
+
+    let cert_bytes = match general_purpose::STANDARD_NO_PAD.decode(&cert_base64[1..]) {
+        Ok(bytes) => bytes,
+        Err(_) => return error("Could not decode certificate base64"),
+    };
+
+    context
+        .state
+        .override_manager
+        .add_override(&Certificate(cert_bytes));
+    Ok(())
+}
+
 /// [Scheme fetch](https://fetch.spec.whatwg.org#scheme-fetch)
-fn scheme_fetch(
+async fn scheme_fetch(
     request: &mut Request,
     cache: &mut CorsCache,
-    target: Target,
+    target: Target<'_>,
     done_chan: &mut DoneChannel,
     context: &FetchContext,
 ) -> Response {
@@ -626,36 +695,18 @@ fn scheme_fetch(
         "about" if url.path() == "blank" => create_blank_reply(url, request.timing_type()),
 
         "chrome" if url.path() == "allowcert" => {
-            let data = request.body.as_mut().and_then(|body| {
-                let stream = body.take_stream();
-                let (body_chan, body_port) = ipc::channel().unwrap();
-                let _ = stream.send(BodyChunkRequest::Connect(body_chan));
-                let _ = stream.send(BodyChunkRequest::Chunk);
-                match body_port.recv().ok() {
-                    Some(BodyChunkResponse::Chunk(bytes)) => Some(bytes),
-                    _ => panic!("cert should be sent in a single chunk."),
-                }
-            });
-            let data = data.as_ref().and_then(|b| {
-                let idx = b.iter().position(|b| *b == b'&')?;
-                Some(b.split_at(idx))
-            });
-
-            if let Some((secret, bytes)) = data {
-                let secret = str::from_utf8(secret).ok().and_then(|s| s.parse().ok());
-                if secret == Some(*net_traits::PRIVILEGED_SECRET) {
-                    if let Ok(bytes) = base64::decode(&bytes[1..]) {
-                        context.state.extra_certs.add(bytes);
-                    }
-                }
+            if let Err(error) = handle_allowcert_request(request, context) {
+                warn!("Could not handle allowcert request: {error}");
             }
-
             create_blank_reply(url, request.timing_type())
         },
 
-        "http" | "https" => http_fetch(
-            request, cache, false, false, false, target, done_chan, context,
-        ),
+        "http" | "https" => {
+            http_fetch(
+                request, cache, false, false, false, target, done_chan, context,
+            )
+            .await
+        },
 
         "data" => match decode(&url) {
             Ok((mime, bytes)) => {
@@ -679,15 +730,11 @@ fn scheme_fetch(
                 ));
             }
             if let Ok(file_path) = url.to_file_path() {
-                if let Ok(file) = File::open(file_path.clone()) {
-                    if let Ok(metadata) = file.metadata() {
-                        if metadata.is_dir() {
-                            return Response::network_error(NetworkError::Internal(
-                                "Opening a directory is not supported".into(),
-                            ));
-                        }
-                    }
+                if file_path.is_dir() {
+                    return local_directory_listing::fetch(request, url, file_path);
+                }
 
+                if let Ok(file) = File::open(file_path.clone()) {
                     // Get range bounds (if any) and try to seek to the requested offset.
                     // If seeking fails, bail out with a NetworkError.
                     let file_size = match file.metadata() {
@@ -700,12 +747,10 @@ fn scheme_fetch(
 
                     let range_header = request.headers.typed_get::<Range>();
                     let is_range_request = range_header.is_some();
-                    let range = match get_range_request_bounds(range_header).get_final(file_size) {
-                        Ok(range) => range,
-                        Err(_) => {
-                            range_not_satisfiable_error(&mut response);
-                            return response;
-                        },
+                    let Ok(range) = get_range_request_bounds(range_header).get_final(file_size)
+                    else {
+                        range_not_satisfiable_error(&mut response);
+                        return response;
                     };
                     let mut reader = BufReader::with_capacity(FILE_CHUNK_SIZE, file);
                     if reader.seek(SeekFrom::Start(range.start as u64)).is_err() {
@@ -726,12 +771,13 @@ fn scheme_fetch(
 
                     // Setup channel to receive cross-thread messages about the file fetch
                     // operation.
-                    let (done_sender, done_receiver) = unbounded();
+                    let (mut done_sender, done_receiver) = unbounded_channel();
                     *done_chan = Some((done_sender.clone(), done_receiver));
+
                     *response.body.lock().unwrap() = ResponseBody::Receiving(vec![]);
 
-                    context.filemanager.fetch_file_in_chunks(
-                        done_sender,
+                    context.filemanager.lock().unwrap().fetch_file_in_chunks(
+                        &mut done_sender,
                         reader,
                         response.body.clone(),
                         context.cancellation_listener.clone(),
@@ -766,10 +812,10 @@ fn scheme_fetch(
 
             let (id, origin) = match parse_blob_url(&url) {
                 Ok((id, origin)) => (id, origin),
-                Err(()) => {
-                    return Response::network_error(NetworkError::Internal(
-                        "Invalid blob url".into(),
-                    ));
+                Err(error) => {
+                    return Response::network_error(NetworkError::Internal(format!(
+                        "Invalid blob URL ({error})"
+                    )));
                 },
             };
 
@@ -781,12 +827,12 @@ fn scheme_fetch(
                 partial_content(&mut response);
             }
 
-            let (done_sender, done_receiver) = unbounded();
+            let (mut done_sender, done_receiver) = unbounded_channel();
             *done_chan = Some((done_sender.clone(), done_receiver));
             *response.body.lock().unwrap() = ResponseBody::Receiving(vec![]);
 
-            if let Err(err) = context.filemanager.fetch_file(
-                &done_sender,
+            if let Err(err) = context.filemanager.lock().unwrap().fetch_file(
+                &mut done_sender,
                 context.cancellation_listener.clone(),
                 id,
                 &context.file_token,
@@ -818,16 +864,13 @@ fn scheme_fetch(
 }
 
 fn is_null_body_status(status: &Option<(StatusCode, String)>) -> bool {
-    match *status {
-        Some((status, _)) => match status {
-            StatusCode::SWITCHING_PROTOCOLS |
-            StatusCode::NO_CONTENT |
-            StatusCode::RESET_CONTENT |
-            StatusCode::NOT_MODIFIED => true,
-            _ => false,
-        },
-        _ => false,
-    }
+    matches!(
+        status,
+        Some((StatusCode::SWITCHING_PROTOCOLS, ..)) |
+            Some((StatusCode::NO_CONTENT, ..)) |
+            Some((StatusCode::RESET_CONTENT, ..)) |
+            Some((StatusCode::NOT_MODIFIED, ..))
+    )
 }
 
 /// <https://fetch.spec.whatwg.org/#should-response-to-request-be-blocked-due-to-nosniff?>

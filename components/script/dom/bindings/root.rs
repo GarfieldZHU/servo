@@ -24,29 +24,27 @@
 //! originating `DomRoot<T>`.
 //!
 
-use crate::dom::bindings::conversions::DerivedFrom;
-use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomObject, MutDomObject, Reflector};
-use crate::dom::bindings::trace::trace_reflector;
-use crate::dom::bindings::trace::JSTraceable;
-use crate::dom::node::Node;
-use js::jsapi::{Heap, JSObject, JSTracer};
-use js::rust::GCMethods;
-use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
-use mitochondria::OnceCell;
-use script_layout_interface::TrustedNodeAddress;
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{Cell, OnceCell, UnsafeCell};
 use std::default::Default;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::mem;
 use std::ops::Deref;
-use std::ptr;
+use std::{mem, ptr};
+
+use js::jsapi::{JSObject, JSTracer};
+use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
+use script_layout_interface::TrustedNodeAddress;
 use style::thread_state;
 
+use crate::dom::bindings::conversions::DerivedFrom;
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::reflector::{DomObject, MutDomObject, Reflector};
+use crate::dom::bindings::trace::{trace_reflector, JSTraceable};
+use crate::dom::node::Node;
+
 /// A rooted value.
-#[allow(unrooted_must_root)]
-#[unrooted_must_root_lint::allow_unrooted_interior]
+#[allow(crown::unrooted_must_root)]
+#[crown::unrooted_must_root_lint::allow_unrooted_interior]
 pub struct Root<T: StableTraceObject> {
     /// The value to root.
     value: T,
@@ -61,11 +59,11 @@ where
     /// Create a new stack-bounded root for the provided value.
     /// It cannot outlive its associated `RootCollection`, and it gives
     /// out references which cannot outlive this new `Root`.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub unsafe fn new(value: T) -> Self {
         unsafe fn add_to_root_list(object: *const dyn JSTraceable) -> *const RootCollection {
             assert_in_script();
-            STACK_ROOTS.with(|ref root_list| {
+            STACK_ROOTS.with(|root_list| {
                 let root_list = &*root_list.get().unwrap();
                 root_list.root(object);
                 root_list
@@ -77,8 +75,16 @@ where
     }
 }
 
-/// Represents values that can be rooted through a stable address that will
+/// `StableTraceObject` represents values that can be rooted through a stable address that will
 /// not change for their whole lifetime.
+/// It is an unsafe trait that requires implementors to ensure certain safety guarantees.
+///
+/// # Safety
+///
+/// Implementors of this trait must ensure that the `trace` method correctly accounts for all
+/// owned and referenced objects, so that the garbage collector can accurately determine which
+/// objects are still in use. Failing to adhere to this contract may result in undefined behavior,
+/// such as use-after-free errors.
 pub unsafe trait StableTraceObject {
     /// Returns a stable trace object which address won't change for the whole
     /// lifetime of the value.
@@ -89,11 +95,11 @@ unsafe impl<T> StableTraceObject for Dom<T>
 where
     T: DomObject,
 {
-    fn stable_trace_object<'a>(&'a self) -> *const dyn JSTraceable {
+    fn stable_trace_object(&self) -> *const dyn JSTraceable {
         // The JSTraceable impl for Reflector doesn't actually do anything,
         // so we need this shenanigan to actually trace the reflector of the
         // T pointer in Dom<T>.
-        #[allow(unrooted_must_root)]
+        #[allow(crown::unrooted_must_root)]
         struct ReflectorStackRoot(Reflector);
         unsafe impl JSTraceable for ReflectorStackRoot {
             unsafe fn trace(&self, tracer: *mut JSTracer) {
@@ -108,11 +114,11 @@ unsafe impl<T> StableTraceObject for MaybeUnreflectedDom<T>
 where
     T: DomObject,
 {
-    fn stable_trace_object<'a>(&'a self) -> *const dyn JSTraceable {
+    fn stable_trace_object(&self) -> *const dyn JSTraceable {
         // The JSTraceable impl for Reflector doesn't actually do anything,
         // so we need this shenanigan to actually trace the reflector of the
         // T pointer in Dom<T>.
-        #[allow(unrooted_must_root)]
+        #[allow(crown::unrooted_must_root)]
         struct MaybeUnreflectedStackRoot<T>(T);
         unsafe impl<T> JSTraceable for MaybeUnreflectedStackRoot<T>
         where
@@ -122,7 +128,7 @@ where
                 if self.0.reflector().get_jsobject().is_null() {
                     self.0.trace(tracer);
                 } else {
-                    trace_reflector(tracer, "on stack", &self.0.reflector());
+                    trace_reflector(tracer, "on stack", self.0.reflector());
                 }
             }
         }
@@ -209,7 +215,7 @@ where
     T: DomObject,
 {
     fn clone(&self) -> DomRoot<T> {
-        DomRoot::from_ref(&*self)
+        DomRoot::from_ref(self)
     }
 }
 
@@ -225,26 +231,27 @@ where
 /// A rooting mechanism for reflectors on the stack.
 /// LIFO is not required.
 ///
-/// See also [*Exact Stack Rooting - Storing a GCPointer on the CStack*]
-/// (https://developer.mozilla.org/en-US/docs/Mozilla/Projects/SpiderMonkey/Internals/GC/Exact_Stack_Rooting).
+/// See also [*Exact Stack Rooting - Storing a GCPointer on the CStack*][cstack].
+///
+/// [cstack]: https://developer.mozilla.org/en-US/docs/Mozilla/Projects/SpiderMonkey/Internals/GC/Exact_Stack_Rooting
 pub struct RootCollection {
     roots: UnsafeCell<Vec<*const dyn JSTraceable>>,
 }
 
-thread_local!(static STACK_ROOTS: Cell<Option<*const RootCollection>> = Cell::new(None));
+thread_local!(static STACK_ROOTS: Cell<Option<*const RootCollection>> = const { Cell::new(None) });
 
 pub struct ThreadLocalStackRoots<'a>(PhantomData<&'a u32>);
 
 impl<'a> ThreadLocalStackRoots<'a> {
     pub fn new(roots: &'a RootCollection) -> Self {
-        STACK_ROOTS.with(|ref r| r.set(Some(roots)));
+        STACK_ROOTS.with(|r| r.set(Some(roots)));
         ThreadLocalStackRoots(PhantomData)
     }
 }
 
 impl<'a> Drop for ThreadLocalStackRoots<'a> {
     fn drop(&mut self) {
-        STACK_ROOTS.with(|ref r| r.set(None));
+        STACK_ROOTS.with(|r| r.set(None));
     }
 }
 
@@ -269,7 +276,7 @@ impl RootCollection {
         let roots = &mut *self.roots.get();
         match roots
             .iter()
-            .rposition(|r| *r as *const () == object as *const ())
+            .rposition(|r| std::ptr::addr_eq(*r as *const (), object as *const ()))
         {
             Some(idx) => {
                 roots.remove(idx);
@@ -282,7 +289,7 @@ impl RootCollection {
 /// SM Callback that traces the rooted reflectors
 pub unsafe fn trace_roots(tracer: *mut JSTracer) {
     debug!("tracing stack roots");
-    STACK_ROOTS.with(|ref collection| {
+    STACK_ROOTS.with(|collection| {
         let collection = &*(*collection.get().unwrap()).roots.get();
         for root in collection {
             (**root).trace(tracer);
@@ -317,7 +324,7 @@ where
 /// on the stack, the `Dom<T>` can point to freed memory.
 ///
 /// This should only be used as a field in other DOM objects.
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct Dom<T> {
     ptr: ptr::NonNull<T>,
 }
@@ -332,6 +339,10 @@ impl<T> MallocSizeOf for Dom<T> {
 
 impl<T> Dom<T> {
     /// Returns `LayoutDom<T>` containing the same pointer.
+    ///
+    /// # Safety
+    ///
+    /// The `self` parameter to this method must meet all the requirements of [`ptr::NonNull::as_ref`].
     pub unsafe fn to_layout(&self) -> LayoutDom<T> {
         assert_in_layout();
         LayoutDom {
@@ -341,8 +352,8 @@ impl<T> Dom<T> {
 }
 
 impl<T: DomObject> Dom<T> {
-    /// Create a Dom<T> from a &T
-    #[allow(unrooted_must_root)]
+    /// Create a `Dom<T>` from a `&T`
+    #[allow(crown::unrooted_must_root)]
     pub fn from_ref(obj: &T) -> Dom<T> {
         assert_in_script();
         Dom {
@@ -376,7 +387,7 @@ unsafe impl<T: DomObject> JSTraceable for Dom<T> {
 }
 
 /// A traced reference to a DOM object that may not be reflected yet.
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct MaybeUnreflectedDom<T> {
     ptr: ptr::NonNull<T>,
 }
@@ -385,7 +396,7 @@ impl<T> MaybeUnreflectedDom<T>
 where
     T: DomObject,
 {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub unsafe fn from_box(value: Box<T>) -> Self {
         Self {
             ptr: Box::leak(value).into(),
@@ -417,7 +428,7 @@ where
 
 /// An unrooted reference to a DOM object for use in layout. `Layout*Helpers`
 /// traits must be implemented on this.
-#[unrooted_must_root_lint::allow_unrooted_interior]
+#[crown::unrooted_must_root_lint::allow_unrooted_interior]
 pub struct LayoutDom<'dom, T> {
     value: &'dom T,
 }
@@ -486,7 +497,7 @@ impl<T> Eq for Dom<T> {}
 
 impl<T> PartialEq for LayoutDom<'_, T> {
     fn eq(&self, other: &Self) -> bool {
-        self.value as *const T == other.value as *const T
+        std::ptr::eq(self.value, other.value)
     }
 }
 
@@ -506,20 +517,19 @@ impl<T> Hash for LayoutDom<'_, T> {
 
 impl<T> Clone for Dom<T> {
     #[inline]
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn clone(&self) -> Self {
         assert_in_script();
-        Dom {
-            ptr: self.ptr.clone(),
-        }
+        Dom { ptr: self.ptr }
     }
 }
 
 impl<T> Clone for LayoutDom<'_, T> {
     #[inline]
+    #[allow(clippy::non_canonical_clone_impl)]
     fn clone(&self) -> Self {
         assert_in_layout();
-        LayoutDom { value: self.value }
+        *self
     }
 }
 
@@ -540,7 +550,7 @@ impl LayoutDom<'_, Node> {
 ///
 /// This should only be used as a field in other DOM objects; see warning
 /// on `Dom<T>`.
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable)]
 pub struct MutDom<T: DomObject> {
     val: UnsafeCell<Dom<T>>,
@@ -603,7 +613,7 @@ pub(crate) fn assert_in_layout() {
 ///
 /// This should only be used as a field in other DOM objects; see warning
 /// on `Dom<T>`.
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable)]
 pub struct MutNullableDom<T: DomObject> {
     ptr: UnsafeCell<Option<Dom<T>>>,
@@ -637,14 +647,14 @@ impl<T: DomObject> MutNullableDom<T> {
 
     /// Retrieve a copy of the inner optional `Dom<T>` as `LayoutDom<T>`.
     /// For use by layout, which can't use safe types like Temporary.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub unsafe fn get_inner_as_layout(&self) -> Option<LayoutDom<T>> {
         assert_in_layout();
         (*self.ptr.get()).as_ref().map(|js| js.to_layout())
     }
 
     /// Get a rooted value out of this object
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn get(&self) -> Option<DomRoot<T>> {
         assert_in_script();
         unsafe { ptr::read(self.ptr.get()).map(|o| DomRoot::from_ref(&*o)) }
@@ -679,7 +689,7 @@ impl<'a, T: DomObject> PartialEq<Option<&'a T>> for MutNullableDom<T> {
 }
 
 impl<T: DomObject> Default for MutNullableDom<T> {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn default() -> MutNullableDom<T> {
         assert_in_script();
         MutNullableDom {
@@ -701,7 +711,7 @@ impl<T: DomObject> MallocSizeOf for MutNullableDom<T> {
 ///
 /// This should only be used as a field in other DOM objects; see warning
 /// on `Dom<T>`.
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct DomOnceCell<T: DomObject> {
     ptr: OnceCell<Dom<T>>,
 }
@@ -712,18 +722,18 @@ where
 {
     /// Retrieve a copy of the current inner value. If it is `None`, it is
     /// initialized with the result of `cb` first.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn init_once<F>(&self, cb: F) -> &T
     where
         F: FnOnce() -> DomRoot<T>,
     {
         assert_in_script();
-        &self.ptr.init_once(|| Dom::from_ref(&cb()))
+        self.ptr.get_or_init(|| Dom::from_ref(&cb()))
     }
 }
 
 impl<T: DomObject> Default for DomOnceCell<T> {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn default() -> DomOnceCell<T> {
         assert_in_script();
         DomOnceCell {
@@ -739,10 +749,10 @@ impl<T: DomObject> MallocSizeOf for DomOnceCell<T> {
     }
 }
 
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 unsafe impl<T: DomObject> JSTraceable for DomOnceCell<T> {
     unsafe fn trace(&self, trc: *mut JSTracer) {
-        if let Some(ptr) = self.ptr.as_ref() {
+        if let Some(ptr) = self.ptr.get() {
             ptr.trace(trc);
         }
     }
@@ -754,46 +764,17 @@ where
 {
     /// Returns a reference to the interior of this JS object. The fact
     /// that this is unsafe is what necessitates the layout wrappers.
-    pub unsafe fn unsafe_get(self) -> &'dom T {
+    pub fn unsafe_get(self) -> &'dom T {
         assert_in_layout();
         self.value
     }
 
-    /// Transforms a slice of Dom<T> into a slice of LayoutDom<T>.
+    /// Transforms a slice of `Dom<T>` into a slice of `LayoutDom<T>`.
     // FIXME(nox): This should probably be done through a ToLayout trait.
     pub unsafe fn to_layout_slice(slice: &'dom [Dom<T>]) -> &'dom [LayoutDom<'dom, T>] {
         // This doesn't compile if Dom and LayoutDom don't have the same
         // representation.
         let _ = mem::transmute::<Dom<T>, LayoutDom<T>>;
         &*(slice as *const [Dom<T>] as *const [LayoutDom<T>])
-    }
-}
-
-/// Helper trait for safer manipulations of `Option<Heap<T>>` values.
-pub trait OptionalHeapSetter {
-    type Value;
-    /// Update this optional heap value with a new value.
-    fn set(&mut self, v: Option<Self::Value>);
-}
-
-impl<T: GCMethods + Copy> OptionalHeapSetter for Option<Heap<T>>
-where
-    Heap<T>: Default,
-{
-    type Value = T;
-    fn set(&mut self, v: Option<T>) {
-        let v = match v {
-            None => {
-                *self = None;
-                return;
-            },
-            Some(v) => v,
-        };
-
-        if self.is_none() {
-            *self = Some(Heap::default());
-        }
-
-        self.as_ref().unwrap().set(v);
     }
 }

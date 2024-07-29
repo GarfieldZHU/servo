@@ -2,14 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::abstractworker::SimpleWorkerErrorHandler;
-use crate::dom::abstractworker::WorkerScriptMsg;
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use crossbeam_channel::{unbounded, Sender};
+use devtools_traits::{DevtoolsPageInfo, ScriptToDevtoolsControlMsg, WorkerId};
+use dom_struct::dom_struct;
+use ipc_channel::ipc;
+use js::jsapi::{Heap, JSObject};
+use js::jsval::UndefinedValue;
+use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleObject, HandleValue};
+use script_traits::{StructuredSerializedData, WorkerScriptLoadOrigin};
+use uuid::Uuid;
+
+use crate::dom::abstractworker::{SimpleWorkerErrorHandler, WorkerScriptMsg};
+use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::MessagePortBinding::PostMessageOptions;
 use crate::dom::bindings::codegen::Bindings::WorkerBinding::{WorkerMethods, WorkerOptions};
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::USVString;
 use crate::dom::bindings::structuredclone;
@@ -23,20 +37,8 @@ use crate::dom::messageevent::MessageEvent;
 use crate::dom::window::Window;
 use crate::dom::workerglobalscope::prepare_workerscope_init;
 use crate::realms::enter_realm;
-use crate::script_runtime::JSContext;
+use crate::script_runtime::{ContextForRequestInterrupt, JSContext};
 use crate::task::TaskOnce;
-use crossbeam_channel::{unbounded, Sender};
-use devtools_traits::{DevtoolsPageInfo, ScriptToDevtoolsControlMsg, WorkerId};
-use dom_struct::dom_struct;
-use ipc_channel::ipc;
-use js::jsapi::{Heap, JSObject, JS_RequestInterruptCallback};
-use js::jsval::UndefinedValue;
-use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
-use script_traits::{StructuredSerializedData, WorkerScriptLoadOrigin};
-use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use uuid::Uuid;
 
 pub type TrustedWorkerAddress = Trusted<Worker>;
 
@@ -45,36 +47,46 @@ pub type TrustedWorkerAddress = Trusted<Worker>;
 pub struct Worker {
     eventtarget: EventTarget,
     #[ignore_malloc_size_of = "Defined in std"]
+    #[no_trace]
     /// Sender to the Receiver associated with the DedicatedWorkerGlobalScope
     /// this Worker created.
     sender: Sender<DedicatedWorkerScriptMsg>,
     #[ignore_malloc_size_of = "Arc"]
     closing: Arc<AtomicBool>,
     terminated: Cell<bool>,
+    #[ignore_malloc_size_of = "Arc"]
+    context_for_interrupt: DomRefCell<Option<ContextForRequestInterrupt>>,
 }
 
 impl Worker {
     fn new_inherited(sender: Sender<DedicatedWorkerScriptMsg>, closing: Arc<AtomicBool>) -> Worker {
         Worker {
             eventtarget: EventTarget::new_inherited(),
-            sender: sender,
-            closing: closing,
+            sender,
+            closing,
             terminated: Cell::new(false),
+            context_for_interrupt: Default::default(),
         }
     }
 
-    pub fn new(
+    fn new(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         sender: Sender<DedicatedWorkerScriptMsg>,
         closing: Arc<AtomicBool>,
     ) -> DomRoot<Worker> {
-        reflect_dom_object(Box::new(Worker::new_inherited(sender, closing)), global)
+        reflect_dom_object_with_proto(
+            Box::new(Worker::new_inherited(sender, closing)),
+            global,
+            proto,
+        )
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-worker
     #[allow(unsafe_code, non_snake_case)]
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         script_url: USVString,
         worker_options: &WorkerOptions,
     ) -> Fallible<DomRoot<Worker>> {
@@ -86,7 +98,7 @@ impl Worker {
 
         let (sender, receiver) = unbounded();
         let closing = Arc::new(AtomicBool::new(false));
-        let worker = Worker::new(global, sender.clone(), closing.clone());
+        let worker = Worker::new(global, proto, sender.clone(), closing.clone());
         let worker_ref = Trusted::new(&*worker);
 
         let worker_load_origin = WorkerScriptLoadOrigin {
@@ -106,12 +118,12 @@ impl Worker {
 
         let (devtools_sender, devtools_receiver) = ipc::channel().unwrap();
         let worker_id = WorkerId(Uuid::new_v4());
-        if let Some(ref chan) = global.devtools_chan() {
+        if let Some(chan) = global.devtools_chan() {
             let pipeline_id = global.pipeline_id();
             let title = format!("Worker for {}", worker_url);
             if let Some(browsing_context) = browsing_context {
                 let page_info = DevtoolsPageInfo {
-                    title: title,
+                    title,
                     url: worker_url.clone(),
                 };
                 let _ = chan.send(ScriptToDevtoolsControlMsg::NewGlobal(
@@ -150,6 +162,7 @@ impl Worker {
             .recv()
             .expect("Couldn't receive a context for worker.");
 
+        worker.set_context_for_interrupt(context.clone());
         global.track_worker(closing, join_handle, control_sender, context);
 
         Ok(worker)
@@ -157,6 +170,14 @@ impl Worker {
 
     pub fn is_terminated(&self) -> bool {
         self.terminated.get()
+    }
+
+    pub fn set_context_for_interrupt(&self, cx: ContextForRequestInterrupt) {
+        assert!(
+            self.context_for_interrupt.borrow().is_none(),
+            "Context for interrupt must be set only once"
+        );
+        *self.context_for_interrupt.borrow_mut() = Some(cx);
     }
 
     pub fn handle_message(address: TrustedWorkerAddress, data: StructuredSerializedData) {
@@ -169,7 +190,7 @@ impl Worker {
         let global = worker.global();
         let target = worker.upcast();
         let _ac = enter_realm(target);
-        rooted!(in(*global.get_cx()) let mut message = UndefinedValue());
+        rooted!(in(*GlobalScope::get_cx()) let mut message = UndefinedValue());
         if let Ok(ports) = structuredclone::read(&global, data, message.handle_mut()) {
             MessageEvent::dispatch_jsval(target, &global, message.handle(), None, None, ports);
         } else {
@@ -183,7 +204,7 @@ impl Worker {
         worker.upcast().fire_event(atom!("error"));
     }
 
-    /// https://html.spec.whatwg.org/multipage/#dom-dedicatedworkerglobalscope-postmessage
+    /// <https://html.spec.whatwg.org/multipage/#dom-dedicatedworkerglobalscope-postmessage>
     fn post_message_impl(
         &self,
         cx: JSContext,
@@ -207,7 +228,7 @@ impl Worker {
 }
 
 impl WorkerMethods for Worker {
-    /// https://html.spec.whatwg.org/multipage/#dom-worker-postmessage
+    /// <https://html.spec.whatwg.org/multipage/#dom-worker-postmessage>
     fn PostMessage(
         &self,
         cx: JSContext,
@@ -217,7 +238,7 @@ impl WorkerMethods for Worker {
         self.post_message_impl(cx, message, transfer)
     }
 
-    /// https://html.spec.whatwg.org/multipage/#dom-worker-postmessage
+    /// <https://html.spec.whatwg.org/multipage/#dom-worker-postmessage>
     fn PostMessage_(
         &self,
         cx: JSContext,
@@ -235,7 +256,6 @@ impl WorkerMethods for Worker {
         self.post_message_impl(cx, message, guard)
     }
 
-    #[allow(unsafe_code)]
     // https://html.spec.whatwg.org/multipage/#terminate-a-worker
     fn Terminate(&self) {
         // Step 1
@@ -247,8 +267,9 @@ impl WorkerMethods for Worker {
         self.terminated.set(true);
 
         // Step 3
-        let cx = self.global().get_cx();
-        unsafe { JS_RequestInterruptCallback(*cx) };
+        if let Some(cx) = self.context_for_interrupt.borrow().as_ref() {
+            cx.request_interrupt()
+        }
     }
 
     // https://html.spec.whatwg.org/multipage/#handler-worker-onmessage
@@ -262,7 +283,7 @@ impl WorkerMethods for Worker {
 }
 
 impl TaskOnce for SimpleWorkerErrorHandler<Worker> {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn run_once(self) {
         Worker::dispatch_simple_error(self.addr);
     }

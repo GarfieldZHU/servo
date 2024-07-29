@@ -2,16 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use cssparser::{Parser, ParserInput};
+use dom_struct::dom_struct;
+use servo_url::ServoUrl;
+
 use crate::dom::bindings::codegen::Bindings::CSSStyleValueBinding::CSSStyleValueMethods;
-use crate::dom::bindings::reflector::reflect_dom_object;
-use crate::dom::bindings::reflector::Reflector;
+use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
-use cssparser::Parser;
-use cssparser::ParserInput;
-use dom_struct::dom_struct;
-use servo_url::ServoUrl;
 
 #[dom_struct]
 pub struct CSSStyleValue {
@@ -23,7 +22,7 @@ impl CSSStyleValue {
     fn new_inherited(value: String) -> CSSStyleValue {
         CSSStyleValue {
             reflector: Reflector::new(),
-            value: value,
+            value,
         }
     }
 
@@ -45,11 +44,11 @@ impl CSSStyleValue {
     /// return relative URLs for computed values, so we pass in a base.
     /// <https://github.com/servo/servo/issues/17625>
     pub fn get_url(&self, base_url: ServoUrl) -> Option<ServoUrl> {
-        let mut input = ParserInput::new(&*self.value);
+        let mut input = ParserInput::new(&self.value);
         let mut parser = Parser::new(&mut input);
         parser
             .expect_url()
             .ok()
-            .and_then(|string| base_url.join(&*string).ok())
+            .and_then(|string| base_url.join(&string).ok())
     }
 }

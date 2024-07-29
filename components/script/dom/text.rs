@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::CharacterDataBinding::CharacterDataMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
@@ -15,7 +18,6 @@ use crate::dom::characterdata::CharacterData;
 use crate::dom::document::Document;
 use crate::dom::node::Node;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
 
 /// An HTML text node.
 #[dom_struct]
@@ -31,13 +33,29 @@ impl Text {
     }
 
     pub fn new(text: DOMString, document: &Document) -> DomRoot<Text> {
-        Node::reflect_node(Box::new(Text::new_inherited(text, document)), document)
+        Self::new_with_proto(text, document, None)
+    }
+
+    fn new_with_proto(
+        text: DOMString,
+        document: &Document,
+        proto: Option<HandleObject>,
+    ) -> DomRoot<Text> {
+        Node::reflect_node_with_proto(
+            Box::new(Text::new_inherited(text, document)),
+            document,
+            proto,
+        )
     }
 
     #[allow(non_snake_case)]
-    pub fn Constructor(window: &Window, text: DOMString) -> Fallible<DomRoot<Text>> {
+    pub fn Constructor(
+        window: &Window,
+        proto: Option<HandleObject>,
+        text: DOMString,
+    ) -> Fallible<DomRoot<Text>> {
         let document = window.Document();
-        Ok(Text::new(text, &document))
+        Ok(Text::new_with_proto(text, &document, proto))
     }
 }
 
@@ -71,7 +89,7 @@ impl TextMethods for Text {
             node.ranges()
                 .move_to_following_text_sibling_above(node, offset, new_node.upcast());
             // Steps 7.4-5.
-            parent.ranges().increment_at(&parent, node.index() + 1);
+            parent.ranges().increment_at(parent, node.index() + 1);
         }
         // Step 8.
         cdata.DeleteData(offset, count).unwrap();

@@ -2,6 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use cssparser::match_ignore_ascii_case;
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+use style::attr::AttrValue;
+use style::color::AbsoluteColor;
+use style::str::{read_numbers, HTML_SPACE_CHARACTERS};
+use style::values::computed::font::{
+    FamilyName, FontFamilyNameSyntax, GenericFontFamily, SingleFontFamily,
+};
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::HTMLFontElementBinding::HTMLFontElementMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -12,12 +24,6 @@ use crate::dom::element::{Element, LayoutElementHelpers};
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::node::Node;
 use crate::dom::virtualmethods::VirtualMethods;
-use cssparser::RGBA;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use servo_atoms::Atom;
-use style::attr::AttrValue;
-use style::str::{read_numbers, HTML_SPACE_CHARACTERS};
 
 #[dom_struct]
 pub struct HTMLFontElement {
@@ -35,16 +41,49 @@ impl HTMLFontElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLFontElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLFontElement::new_inherited(local_name, prefix, document)),
             document,
+            proto,
         )
+    }
+
+    pub(crate) fn parse_face_attribute(face_value: Atom) -> Vec<SingleFontFamily> {
+        face_value
+            .split(',')
+            .map(|string| Self::parse_single_face_value_from_string(string.trim()))
+            .collect()
+    }
+
+    fn parse_single_face_value_from_string(string: &str) -> SingleFontFamily {
+        match_ignore_ascii_case! { string,
+            "serif" => return SingleFontFamily::Generic(GenericFontFamily::Serif),
+            "sans-serif" => return SingleFontFamily::Generic(GenericFontFamily::SansSerif),
+            "cursive" => return SingleFontFamily::Generic(GenericFontFamily::Cursive),
+            "fantasy" => return SingleFontFamily::Generic(GenericFontFamily::Fantasy),
+            "monospace" => return SingleFontFamily::Generic(GenericFontFamily::Monospace),
+            "system-ui" => return SingleFontFamily::Generic(GenericFontFamily::SystemUi),
+            _ => {}
+        }
+
+        let name = string.to_owned().replace(['\'', '"'], "");
+        let syntax = if name == string {
+            FontFamilyNameSyntax::Identifiers
+        } else {
+            FontFamilyNameSyntax::Quoted
+        };
+
+        SingleFontFamily::FamilyName(FamilyName {
+            name: name.into(),
+            syntax,
+        })
     }
 }
 
@@ -77,21 +116,23 @@ impl VirtualMethods for HTMLFontElement {
     }
 
     fn attribute_affects_presentational_hints(&self, attr: &Attr) -> bool {
-        if attr.local_name() == &local_name!("color") {
+        if attr.local_name() == &local_name!("color") ||
+            attr.local_name() == &local_name!("size") ||
+            attr.local_name() == &local_name!("face")
+        {
             return true;
         }
 
-        // FIXME: Should also return true for `size` and `face` changes!
         self.super_type()
             .unwrap()
             .attribute_affects_presentational_hints(attr)
     }
 
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
-        match name {
-            &local_name!("face") => AttrValue::from_atomic(value.into()),
-            &local_name!("color") => AttrValue::from_legacy_color(value.into()),
-            &local_name!("size") => parse_size(&value),
+        match *name {
+            local_name!("face") => AttrValue::from_atomic(value.into()),
+            local_name!("color") => AttrValue::from_legacy_color(value.into()),
+            local_name!("size") => parse_size(&value),
             _ => self
                 .super_type()
                 .unwrap()
@@ -101,13 +142,13 @@ impl VirtualMethods for HTMLFontElement {
 }
 
 pub trait HTMLFontElementLayoutHelpers {
-    fn get_color(self) -> Option<RGBA>;
+    fn get_color(self) -> Option<AbsoluteColor>;
     fn get_face(self) -> Option<Atom>;
     fn get_size(self) -> Option<u32>;
 }
 
 impl HTMLFontElementLayoutHelpers for LayoutDom<'_, HTMLFontElement> {
-    fn get_color(self) -> Option<RGBA> {
+    fn get_color(self) -> Option<AbsoluteColor> {
         self.upcast::<Element>()
             .get_attr_for_layout(&ns!(), &local_name!("color"))
             .and_then(AttrValue::as_color)
@@ -170,7 +211,7 @@ fn parse_size(mut input: &str) -> AttrValue {
 
     // Step 9
     match parse_mode {
-        ParseMode::RelativePlus => value = 3 + value,
+        ParseMode::RelativePlus => value += 3,
         ParseMode::RelativeMinus => value = 3 - value,
         ParseMode::Absolute => (),
     }

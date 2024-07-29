@@ -6,16 +6,19 @@
 //! Any redirects that are encountered are followed. Whenever a non-redirect
 //! response is received, it is forwarded to the appropriate script thread.
 
+use base::id::PipelineId;
 use crossbeam_channel::Sender;
 use http::HeaderMap;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
-use msg::constellation_msg::PipelineId;
+use log::warn;
 use net::http_loader::{set_default_accept, set_default_accept_language};
 use net_traits::request::{Destination, Referrer, RequestBuilder};
 use net_traits::response::ResponseInit;
-use net_traits::{CoreResourceMsg, FetchChannels, FetchMetadata, FetchResponseMsg};
-use net_traits::{IpcSend, NetworkError, ResourceThreads};
+use net_traits::{
+    CoreResourceMsg, FetchChannels, FetchMetadata, FetchResponseMsg, IpcSend, NetworkError,
+    ResourceThreads,
+};
 
 pub struct NetworkListener {
     res_init: Option<ResponseInit>,
@@ -51,7 +54,7 @@ impl NetworkListener {
             request_builder: self.request_builder.clone(),
             resource_threads: self.resource_threads.clone(),
             sender: self.sender.clone(),
-            pipeline_id: self.pipeline_id.clone(),
+            pipeline_id: self.pipeline_id,
             should_send: false,
         };
 
@@ -116,7 +119,7 @@ impl NetworkListener {
                         self.request_builder.referrer = metadata
                             .referrer
                             .clone()
-                            .map(|referrer_url| Referrer::ReferrerUrl(referrer_url))
+                            .map(Referrer::ReferrerUrl)
                             .unwrap_or(Referrer::NoReferrer);
                         self.request_builder.referrer_policy = metadata.referrer_policy;
 
@@ -143,7 +146,7 @@ impl NetworkListener {
                         //
                         // Ideally the Fetch code would handle manual redirects on its own
                         self.initiate_fetch(None);
-                    }
+                    },
                     _ => {
                         // Response should be processed by script thread.
                         self.should_send = true;
@@ -162,7 +165,7 @@ impl NetworkListener {
         if self.should_send {
             if let Err(e) = self.sender.send((self.pipeline_id, msg)) {
                 warn!(
-                    "Failed to forward network message to pipeline {}: {:?}",
+                    "Failed to forward network message to pipeline {:?}: {:?}",
                     self.pipeline_id, e
                 );
             }

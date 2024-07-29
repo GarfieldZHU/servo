@@ -2,25 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::ClientBinding::ClientMethods;
-use crate::dom::bindings::codegen::Bindings::ClientBinding::FrameType;
+use std::default::Default;
+
+use dom_struct::dom_struct;
+use servo_url::ServoUrl;
+use uuid::Uuid;
+
+use crate::dom::bindings::codegen::Bindings::ClientBinding::{ClientMethods, FrameType};
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::serviceworker::ServiceWorker;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_url::ServoUrl;
-use std::default::Default;
-use uuid::Uuid;
 
 #[dom_struct]
 pub struct Client {
     reflector_: Reflector,
     active_worker: MutNullableDom<ServiceWorker>,
+    #[no_trace]
     url: ServoUrl,
     frame_type: FrameType,
     #[ignore_malloc_size_of = "Defined in uuid"]
+    #[no_trace]
     id: Uuid,
 }
 
@@ -29,7 +32,7 @@ impl Client {
         Client {
             reflector_: Reflector::new(),
             active_worker: Default::default(),
-            url: url,
+            url,
             frame_type: FrameType::None,
             id: Uuid::new_v4(),
         }

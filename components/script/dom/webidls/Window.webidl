@@ -6,13 +6,14 @@
 [Global=Window, Exposed=Window /*, LegacyUnenumerableNamedProperties */]
 /*sealed*/ interface Window : GlobalScope {
   // the current browsing context
-  [Unforgeable] readonly attribute WindowProxy window;
-  [BinaryName="Self_", Replaceable] readonly attribute WindowProxy self;
-  [Unforgeable] readonly attribute Document document;
+  [LegacyUnforgeable, CrossOriginReadable] readonly attribute WindowProxy window;
+  [BinaryName="Self_", Replaceable, CrossOriginReadable] readonly attribute WindowProxy self;
+  [LegacyUnforgeable] readonly attribute Document document;
 
   attribute DOMString name;
 
-  [PutForwards=href, Unforgeable] readonly attribute Location location;
+  [PutForwards=href, LegacyUnforgeable, CrossOriginReadable, CrossOriginWritable]
+    readonly attribute Location location;
   readonly attribute History history;
   [Pref="dom.customelements.enabled"]
   readonly attribute CustomElementRegistry customElements;
@@ -23,29 +24,28 @@
   //[Replaceable] readonly attribute BarProp statusbar;
   //[Replaceable] readonly attribute BarProp toolbar;
   attribute DOMString status;
-  void close();
-  readonly attribute boolean closed;
-  void stop();
-  //void focus();
-  //void blur();
+  [CrossOriginCallable] undefined close();
+  [CrossOriginReadable] readonly attribute boolean closed;
+  undefined stop();
+  //[CrossOriginCallable] void focus();
+  //[CrossOriginCallable] void blur();
 
   // other browsing contexts
-  [Replaceable] readonly attribute WindowProxy frames;
-  [Replaceable] readonly attribute unsigned long length;
+  [Replaceable, CrossOriginReadable] readonly attribute WindowProxy frames;
+  [Replaceable, CrossOriginReadable] readonly attribute unsigned long length;
   // Note that this can return null in the case that the browsing context has been discarded.
   // https://github.com/whatwg/html/issues/2115
-  [Unforgeable] readonly attribute WindowProxy? top;
-  attribute any opener;
+  [LegacyUnforgeable, CrossOriginReadable] readonly attribute WindowProxy? top;
+  [CrossOriginReadable] attribute any opener;
   // Note that this can return null in the case that the browsing context has been discarded.
   // https://github.com/whatwg/html/issues/2115
-  [Replaceable] readonly attribute WindowProxy? parent;
+  [Replaceable, CrossOriginReadable] readonly attribute WindowProxy? parent;
   readonly attribute Element? frameElement;
   [Throws] WindowProxy? open(optional USVString url = "", optional DOMString target = "_blank",
                              optional DOMString features = "");
   //getter WindowProxy (unsigned long index);
 
-  // https://github.com/servo/servo/issues/14453
-  // getter object (DOMString name);
+  getter object (DOMString name);
 
   // the user agent
   readonly attribute Navigator navigator;
@@ -53,20 +53,20 @@
   //readonly attribute ApplicationCache applicationCache;
 
   // user prompts
-  void alert(DOMString message);
-  void alert();
+  undefined alert(DOMString message);
+  undefined alert();
   boolean confirm(optional DOMString message = "");
   DOMString? prompt(optional DOMString message = "", optional DOMString default = "");
   //void print();
   //any showModalDialog(DOMString url, optional any argument);
 
   unsigned long requestAnimationFrame(FrameRequestCallback callback);
-  void cancelAnimationFrame(unsigned long handle);
+  undefined cancelAnimationFrame(unsigned long handle);
 
-  [Throws]
-  void postMessage(any message, USVString targetOrigin, optional sequence<object> transfer = []);
-  [Throws]
-  void postMessage(any message, optional WindowPostMessageOptions options = {});
+  [Throws, CrossOriginCallable]
+  undefined postMessage(any message, USVString targetOrigin, optional sequence<object> transfer = []);
+  [Throws, CrossOriginCallable]
+  undefined postMessage(any message, optional WindowPostMessageOptions options = {});
 
   // also has obsolete members
 };
@@ -75,8 +75,8 @@ Window includes WindowEventHandlers;
 
 // https://html.spec.whatwg.org/multipage/#Window-partial
 partial interface Window {
-  void captureEvents();
-  void releaseEvents();
+  undefined captureEvents();
+  undefined releaseEvents();
 };
 
 // https://drafts.csswg.org/cssom/#extensions-to-the-window-interface
@@ -105,10 +105,10 @@ partial interface Window {
   [SameObject, Replaceable] readonly attribute Screen screen;
 
   // browsing context
-  void moveTo(long x, long y);
-  void moveBy(long x, long y);
-  void resizeTo(long x, long y);
-  void resizeBy(long x, long y);
+  undefined moveTo(long x, long y);
+  undefined moveBy(long x, long y);
+  undefined resizeTo(long x, long y);
+  undefined resizeBy(long x, long y);
 
   // viewport
   [Replaceable] readonly attribute long innerWidth;
@@ -119,12 +119,12 @@ partial interface Window {
   [Replaceable] readonly attribute long pageXOffset;
   [Replaceable] readonly attribute long scrollY;
   [Replaceable] readonly attribute long pageYOffset;
-  void scroll(optional ScrollToOptions options = {});
-  void scroll(unrestricted double x, unrestricted double y);
-  void scrollTo(optional ScrollToOptions options = {});
-  void scrollTo(unrestricted double x, unrestricted double y);
-  void scrollBy(optional ScrollToOptions options = {});
-  void scrollBy(unrestricted double x, unrestricted double y);
+  undefined scroll(optional ScrollToOptions options = {});
+  undefined scroll(unrestricted double x, unrestricted double y);
+  undefined scrollTo(optional ScrollToOptions options = {});
+  undefined scrollTo(unrestricted double x, unrestricted double y);
+  undefined scrollBy(optional ScrollToOptions options = {});
+  undefined scrollBy(unrestricted double x, unrestricted double y);
 
   // client
   [Replaceable] readonly attribute long screenX;
@@ -137,20 +137,18 @@ partial interface Window {
 // Proprietary extensions.
 partial interface Window {
   [Pref="dom.servo_helpers.enabled"]
-  void debug(DOMString arg);
+  undefined debug(DOMString arg);
   [Pref="dom.servo_helpers.enabled"]
-  void gc();
+  undefined gc();
   [Pref="dom.servo_helpers.enabled"]
-  void trap();
-  [Pref="dom.servo_helpers.enabled"]
-  void js_backtrace();
+  undefined js_backtrace();
 };
 
 // WebDriver extensions
 partial interface Window {
   // Shouldn't be public, but just to make things work for now
-  void webdriverCallback(optional any result);
-  void webdriverTimeout();
+  undefined webdriverCallback(optional any result);
+  undefined webdriverTimeout();
 };
 
 // https://html.spec.whatwg.org/multipage/#dom-sessionstorage
@@ -166,7 +164,7 @@ interface mixin WindowLocalStorage {
 Window includes WindowLocalStorage;
 
 // http://w3c.github.io/animation-timing/#framerequestcallback
-callback FrameRequestCallback = void (DOMHighResTimeStamp time);
+callback FrameRequestCallback = undefined (DOMHighResTimeStamp time);
 
 // https://webbluetoothcg.github.io/web-bluetooth/tests#test-interfaces
 partial interface Window {

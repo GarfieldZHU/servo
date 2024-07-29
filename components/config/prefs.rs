@@ -2,20 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use embedder_traits::resources::{self, Resource};
-use serde_json::{self, Value};
 use std::borrow::ToOwned;
 use std::collections::HashMap;
+use std::convert::{TryFrom, TryInto};
+
+use embedder_traits::resources::{self, Resource};
+use gen::Prefs;
+use lazy_static::lazy_static;
+use log::warn;
+use serde_json::{self, Value};
 
 use crate::pref_util::Preferences;
 pub use crate::pref_util::{PrefError, PrefValue};
-use gen::Prefs;
 
 lazy_static! {
     static ref PREFS: Preferences<'static, Prefs> = {
         let def_prefs: Prefs = serde_json::from_str(&resources::read_string(Resource::Preferences))
             .expect("Failed to initialize config preferences.");
-        Preferences::new(def_prefs, &gen::PREF_ACCESSORS)
+        let result = Preferences::new(def_prefs, &gen::PREF_ACCESSORS);
+        for (key, value) in result.iter() {
+            set_stylo_pref_ref(&key, &value);
+        }
+        result
     };
 }
 
@@ -36,9 +44,11 @@ macro_rules! pref {
 #[macro_export]
 macro_rules! set_pref {
     ($($segment: ident).+, $value: expr) => {{
+        let value = $value;
+        $crate::prefs::set_stylo_pref(stringify!($($segment).+), value);
         let values = $crate::prefs::pref_map().values();
         let mut lock = values.write().unwrap();
-        lock$ (.$segment)+ = $value;
+        lock$ (.$segment)+ = value;
     }};
 }
 
@@ -54,14 +64,65 @@ pub fn pref_map() -> &'static Preferences<'static, Prefs> {
 }
 
 pub fn add_user_prefs(prefs: HashMap<String, PrefValue>) {
-    if let Err(error) = PREFS.set_all(prefs.into_iter()) {
+    for (key, value) in prefs.iter() {
+        set_stylo_pref_ref(key, value);
+    }
+    if let Err(error) = PREFS.set_all(prefs) {
         panic!("Error setting preference: {:?}", error);
+    }
+}
+
+pub fn set_stylo_pref(key: &str, value: impl Into<PrefValue>) {
+    set_stylo_pref_ref(key, &value.into());
+}
+
+fn set_stylo_pref_ref(key: &str, value: &PrefValue) {
+    match value.try_into() {
+        Ok(StyloPrefValue::Bool(value)) => style_config::set_bool(key, value),
+        Ok(StyloPrefValue::Int(value)) => style_config::set_i32(key, value),
+        Err(TryFromPrefValueError::IntegerOverflow(value)) => {
+            // TODO: logging doesn’t actually work this early, so we should
+            // split PrefValue into i32 and i64 variants.
+            warn!("Pref value too big for Stylo: {} ({})", key, value);
+        },
+        Err(TryFromPrefValueError::UnmappedType) => {
+            // Most of Servo’s prefs will hit this. When adding a new pref type
+            // in Stylo, update TryFrom<&PrefValue> for StyloPrefValue as well.
+        },
+    }
+}
+
+enum StyloPrefValue {
+    Bool(bool),
+    Int(i32),
+}
+
+enum TryFromPrefValueError {
+    IntegerOverflow(i64),
+    UnmappedType,
+}
+
+impl TryFrom<&PrefValue> for StyloPrefValue {
+    type Error = TryFromPrefValueError;
+
+    fn try_from(value: &PrefValue) -> Result<Self, Self::Error> {
+        match *value {
+            PrefValue::Int(value) => {
+                if let Ok(value) = value.try_into() {
+                    Ok(Self::Int(value))
+                } else {
+                    Err(TryFromPrefValueError::IntegerOverflow(value))
+                }
+            },
+            PrefValue::Bool(value) => Ok(Self::Bool(value)),
+            _ => Err(TryFromPrefValueError::UnmappedType),
+        }
     }
 }
 
 pub fn read_prefs_map(txt: &str) -> Result<HashMap<String, PrefValue>, PrefError> {
     let prefs: HashMap<String, Value> =
-        serde_json::from_str(txt).map_err(|e| PrefError::JsonParseErr(e))?;
+        serde_json::from_str(txt).map_err(PrefError::JsonParseErr)?;
     prefs
         .into_iter()
         .map(|(k, pref_value)| {
@@ -71,6 +132,17 @@ pub fn read_prefs_map(txt: &str) -> Result<HashMap<String, PrefValue>, PrefError
                     Value::Number(n) if n.is_i64() => PrefValue::Int(n.as_i64().unwrap()),
                     Value::Number(n) if n.is_f64() => PrefValue::Float(n.as_f64().unwrap()),
                     Value::String(s) => PrefValue::Str(s.to_owned()),
+                    Value::Array(v) => {
+                        let mut array = v.iter().map(PrefValue::from_json_value);
+                        if array.all(|v| v.is_some()) {
+                            PrefValue::Array(array.flatten().collect())
+                        } else {
+                            return Err(PrefError::InvalidValue(format!(
+                                "Invalid value: {}",
+                                pref_value
+                            )));
+                        }
+                    },
                     _ => {
                         return Err(PrefError::InvalidValue(format!(
                             "Invalid value: {}",
@@ -85,11 +157,20 @@ pub fn read_prefs_map(txt: &str) -> Result<HashMap<String, PrefValue>, PrefError
 }
 
 mod gen {
+    use serde::{Deserialize, Serialize};
     use servo_config_plugins::build_structs;
 
     // The number of layout threads is calculated if it is not present in `prefs.json`.
     fn default_layout_threads() -> i64 {
         std::cmp::max(num_cpus::get() * 3 / 4, 1) as i64
+    }
+
+    fn default_font_size() -> i64 {
+        16
+    }
+
+    fn default_monospace_font_size() -> i64 {
+        13
     }
 
     fn black() -> i64 {
@@ -115,6 +196,23 @@ mod gen {
                     foreground_color: i64,
                 }
             },
+            fonts: {
+                #[serde(default)]
+                default: String,
+                #[serde(default)]
+                serif: String,
+                #[serde(default)]
+                #[serde(rename = "fonts.sans-serif")]
+                sans_serif: String,
+                #[serde(default)]
+                monospace: String,
+                #[serde(default = "default_font_size")]
+                #[serde(rename = "fonts.default-size")]
+                default_size: i64,
+                #[serde(default = "default_monospace_font_size")]
+                #[serde(rename = "fonts.default-monospace-size")]
+                default_monospace_size: i64,
+            },
             css: {
                 animations: {
                     testing: {
@@ -131,7 +229,10 @@ mod gen {
             },
             dom: {
                 webgpu: {
+                    /// Enable WebGPU APIs.
                     enabled: bool,
+                    /// List of comma-separated backends to be used by wgpu
+                    wgpu_backend: String,
                 },
                 bluetooth: {
                     enabled: bool,
@@ -191,6 +292,9 @@ mod gen {
                     testing: {
                         allowed_in_nonsecure_contexts: bool,
                     }
+                },
+                resize_observer: {
+                    enabled: bool,
                 },
                 script: {
                     asynch: bool,
@@ -259,12 +363,8 @@ mod gen {
                     #[serde(default)]
                     enabled: bool,
                 },
-                webgl: {
-                    dom_to_texture: {
-                        enabled: bool,
-                    }
-                },
                 webgl2: {
+                    /// Enable WebGL2 APIs.
                     enabled: bool,
                 },
                 webrtc: {
@@ -298,6 +398,9 @@ mod gen {
                         enabled: bool,
                     },
                     layers: {
+                        enabled: bool,
+                    },
+                    openxr: {
                         enabled: bool,
                     },
                     sessionavailable: bool,
@@ -335,7 +438,10 @@ mod gen {
                 asyncstack: {
                     enabled: bool,
                 },
-                baseline: {
+                baseline_interpreter: {
+                    enabled: bool,
+                },
+                baseline_jit: {
                     enabled: bool,
                     unsafe_eager_compilation: {
                         enabled: bool,
@@ -445,11 +551,9 @@ mod gen {
                 flexbox: {
                     enabled: bool,
                 },
+                legacy_layout: bool,
                 #[serde(default = "default_layout_threads")]
                 threads: i64,
-                viewport: {
-                    enabled: bool,
-                },
                 writing_mode: {
                     #[serde(rename = "layout.writing-mode.enabled")]
                     enabled: bool,
@@ -457,9 +561,11 @@ mod gen {
             },
             media: {
                 glvideo: {
+                    /// Enable hardware acceleration for video playback.
                     enabled: bool,
                 },
                 testing: {
+                    /// Enable a non-standard event handler for verifying behavior of media elements during tests.
                     enabled: bool,
                 }
             },
@@ -473,6 +579,9 @@ mod gen {
                     #[serde(rename = "network.http-cache.disabled")]
                     disabled: bool,
                 },
+                local_directory_listing: {
+                    enabled: bool,
+                },
                 mime: {
                     sniff: bool,
                 }
@@ -482,9 +591,15 @@ mod gen {
                 max_length: i64,
             },
             shell: {
+                background_color: {
+                    /// The background color of shell's viewport. This will be used by OpenGL's `glClearColor`.
+                    #[serde(rename = "shell.background-color.rgba")]
+                    rgba: [f64; 4],
+                },
                 crash_reporter: {
                     enabled: bool,
                 },
+                /// URL string of the homepage.
                 homepage: String,
                 keep_screen_on: {
                     enabled: bool,
@@ -492,9 +607,11 @@ mod gen {
                 #[serde(rename = "shell.native-orientation")]
                 native_orientation: String,
                 native_titlebar: {
+                    /// Enable native window's titlebar and decorations.
                     #[serde(rename = "shell.native-titlebar.enabled")]
                     enabled: bool,
                 },
+                /// URL string of the search engine page (for example <https://google.com> or and <https://duckduckgo.com>.
                 searchpage: String,
             },
             webgl: {

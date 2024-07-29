@@ -2,15 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crossbeam_channel::unbounded;
+use base::id::TEST_PIPELINE_ID;
 use http::header::{HeaderValue, EXPIRES};
 use http::StatusCode;
-use msg::constellation_msg::TEST_PIPELINE_ID;
 use net::http_cache::HttpCache;
 use net_traits::request::{Origin, Referrer, Request};
 use net_traits::response::{HttpsState, Response, ResponseBody};
 use net_traits::{ResourceFetchTiming, ResourceTimingType};
 use servo_url::ServoUrl;
+use tokio::sync::mpsc::unbounded_channel as unbounded;
 
 #[test]
 fn test_refreshing_resource_sets_done_chan_the_appropriate_value() {
@@ -33,14 +33,15 @@ fn test_refreshing_resource_sets_done_chan_the_appropriate_value() {
     response
         .headers
         .insert(EXPIRES, HeaderValue::from_str("-10").unwrap());
-    let mut cache = HttpCache::new();
+    let mut cache = HttpCache::default();
     response_bodies.iter().for_each(|body| {
         *response.body.lock().unwrap() = body.clone();
         // First, store the 'normal' response.
         cache.store(&request, &response);
         // Second, mutate the response into a 304 response, and refresh the stored one.
         response.status = Some((StatusCode::NOT_MODIFIED, String::from("304")));
-        let mut done_chan = Some(unbounded());
+        let (send, recv) = unbounded();
+        let mut done_chan = Some((send, recv));
         let refreshed_response = cache.refresh(&request, response.clone(), &mut done_chan);
         // Ensure a resource was found, and refreshed.
         assert!(refreshed_response.is_some());

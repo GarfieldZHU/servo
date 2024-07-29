@@ -2,14 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::MediaDeviceInfoBinding::MediaDeviceInfoMethods;
-use crate::dom::bindings::codegen::Bindings::MediaDeviceInfoBinding::MediaDeviceKind;
+use dom_struct::dom_struct;
+use servo_media::streams::device_monitor::MediaDeviceKind as ServoMediaDeviceKind;
+
+use crate::dom::bindings::codegen::Bindings::MediaDeviceInfoBinding::{
+    MediaDeviceInfoMethods, MediaDeviceKind,
+};
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
-use servo_media::streams::device_monitor::MediaDeviceKind as ServoMediaDeviceKind;
 
 #[dom_struct]
 pub struct MediaDeviceInfo {
@@ -53,22 +55,22 @@ impl MediaDeviceInfo {
 }
 
 impl MediaDeviceInfoMethods for MediaDeviceInfo {
-    /// https://w3c.github.io/mediacapture-main/#dom-mediadeviceinfo-deviceid
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediadeviceinfo-deviceid>
     fn DeviceId(&self) -> DOMString {
         self.device_id.clone()
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediadeviceinfo-kind
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediadeviceinfo-kind>
     fn Kind(&self) -> MediaDeviceKind {
         self.kind
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediadeviceinfo-label
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediadeviceinfo-label>
     fn Label(&self) -> DOMString {
         self.label.clone()
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediadeviceinfo-groupid
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediadeviceinfo-groupid>
     fn GroupId(&self) -> DOMString {
         self.group_id.clone()
     }

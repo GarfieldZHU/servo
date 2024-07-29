@@ -2,22 +2,24 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#![allow(unrooted_must_root)]
+#![allow(crown::unrooted_must_root)]
 
-use crate::dom::bindings::root::{Dom, DomRoot};
-use crate::dom::bindings::trace::JSTraceable;
-use crate::dom::document::Document;
-use crate::dom::htmlscriptelement::HTMLScriptElement;
-use crate::dom::node::Node;
-use crate::dom::servoparser::{ParsingAlgorithm, Sink};
+use html5ever::tokenizer::TokenizerResult;
 use js::jsapi::JSTracer;
 use servo_url::ServoUrl;
 use xml5ever::buffer_queue::BufferQueue;
 use xml5ever::tokenizer::XmlTokenizer;
 use xml5ever::tree_builder::{Tracer as XmlTracer, XmlTreeBuilder};
 
+use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::bindings::trace::{CustomTraceable, JSTraceable};
+use crate::dom::document::Document;
+use crate::dom::htmlscriptelement::HTMLScriptElement;
+use crate::dom::node::Node;
+use crate::dom::servoparser::{ParsingAlgorithm, Sink};
+
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct Tokenizer {
     #[ignore_malloc_size_of = "Defined in xml5ever"]
     inner: XmlTokenizer<XmlTreeBuilder<Dom<Node>, Sink>>,
@@ -39,12 +41,12 @@ impl Tokenizer {
         Tokenizer { inner: tok }
     }
 
-    pub fn feed(&mut self, input: &mut BufferQueue) -> Result<(), DomRoot<HTMLScriptElement>> {
+    pub fn feed(&mut self, input: &mut BufferQueue) -> TokenizerResult<DomRoot<HTMLScriptElement>> {
         self.inner.run(input);
-        if let Some(script) = self.inner.sink.sink.script.take() {
-            return Err(script);
+        match self.inner.sink.sink.script.take() {
+            Some(script) => TokenizerResult::Script(script),
+            None => TokenizerResult::Done,
         }
-        Ok(())
     }
 
     pub fn end(&mut self) {
@@ -57,14 +59,14 @@ impl Tokenizer {
 }
 
 #[allow(unsafe_code)]
-unsafe impl JSTraceable for XmlTokenizer<XmlTreeBuilder<Dom<Node>, Sink>> {
+unsafe impl CustomTraceable for XmlTokenizer<XmlTreeBuilder<Dom<Node>, Sink>> {
     unsafe fn trace(&self, trc: *mut JSTracer) {
         struct Tracer(*mut JSTracer);
         let tracer = Tracer(trc);
 
         impl XmlTracer for Tracer {
             type Handle = Dom<Node>;
-            #[allow(unrooted_must_root)]
+            #[allow(crown::unrooted_must_root)]
             fn trace_handle(&self, node: &Dom<Node>) {
                 unsafe {
                     node.trace(self.0);

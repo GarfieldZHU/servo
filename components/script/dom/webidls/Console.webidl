@@ -9,20 +9,24 @@
  ProtoObjectHack]
 namespace console {
   // Logging
-  void log(DOMString... messages);
-  void debug(DOMString... messages);
-  void info(DOMString... messages);
-  void warn(DOMString... messages);
-  void error(DOMString... messages);
-  void assert(boolean condition, optional DOMString message);
-  void clear();
+  undefined log(any... messages);
+  undefined debug(any... messages);
+  undefined info(any... messages);
+  undefined warn(any... messages);
+  undefined error(any... messages);
+  undefined assert(boolean condition, optional any message);
+  undefined clear();
+
+  // Counting
+  undefined count(optional DOMString label = "default");
+  undefined countReset(optional DOMString label = "default");
 
   // Grouping
-  void group(DOMString... data);
-  void groupCollapsed(DOMString... data);
-  void groupEnd();
+  undefined group(any... data);
+  undefined groupCollapsed(any... data);
+  undefined groupEnd();
 
   // Timing
-  void time(DOMString message);
-  void timeEnd(DOMString message);
+  undefined time(DOMString message);
+  undefined timeEnd(DOMString message);
 };

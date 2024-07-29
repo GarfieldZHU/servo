@@ -4,9 +4,11 @@
 
 //! DOM bindings for `CharacterData`.
 
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::CharacterDataBinding::CharacterDataMethods;
-use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeBinding::NodeMethods;
+use crate::dom::bindings::codegen::Bindings::NodeBinding::Node_Binding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::ProcessingInstructionBinding::ProcessingInstructionMethods;
 use crate::dom::bindings::codegen::InheritTypes::{CharacterDataTypeId, NodeTypeId, TextTypeId};
 use crate::dom::bindings::codegen::UnionTypes::NodeOrString;
@@ -23,7 +25,6 @@ use crate::dom::node::{ChildrenMutation, Node, NodeDamage};
 use crate::dom::processinginstruction::ProcessingInstruction;
 use crate::dom::text::Text;
 use crate::dom::virtualmethods::vtable_for;
-use dom_struct::dom_struct;
 
 // https://dom.spec.whatwg.org/#characterdata
 #[dom_struct]
@@ -43,17 +44,17 @@ impl CharacterData {
     pub fn clone_with_data(&self, data: DOMString, document: &Document) -> DomRoot<Node> {
         match self.upcast::<Node>().type_id() {
             NodeTypeId::CharacterData(CharacterDataTypeId::Comment) => {
-                DomRoot::upcast(Comment::new(data, &document))
+                DomRoot::upcast(Comment::new(data, document, None))
             },
             NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction) => {
                 let pi = self.downcast::<ProcessingInstruction>().unwrap();
-                DomRoot::upcast(ProcessingInstruction::new(pi.Target(), data, &document))
+                DomRoot::upcast(ProcessingInstruction::new(pi.Target(), data, document))
             },
             NodeTypeId::CharacterData(CharacterDataTypeId::Text(TextTypeId::CDATASection)) => {
-                DomRoot::upcast(CDATASection::new(data, &document))
+                DomRoot::upcast(CDATASection::new(data, document))
             },
             NodeTypeId::CharacterData(CharacterDataTypeId::Text(TextTypeId::Text)) => {
-                DomRoot::upcast(Text::new(data, &document))
+                DomRoot::upcast(Text::new(data, document))
             },
             _ => unreachable!(),
         }
@@ -128,31 +129,30 @@ impl CharacterDataMethods for CharacterData {
         let data = self.data.borrow();
         // Step 1.
         let mut substring = String::new();
-        let remaining;
-        match split_at_utf16_code_unit_offset(&data, offset, replace_surrogates) {
+        let remaining = match split_at_utf16_code_unit_offset(&data, offset, replace_surrogates) {
             Ok((_, astral, s)) => {
                 // As if we had split the UTF-16 surrogate pair in half
                 // and then transcoded that to UTF-8 lossily,
                 // since our DOMString is currently strict UTF-8.
                 if astral.is_some() {
-                    substring = substring + "\u{FFFD}";
+                    substring += "\u{FFFD}";
                 }
-                remaining = s;
+                s
             },
             // Step 2.
             Err(()) => return Err(Error::IndexSize),
-        }
+        };
         match split_at_utf16_code_unit_offset(remaining, count, replace_surrogates) {
             // Steps 3.
-            Err(()) => substring = substring + remaining,
+            Err(()) => substring += remaining,
             // Steps 4.
             Ok((s, astral, _)) => {
-                substring = substring + s;
+                substring += s;
                 // As if we had split the UTF-16 surrogate pair in half
                 // and then transcoded that to UTF-8 lossily,
                 // since our DOMString is currently strict UTF-8.
                 if astral.is_some() {
-                    substring = substring + "\u{FFFD}";
+                    substring += "\u{FFFD}";
                 }
             },
         };
@@ -162,7 +162,7 @@ impl CharacterDataMethods for CharacterData {
     // https://dom.spec.whatwg.org/#dom-characterdata-appenddatadata
     fn AppendData(&self, data: DOMString) {
         // FIXME(ajeffrey): Efficient append on DOMStrings?
-        self.append_data(&*data);
+        self.append_data(&data);
     }
 
     // https://dom.spec.whatwg.org/#dom-characterdata-insertdataoffset-data

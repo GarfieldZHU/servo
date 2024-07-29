@@ -2,12 +2,72 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
+use std::ops::Index;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{mem, ptr};
+
+use base::id::{
+    BlobId, BroadcastChannelRouterId, MessagePortId, MessagePortRouterId, PipelineId,
+    ServiceWorkerId, ServiceWorkerRegistrationId,
+};
+use content_security_policy::CspList;
+use crossbeam_channel::Sender;
+use devtools_traits::{PageError, ScriptToDevtoolsControlMsg};
+use dom_struct::dom_struct;
+use embedder_traits::EmbedderMsg;
+use ipc_channel::ipc::{self, IpcSender};
+use ipc_channel::router::ROUTER;
+use js::glue::{IsWrapper, UnwrapObjectDynamic};
+use js::jsapi::{
+    Compile1, CurrentGlobalOrNull, GetNonCCWObjectGlobal, HandleObject, Heap,
+    InstantiateGlobalStencil, InstantiateOptions, JSContext, JSObject, JSScript, SetScriptPrivate,
+};
+use js::jsval::{JSVal, PrivateValue, UndefinedValue};
+use js::panic::maybe_resume_unwind;
+use js::rust::wrappers::{JS_ExecuteScript, JS_GetScriptPrivate};
+use js::rust::{
+    get_object_class, transform_str_to_source_text, CompileOptionsWrapper, HandleValue,
+    MutableHandleValue, ParentRuntime, Runtime,
+};
+use js::{JSCLASS_IS_DOMJSCLASS, JSCLASS_IS_GLOBAL};
+use net_traits::blob_url_store::{get_blob_origin, BlobBuf};
+use net_traits::filemanager_thread::{
+    FileManagerResult, FileManagerThreadMsg, ReadFileProgress, RelativePos,
+};
+use net_traits::image_cache::ImageCache;
+use net_traits::request::Referrer;
+use net_traits::response::HttpsState;
+use net_traits::{CoreResourceMsg, CoreResourceThread, IpcSend, ResourceThreads};
+use profile_traits::{ipc as profile_ipc, mem as profile_mem, time as profile_time};
+use script_traits::serializable::{BlobData, BlobImpl, FileBlob};
+use script_traits::transferable::MessagePortImpl;
+use script_traits::{
+    BroadcastMsg, GamepadEvent, GamepadSupportedHapticEffects, GamepadUpdateType, MessagePortMsg,
+    MsDuration, PortMessageTask, ScriptMsg, ScriptToConstellationChan, TimerEvent, TimerEventId,
+    TimerSchedulerMsg, TimerSource,
+};
+use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
+use uuid::Uuid;
+use webgpu::{DeviceLostReason, WebGPUDevice};
+
+use super::bindings::codegen::Bindings::WebGPUBinding::GPUDeviceLostReason;
+use super::bindings::trace::HashMapTracedValues;
 use crate::dom::bindings::cell::{DomRefCell, RefMut};
 use crate::dom::bindings::codegen::Bindings::BroadcastChannelBinding::BroadcastChannelMethods;
-use crate::dom::bindings::codegen::Bindings::EventSourceBinding::EventSourceBinding::EventSourceMethods;
+use crate::dom::bindings::codegen::Bindings::EventSourceBinding::EventSource_Binding::EventSourceMethods;
 use crate::dom::bindings::codegen::Bindings::ImageBitmapBinding::{
     ImageBitmapOptions, ImageBitmapSource,
 };
+use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorMethods;
+use crate::dom::bindings::codegen::Bindings::PerformanceBinding::Performance_Binding::PerformanceMethods;
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionState;
 use crate::dom::bindings::codegen::Bindings::VoidFunctionBinding::VoidFunction;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
@@ -34,6 +94,8 @@ use crate::dom::event::{Event, EventBubbles, EventCancelable, EventStatus};
 use crate::dom::eventsource::EventSource;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::file::File;
+use crate::dom::gamepad::{contains_user_gesture, Gamepad};
+use crate::dom::gamepadevent::GamepadEventType;
 use crate::dom::gpudevice::GPUDevice;
 use crate::dom::htmlscriptelement::{ScriptId, SourceCode};
 use crate::dom::identityhub::Identities;
@@ -52,8 +114,7 @@ use crate::dom::workerglobalscope::WorkerGlobalScope;
 use crate::dom::workletglobalscope::WorkletGlobalScope;
 use crate::microtask::{Microtask, MicrotaskQueue, UserMicrotask};
 use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
-use crate::script_module::{DynamicModuleList, ModuleTree};
-use crate::script_module::{ModuleScript, ScriptFetchOptions};
+use crate::script_module::{DynamicModuleList, ModuleScript, ModuleTree, ScriptFetchOptions};
 use crate::script_runtime::{
     CommonScriptMsg, ContextForRequestInterrupt, JSContext as SafeJSContext, ScriptChan, ScriptPort,
 };
@@ -61,81 +122,27 @@ use crate::script_thread::{MainThreadScriptChan, ScriptThread};
 use crate::task::TaskCanceller;
 use crate::task_source::dom_manipulation::DOMManipulationTaskSource;
 use crate::task_source::file_reading::FileReadingTaskSource;
+use crate::task_source::gamepad::GamepadTaskSource;
 use crate::task_source::networking::NetworkingTaskSource;
 use crate::task_source::performance_timeline::PerformanceTimelineTaskSource;
 use crate::task_source::port_message::PortMessageQueue;
 use crate::task_source::remote_event::RemoteEventTaskSource;
 use crate::task_source::timer::TimerTaskSource;
 use crate::task_source::websocket::WebsocketTaskSource;
-use crate::task_source::TaskSource;
-use crate::task_source::TaskSourceName;
-use crate::timers::{IsInterval, OneshotTimerCallback, OneshotTimerHandle};
-use crate::timers::{OneshotTimers, TimerCallback};
-use content_security_policy::CspList;
-use crossbeam_channel::Sender;
-use devtools_traits::{PageError, ScriptToDevtoolsControlMsg};
-use dom_struct::dom_struct;
-use embedder_traits::EmbedderMsg;
-use ipc_channel::ipc::{self, IpcSender};
-use ipc_channel::router::ROUTER;
-use js::glue::{IsWrapper, UnwrapObjectDynamic};
-use js::jsapi::Compile1;
-use js::jsapi::SetScriptPrivate;
-use js::jsapi::{CurrentGlobalOrNull, GetNonCCWObjectGlobal};
-use js::jsapi::{HandleObject, Heap};
-use js::jsapi::{JSContext, JSObject, JSScript};
-use js::jsval::PrivateValue;
-use js::jsval::{JSVal, UndefinedValue};
-use js::panic::maybe_resume_unwind;
-use js::rust::transform_str_to_source_text;
-use js::rust::wrappers::{JS_ExecuteScript, JS_GetScriptPrivate};
-use js::rust::{get_object_class, CompileOptionsWrapper, ParentRuntime, Runtime};
-use js::rust::{HandleValue, MutableHandleValue};
-use js::{JSCLASS_IS_DOMJSCLASS, JSCLASS_IS_GLOBAL};
-use msg::constellation_msg::{
-    BlobId, BroadcastChannelRouterId, MessagePortId, MessagePortRouterId, PipelineId,
-    ServiceWorkerId, ServiceWorkerRegistrationId,
+use crate::task_source::{TaskSource, TaskSourceName};
+use crate::timers::{
+    IsInterval, OneshotTimerCallback, OneshotTimerHandle, OneshotTimers, TimerCallback,
 };
-use net_traits::blob_url_store::{get_blob_origin, BlobBuf};
-use net_traits::filemanager_thread::{
-    FileManagerResult, FileManagerThreadMsg, ReadFileProgress, RelativePos,
-};
-use net_traits::image_cache::ImageCache;
-use net_traits::request::Referrer;
-use net_traits::response::HttpsState;
-use net_traits::{CoreResourceMsg, CoreResourceThread, IpcSend, ResourceThreads};
-use parking_lot::Mutex;
-use profile_traits::{ipc as profile_ipc, mem as profile_mem, time as profile_time};
-use script_traits::serializable::{BlobData, BlobImpl, FileBlob};
-use script_traits::transferable::MessagePortImpl;
-use script_traits::{
-    BroadcastMsg, MessagePortMsg, MsDuration, PortMessageTask, ScriptMsg,
-    ScriptToConstellationChan, TimerEvent,
-};
-use script_traits::{TimerEventId, TimerSchedulerMsg, TimerSource};
-use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
-use std::borrow::Cow;
-use std::cell::Cell;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
-use std::mem;
-use std::ops::Index;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use time::{get_time, Timespec};
-use uuid::Uuid;
-use webgpu::{identity::WebGPUOpResult, ErrorScopeId, WebGPUDevice};
 
 #[derive(JSTraceable)]
 pub struct AutoCloseWorker {
-    /// https://html.spec.whatwg.org/multipage/#dom-workerglobalscope-closing
+    /// <https://html.spec.whatwg.org/multipage/#dom-workerglobalscope-closing>
     closing: Arc<AtomicBool>,
     /// A handle to join on the worker thread.
     join_handle: Option<JoinHandle<()>>,
     /// A sender of control messages,
     /// currently only used to signal shutdown.
+    #[no_trace]
     control_sender: Sender<DedicatedWorkerControlMsg>,
     /// The context to request an interrupt on the worker thread.
     context: ContextForRequestInterrupt,
@@ -186,47 +193,54 @@ pub struct GlobalScope {
     blob_state: DomRefCell<BlobState>,
 
     /// <https://w3c.github.io/ServiceWorker/#environment-settings-object-service-worker-registration-object-map>
-    registration_map:
-        DomRefCell<HashMap<ServiceWorkerRegistrationId, Dom<ServiceWorkerRegistration>>>,
+    registration_map: DomRefCell<
+        HashMapTracedValues<ServiceWorkerRegistrationId, Dom<ServiceWorkerRegistration>>,
+    >,
 
     /// <https://w3c.github.io/ServiceWorker/#environment-settings-object-service-worker-object-map>
-    worker_map: DomRefCell<HashMap<ServiceWorkerId, Dom<ServiceWorker>>>,
+    worker_map: DomRefCell<HashMapTracedValues<ServiceWorkerId, Dom<ServiceWorker>>>,
 
     /// Pipeline id associated with this global.
+    #[no_trace]
     pipeline_id: PipelineId,
 
     /// A flag to indicate whether the developer tools has requested
     /// live updates from the worker.
     devtools_wants_updates: Cell<bool>,
 
-    /// Timers used by the Console API.
-    console_timers: DomRefCell<HashMap<DOMString, u64>>,
+    /// Timers (milliseconds) used by the Console API.
+    console_timers: DomRefCell<HashMap<DOMString, Instant>>,
 
     /// module map is used when importing JavaScript modules
-    /// https://html.spec.whatwg.org/multipage/#concept-settings-object-module-map
+    /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-module-map>
     #[ignore_malloc_size_of = "mozjs"]
-    module_map: DomRefCell<HashMap<ServoUrl, Rc<ModuleTree>>>,
+    module_map: DomRefCell<HashMapTracedValues<ServoUrl, Rc<ModuleTree>>>,
 
     #[ignore_malloc_size_of = "mozjs"]
     inline_module_map: DomRefCell<HashMap<ScriptId, Rc<ModuleTree>>>,
 
     /// For providing instructions to an optional devtools server.
     #[ignore_malloc_size_of = "channels are hard"]
+    #[no_trace]
     devtools_chan: Option<IpcSender<ScriptToDevtoolsControlMsg>>,
 
     /// For sending messages to the memory profiler.
     #[ignore_malloc_size_of = "channels are hard"]
+    #[no_trace]
     mem_profiler_chan: profile_mem::ProfilerChan,
 
     /// For sending messages to the time profiler.
     #[ignore_malloc_size_of = "channels are hard"]
+    #[no_trace]
     time_profiler_chan: profile_time::ProfilerChan,
 
     /// A handle for communicating messages to the constellation thread.
     #[ignore_malloc_size_of = "channels are hard"]
+    #[no_trace]
     script_to_constellation_chan: ScriptToConstellationChan,
 
     #[ignore_malloc_size_of = "channels are hard"]
+    #[no_trace]
     scheduler_chan: IpcSender<TimerSchedulerMsg>,
 
     /// <https://html.spec.whatwg.org/multipage/#in-error-reporting-mode>
@@ -234,6 +248,7 @@ pub struct GlobalScope {
 
     /// Associated resource threads for use by DOM objects like XMLHttpRequest,
     /// including resource_thread, filemanager_thread and storage_thread
+    #[no_trace]
     resource_threads: ResourceThreads,
 
     /// The mechanism by which time-outs and intervals are scheduled.
@@ -244,9 +259,11 @@ pub struct GlobalScope {
     init_timers: Cell<bool>,
 
     /// The origin of the globalscope
+    #[no_trace]
     origin: MutableOrigin,
 
-    /// https://html.spec.whatwg.org/multipage/#concept-environment-creation-url
+    /// <https://html.spec.whatwg.org/multipage/#concept-environment-creation-url>
+    #[no_trace]
     creation_url: Option<ServoUrl>,
 
     /// A map for storing the previous permission state read results.
@@ -277,6 +294,9 @@ pub struct GlobalScope {
     ///
     /// <https://html.spec.whatwg.org/multipage/#about-to-be-notified-rejected-promises-list>
     #[ignore_malloc_size_of = "mozjs"]
+    // `Heap` values must stay boxed, as they need semantics like `Pin`
+    // (that is, they cannot be moved).
+    #[allow(clippy::vec_box)]
     uncaught_rejections: DomRefCell<Vec<Box<Heap<*mut JSObject>>>>,
 
     /// Promises in this list have previously been reported as rejected
@@ -285,6 +305,9 @@ pub struct GlobalScope {
     ///
     /// <https://html.spec.whatwg.org/multipage/#outstanding-rejected-promises-weak-set>
     #[ignore_malloc_size_of = "mozjs"]
+    // `Heap` values must stay boxed, as they need semantics like `Pin`
+    // (that is, they cannot be moved).
+    #[allow(clippy::vec_box)]
     consumed_rejections: DomRefCell<Vec<Box<Heap<*mut JSObject>>>>,
 
     /// True if headless mode.
@@ -295,20 +318,27 @@ pub struct GlobalScope {
 
     /// Identity Manager for WebGPU resources
     #[ignore_malloc_size_of = "defined in wgpu"]
-    gpu_id_hub: Arc<Mutex<Identities>>,
+    #[no_trace]
+    gpu_id_hub: Arc<Identities>,
 
     /// WebGPU devices
-    gpu_devices: DomRefCell<HashMap<WebGPUDevice, Dom<GPUDevice>>>,
+    gpu_devices: DomRefCell<HashMapTracedValues<WebGPUDevice, WeakRef<GPUDevice>>>,
 
     // https://w3c.github.io/performance-timeline/#supportedentrytypes-attribute
     #[ignore_malloc_size_of = "mozjs"]
     frozen_supported_performance_entry_types: DomRefCell<Option<Heap<JSVal>>>,
 
     /// currect https state (from previous request)
+    #[no_trace]
     https_state: Cell<HttpsState>,
 
     /// The stack of active group labels for the Console APIs.
     console_group_stack: DomRefCell<Vec<DOMString>>,
+
+    /// The count map for the Console APIs.
+    ///
+    /// <https://console.spec.whatwg.org/#count>
+    console_count_map: DomRefCell<HashMap<DOMString, usize>>,
 
     /// List of ongoing dynamic module imports.
     dynamic_modules: DomRefCell<DynamicModuleList>,
@@ -378,6 +408,7 @@ pub struct BlobInfo {
     /// The weak ref to the corresponding DOM object.
     tracker: BlobTracker,
     /// The data and logic backing the DOM object.
+    #[no_trace]
     blob_impl: BlobImpl,
     /// Whether this blob has an outstanding URL,
     /// <https://w3c.github.io/FileAPI/#url>.
@@ -388,7 +419,7 @@ pub struct BlobInfo {
 #[derive(JSTraceable, MallocSizeOf)]
 pub enum BlobState {
     /// A map of managed blobs.
-    Managed(HashMap<BlobId, BlobInfo>),
+    Managed(HashMapTracedValues<BlobId, BlobInfo>),
     /// This global is not managing any blobs at this time.
     UnManaged,
 }
@@ -403,7 +434,7 @@ enum BlobResult {
 
 /// Data representing a message-port managed by this global.
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct ManagedMessagePort {
     /// The DOM port.
     dom_port: Dom<MessagePort>,
@@ -411,6 +442,7 @@ pub struct ManagedMessagePort {
     /// The option is needed to take out the port-impl
     /// as part of its transferring steps,
     /// without having to worry about rooting the dom-port.
+    #[no_trace]
     port_impl: Option<MessagePortImpl>,
     /// We keep ports pending when they are first transfer-received,
     /// and only add them, and ask the constellation to complete the transfer,
@@ -422,14 +454,14 @@ pub struct ManagedMessagePort {
 
 /// State representing whether this global is currently managing broadcast channels.
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub enum BroadcastChannelState {
     /// The broadcast-channel router id for this global, and a queue of managed channels.
     /// Step 9, "sort destinations"
-    /// of https://html.spec.whatwg.org/multipage/#dom-broadcastchannel-postmessage
+    /// of <https://html.spec.whatwg.org/multipage/#dom-broadcastchannel-postmessage>
     /// requires keeping track of creation order, hence the queue.
     Managed(
-        BroadcastChannelRouterId,
+        #[no_trace] BroadcastChannelRouterId,
         /// The map of channel-name to queue of channels, in order of creation.
         HashMap<DOMString, VecDeque<Dom<BroadcastChannel>>>,
     ),
@@ -439,12 +471,12 @@ pub enum BroadcastChannelState {
 
 /// State representing whether this global is currently managing messageports.
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub enum MessagePortState {
     /// The message-port router id for this global, and a map of managed ports.
     Managed(
-        MessagePortRouterId,
-        HashMap<MessagePortId, ManagedMessagePort>,
+        #[no_trace] MessagePortRouterId,
+        HashMapTracedValues<MessagePortId, ManagedMessagePort>,
     ),
     /// This global is not managing any ports at this time.
     UnManaged,
@@ -530,7 +562,7 @@ impl MessageListener {
 
                         for (id, buffer) in ports.into_iter() {
                             if global.is_managing_port(&id) {
-                                succeeded.push(id.clone());
+                                succeeded.push(id);
                                 global.complete_port_transfer(id, buffer);
                             } else {
                                 failed.insert(id, buffer);
@@ -604,7 +636,7 @@ impl FileListener {
 
                         let task = task!(enqueue_stream_chunk: move || {
                             let stream = trusted.root();
-                            stream_handle_incoming(&*stream, Ok(blob_buf.bytes));
+                            stream_handle_incoming(&stream, Ok(blob_buf.bytes));
                         });
 
                         let _ = self
@@ -628,7 +660,7 @@ impl FileListener {
 
                         let task = task!(enqueue_stream_chunk: move || {
                             let stream = trusted.root();
-                            stream_handle_incoming(&*stream, Ok(bytes_in));
+                            stream_handle_incoming(&stream, Ok(bytes_in));
                         });
 
                         let _ = self
@@ -666,7 +698,7 @@ impl FileListener {
 
                         let task = task!(enqueue_stream_chunk: move || {
                             let stream = trusted.root();
-                            stream_handle_eof(&*stream);
+                            stream_handle_eof(&stream);
                         });
 
                         let _ = self
@@ -702,7 +734,7 @@ impl FileListener {
                             let _ = self.task_source.queue_with_canceller(
                                 task!(error_stream: move || {
                                     let stream = trusted_stream.root();
-                                    stream_handle_incoming(&*stream, error);
+                                    stream_handle_incoming(&stream, error);
                                 }),
                                 &self.task_canceller,
                             );
@@ -716,6 +748,7 @@ impl FileListener {
 }
 
 impl GlobalScope {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_inherited(
         pipeline_id: PipelineId,
         devtools_chan: Option<IpcSender<ScriptToDevtoolsControlMsg>>,
@@ -729,7 +762,7 @@ impl GlobalScope {
         microtask_queue: Rc<MicrotaskQueue>,
         is_headless: bool,
         user_agent: Cow<'static, str>,
-        gpu_id_hub: Arc<Mutex<Identities>>,
+        gpu_id_hub: Arc<Identities>,
         inherited_secure_context: Option<bool>,
     ) -> Self {
         Self {
@@ -738,8 +771,8 @@ impl GlobalScope {
             blob_state: DomRefCell::new(BlobState::UnManaged),
             eventtarget: EventTarget::new_inherited(),
             crypto: Default::default(),
-            registration_map: DomRefCell::new(HashMap::new()),
-            worker_map: DomRefCell::new(HashMap::new()),
+            registration_map: DomRefCell::new(HashMapTracedValues::new()),
+            worker_map: DomRefCell::new(HashMapTracedValues::new()),
             pipeline_id,
             devtools_wants_updates: Default::default(),
             console_timers: DomRefCell::new(Default::default()),
@@ -765,10 +798,11 @@ impl GlobalScope {
             is_headless,
             user_agent,
             gpu_id_hub,
-            gpu_devices: DomRefCell::new(HashMap::new()),
+            gpu_devices: DomRefCell::new(HashMapTracedValues::new()),
             frozen_supported_performance_entry_types: DomRefCell::new(Default::default()),
             https_state: Cell::new(HttpsState::None),
             console_group_stack: DomRefCell::new(Vec::new()),
+            console_count_map: Default::default(),
             dynamic_modules: DomRefCell::new(DynamicModuleList::new()),
             inherited_secure_context,
         }
@@ -777,7 +811,7 @@ impl GlobalScope {
     /// The message-port router Id of the global, if any
     fn port_router_id(&self) -> Option<MessagePortRouterId> {
         if let MessagePortState::Managed(id, _message_ports) = &*self.message_port_state.borrow() {
-            Some(id.clone())
+            Some(*id)
         } else {
             None
         }
@@ -804,7 +838,7 @@ impl GlobalScope {
         self.timers.setup_scheduling(timer_ipc_chan);
 
         // Setup route from IPC to task-queue for the timer-task-source.
-        let context = Trusted::new(&*self);
+        let context = Trusted::new(self);
         let (task_source, canceller) = (
             self.timer_task_source(),
             self.task_canceller(TaskSourceName::Timer),
@@ -842,13 +876,12 @@ impl GlobalScope {
         }
 
         // Step 2.1 -> 2.5
-        let new_registration =
-            ServiceWorkerRegistration::new(self, scope.clone(), registration_id.clone());
+        let new_registration = ServiceWorkerRegistration::new(self, scope.clone(), registration_id);
 
         // Step 2.6
         if let Some(worker_id) = installing_worker {
             let worker = self.get_serviceworker(script_url, scope, worker_id);
-            new_registration.set_installing(&*worker);
+            new_registration.set_installing(&worker);
         }
 
         // TODO: 2.7 (waiting worker)
@@ -878,8 +911,7 @@ impl GlobalScope {
         } else {
             // Step 2.1
             // TODO: step 2.2, worker state.
-            let new_worker =
-                ServiceWorker::new(self, script_url.clone(), scope.clone(), worker_id.clone());
+            let new_worker = ServiceWorker::new(self, script_url.clone(), scope.clone(), worker_id);
 
             // Step 2.3
             workers.insert(worker_id, Dom::from_ref(&*new_worker));
@@ -937,7 +969,7 @@ impl GlobalScope {
         self.list_auto_close_worker
             .borrow_mut()
             .drain(0..)
-            .for_each(|worker| drop(worker));
+            .for_each(drop);
     }
 
     /// Update our state to un-managed,
@@ -948,7 +980,7 @@ impl GlobalScope {
         {
             let _ = self
                 .script_to_constellation_chan()
-                .send(ScriptMsg::RemoveMessagePortRouter(router_id.clone()));
+                .send(ScriptMsg::RemoveMessagePortRouter(*router_id));
         }
         *self.message_port_state.borrow_mut() = MessagePortState::UnManaged;
     }
@@ -962,7 +994,7 @@ impl GlobalScope {
             let _ =
                 self.script_to_constellation_chan()
                     .send(ScriptMsg::RemoveBroadcastChannelRouter(
-                        router_id.clone(),
+                        *router_id,
                         self.origin().immutable().clone(),
                     ));
         }
@@ -975,14 +1007,14 @@ impl GlobalScope {
             &mut *self.message_port_state.borrow_mut()
         {
             for (port_id, entangled_id) in &[(port1, port2), (port2, port1)] {
-                match message_ports.get_mut(&port_id) {
+                match message_ports.get_mut(port_id) {
                     None => {
                         return warn!("entangled_ports called on a global not managing the port.");
                     },
                     Some(managed_port) => {
                         if let Some(port_impl) = managed_port.port_impl.as_mut() {
-                            managed_port.dom_port.entangle(entangled_id.clone());
-                            port_impl.entangle(entangled_id.clone());
+                            managed_port.dom_port.entangle(*entangled_id);
+                            port_impl.entangle(*entangled_id);
                         } else {
                             panic!("managed-port has no port-impl.");
                         }
@@ -1016,7 +1048,7 @@ impl GlobalScope {
             &mut *self.message_port_state.borrow_mut()
         {
             let mut port_impl = message_ports
-                .remove(&port_id)
+                .remove(port_id)
                 .map(|ref mut managed_port| {
                     managed_port
                         .port_impl
@@ -1027,7 +1059,7 @@ impl GlobalScope {
             port_impl.set_has_been_shipped();
             let _ = self
                 .script_to_constellation_chan()
-                .send(ScriptMsg::MessagePortShipped(port_id.clone()));
+                .send(ScriptMsg::MessagePortShipped(*port_id));
             port_impl
         } else {
             panic!("mark_port_as_transferred called on a global not managing any ports.");
@@ -1039,7 +1071,7 @@ impl GlobalScope {
         if let MessagePortState::Managed(_id, message_ports) =
             &mut *self.message_port_state.borrow_mut()
         {
-            let message_buffer = match message_ports.get_mut(&port_id) {
+            let message_buffer = match message_ports.get_mut(port_id) {
                 None => panic!("start_message_port called on a unknown port."),
                 Some(managed_port) => {
                     if let Some(port_impl) = managed_port.port_impl.as_mut() {
@@ -1051,19 +1083,19 @@ impl GlobalScope {
             };
             if let Some(message_buffer) = message_buffer {
                 for task in message_buffer {
-                    let port_id = port_id.clone();
-                    let this = Trusted::new(&*self);
+                    let port_id = *port_id;
+                    let this = Trusted::new(self);
                     let _ = self.port_message_queue().queue(
                         task!(process_pending_port_messages: move || {
                             let target_global = this.root();
                             target_global.route_task_to_port(port_id, task);
                         }),
-                        &self,
+                        self,
                     );
                 }
             }
         } else {
-            return warn!("start_message_port called on a global not managing any ports.");
+            warn!("start_message_port called on a global not managing any ports.")
         }
     }
 
@@ -1072,7 +1104,7 @@ impl GlobalScope {
         if let MessagePortState::Managed(_id, message_ports) =
             &mut *self.message_port_state.borrow_mut()
         {
-            match message_ports.get_mut(&port_id) {
+            match message_ports.get_mut(port_id) {
                 None => panic!("close_message_port called on an unknown port."),
                 Some(managed_port) => {
                     if let Some(port_impl) = managed_port.port_impl.as_mut() {
@@ -1084,7 +1116,7 @@ impl GlobalScope {
                 },
             };
         } else {
-            return warn!("close_message_port called on a global not managing any ports.");
+            warn!("close_message_port called on a global not managing any ports.")
         }
     }
 
@@ -1106,7 +1138,7 @@ impl GlobalScope {
             };
             if let Some(entangled_id) = entangled_port {
                 // Step 7
-                let this = Trusted::new(&*self);
+                let this = Trusted::new(self);
                 let _ = self.port_message_queue().queue(
                     task!(post_message: move || {
                         let global = this.root();
@@ -1118,7 +1150,7 @@ impl GlobalScope {
                 );
             }
         } else {
-            return warn!("post_messageport_msg called on a global not managing any ports.");
+            warn!("post_messageport_msg called on a global not managing any ports.");
         }
     }
 
@@ -1145,7 +1177,7 @@ impl GlobalScope {
             // we could skip the hop to the constellation.
             let _ = self
                 .script_to_constellation_chan()
-                .send(ScriptMsg::ScheduleBroadcast(router_id.clone(), msg));
+                .send(ScriptMsg::ScheduleBroadcast(*router_id, msg));
         } else {
             panic!("Attemps to broadcast a message via global not managing any channels.");
         }
@@ -1184,7 +1216,7 @@ impl GlobalScope {
             if let Some(channels) = channels.get(&channel_name) {
                 channels
                     .iter()
-                    .filter(|ref channel| {
+                    .filter(|channel| {
                         // Step 8.
                         // Filter out the sender.
                         if let Some(id) = channel_id {
@@ -1203,7 +1235,7 @@ impl GlobalScope {
                         // Step 10: Queue a task on the DOM manipulation task-source,
                         // to fire the message event
                         let channel = Trusted::new(&*channel);
-                        let global = Trusted::new(&*self);
+                        let global = Trusted::new(self);
                         let _ = self.dom_manipulation_task_source().queue(
                             task!(process_pending_port_messages: move || {
                                 let destination = channel.root();
@@ -1214,13 +1246,13 @@ impl GlobalScope {
                                     return;
                                 }
 
-                                rooted!(in(*global.get_cx()) let mut message = UndefinedValue());
+                                rooted!(in(*GlobalScope::get_cx()) let mut message = UndefinedValue());
 
                                 // Step 10.3 StructuredDeserialize(serialized, targetRealm).
                                 if let Ok(ports) = structuredclone::read(&global, data, message.handle_mut()) {
                                     // Step 10.4, Fire an event named message at destination.
                                     MessageEvent::dispatch_jsval(
-                                        &*destination.upcast(),
+                                        destination.upcast(),
                                         &global,
                                         message.handle(),
                                         Some(&origin.ascii_serialization()),
@@ -1229,10 +1261,10 @@ impl GlobalScope {
                                     );
                                 } else {
                                     // Step 10.3, fire an event named messageerror at destination.
-                                    MessageEvent::dispatch_error(&*destination.upcast(), &global);
+                                    MessageEvent::dispatch_error(destination.upcast(), &global);
                                 }
                             }),
-                            &self,
+                            self,
                         );
                     });
             }
@@ -1254,8 +1286,8 @@ impl GlobalScope {
                     // If the port is not enabled yet, or if is awaiting the completion of it's transfer,
                     // the task will be buffered and dispatched upon enablement or completion of the transfer.
                     if let Some(port_impl) = managed_port.port_impl.as_mut() {
-                        port_impl.handle_incoming(task).and_then(|to_dispatch| {
-                            Some((DomRoot::from_ref(&*managed_port.dom_port), to_dispatch))
+                        port_impl.handle_incoming(task).map(|to_dispatch| {
+                            (DomRoot::from_ref(&*managed_port.dom_port), to_dispatch)
                         })
                     } else {
                         panic!("managed-port has no port-impl.");
@@ -1268,12 +1300,12 @@ impl GlobalScope {
         };
         if let Some((dom_port, PortMessageTask { origin, data })) = should_dispatch {
             // Substep 3-4
-            rooted!(in(*self.get_cx()) let mut message_clone = UndefinedValue());
+            rooted!(in(*GlobalScope::get_cx()) let mut message_clone = UndefinedValue());
             if let Ok(ports) = structuredclone::read(self, data, message_clone.handle_mut()) {
                 // Substep 6
                 // Dispatch the event, using the dom message-port.
                 MessageEvent::dispatch_jsval(
-                    &dom_port.upcast(),
+                    dom_port.upcast(),
                     self,
                     message_clone.handle(),
                     Some(&origin.ascii_serialization()),
@@ -1282,7 +1314,7 @@ impl GlobalScope {
                 );
             } else {
                 // Step 4, fire messageerror event.
-                MessageEvent::dispatch_error(&dom_port.upcast(), self);
+                MessageEvent::dispatch_error(dom_port.upcast(), self);
             }
         }
     }
@@ -1297,7 +1329,7 @@ impl GlobalScope {
                 .iter()
                 .filter_map(|(id, managed_port)| {
                     if managed_port.pending {
-                        Some(id.clone())
+                        Some(*id)
                     } else {
                         None
                     }
@@ -1305,7 +1337,7 @@ impl GlobalScope {
                 .collect();
             for id in to_be_added.iter() {
                 let managed_port = message_ports
-                    .get_mut(&id)
+                    .get_mut(id)
                     .expect("Collected port-id to match an entry");
                 if !managed_port.pending {
                     panic!("Only pending ports should be found in to_be_added")
@@ -1315,7 +1347,7 @@ impl GlobalScope {
             let _ =
                 self.script_to_constellation_chan()
                     .send(ScriptMsg::CompleteMessagePortTransfer(
-                        router_id.clone(),
+                        *router_id,
                         to_be_added,
                     ));
         } else {
@@ -1323,21 +1355,21 @@ impl GlobalScope {
         }
     }
 
-    /// https://html.spec.whatwg.org/multipage/#ports-and-garbage-collection
+    /// <https://html.spec.whatwg.org/multipage/#ports-and-garbage-collection>
     pub fn perform_a_message_port_garbage_collection_checkpoint(&self) {
         let is_empty = if let MessagePortState::Managed(_id, message_ports) =
             &mut *self.message_port_state.borrow_mut()
         {
             let to_be_removed: Vec<MessagePortId> = message_ports
                 .iter()
-                .filter_map(|(id, ref managed_port)| {
+                .filter_map(|(id, managed_port)| {
                     if managed_port.closed {
                         // Let the constellation know to drop this port and the one it is entangled with,
                         // and to forward this message to the script-process where the entangled is found.
                         let _ = self
                             .script_to_constellation_chan()
-                            .send(ScriptMsg::RemoveMessagePort(id.clone()));
-                        Some(id.clone())
+                            .send(ScriptMsg::RemoveMessagePort(*id));
+                        Some(*id)
                     } else {
                         None
                     }
@@ -1357,17 +1389,17 @@ impl GlobalScope {
 
     /// Remove broadcast-channels that are closed.
     /// TODO: Also remove them if they do not have an event-listener.
-    /// see https://github.com/servo/servo/issues/25772
+    /// see <https://github.com/servo/servo/issues/25772>
     pub fn perform_a_broadcast_channel_garbage_collection_checkpoint(&self) {
         let is_empty = if let BroadcastChannelState::Managed(router_id, ref mut channels) =
             &mut *self.broadcast_channel_state.borrow_mut()
         {
             channels.retain(|name, ref mut channels| {
-                channels.retain(|ref chan| !chan.closed());
+                channels.retain(|chan| !chan.closed());
                 if channels.is_empty() {
                     let _ = self.script_to_constellation_chan().send(
                         ScriptMsg::RemoveBroadcastChannelNameInRouter(
-                            router_id.clone(),
+                            *router_id,
                             name.to_string(),
                             self.origin().immutable().clone(),
                         ),
@@ -1415,7 +1447,7 @@ impl GlobalScope {
                 }),
             );
             let router_id = BroadcastChannelRouterId::new();
-            *current_state = BroadcastChannelState::Managed(router_id.clone(), HashMap::new());
+            *current_state = BroadcastChannelState::Managed(router_id, HashMap::new());
             let _ = self
                 .script_to_constellation_chan()
                 .send(ScriptMsg::NewBroadcastChannelRouter(
@@ -1429,7 +1461,7 @@ impl GlobalScope {
             let entry = channels.entry(dom_channel.Name()).or_insert_with(|| {
                 let _ = self.script_to_constellation_chan().send(
                     ScriptMsg::NewBroadcastChannelNameInRouter(
-                        router_id.clone(),
+                        *router_id,
                         dom_channel.Name().to_string(),
                         self.origin().immutable().clone(),
                     ),
@@ -1471,7 +1503,7 @@ impl GlobalScope {
                 }),
             );
             let router_id = MessagePortRouterId::new();
-            *current_state = MessagePortState::Managed(router_id.clone(), HashMap::new());
+            *current_state = MessagePortState::Managed(router_id, HashMapTracedValues::new());
             let _ = self
                 .script_to_constellation_chan()
                 .send(ScriptMsg::NewMessagePortRouter(
@@ -1486,7 +1518,7 @@ impl GlobalScope {
                 // and only ask the constellation to complete the transfer
                 // if they're not re-shipped in the current task.
                 message_ports.insert(
-                    dom_port.message_port_id().clone(),
+                    *dom_port.message_port_id(),
                     ManagedMessagePort {
                         port_impl: Some(port_impl),
                         dom_port: Dom::from_ref(dom_port),
@@ -1497,19 +1529,19 @@ impl GlobalScope {
 
                 // Queue a task to complete the transfer,
                 // unless the port is re-transferred in the current task.
-                let this = Trusted::new(&*self);
+                let this = Trusted::new(self);
                 let _ = self.port_message_queue().queue(
                     task!(process_pending_port_messages: move || {
                         let target_global = this.root();
                         target_global.maybe_add_pending_ports();
                     }),
-                    &self,
+                    self,
                 );
             } else {
                 // If this is a newly-created port, let the constellation immediately know.
-                let port_impl = MessagePortImpl::new(dom_port.message_port_id().clone());
+                let port_impl = MessagePortImpl::new(*dom_port.message_port_id());
                 message_ports.insert(
-                    dom_port.message_port_id().clone(),
+                    *dom_port.message_port_id(),
                     ManagedMessagePort {
                         port_impl: Some(port_impl),
                         dom_port: Dom::from_ref(dom_port),
@@ -1520,8 +1552,8 @@ impl GlobalScope {
                 let _ = self
                     .script_to_constellation_chan()
                     .send(ScriptMsg::NewMessagePort(
-                        router_id.clone(),
-                        dom_port.message_port_id().clone(),
+                        *router_id,
+                        *dom_port.message_port_id(),
                     ));
             };
         } else {
@@ -1550,7 +1582,7 @@ impl GlobalScope {
 
         match &mut *blob_state {
             BlobState::UnManaged => {
-                let mut blobs_map = HashMap::new();
+                let mut blobs_map = HashMapTracedValues::new();
                 blobs_map.insert(blob_id, blob_info);
                 *blob_state = BlobState::Managed(blobs_map);
             },
@@ -1592,7 +1624,7 @@ impl GlobalScope {
     fn perform_a_blob_garbage_collection_checkpoint(&self) {
         let mut blob_state = self.blob_state.borrow_mut();
         if let BlobState::Managed(blobs_map) = &mut *blob_state {
-            blobs_map.retain(|_id, blob_info| {
+            blobs_map.0.retain(|_id, blob_info| {
                 let garbage_collected = match &blob_info.tracker {
                     BlobTracker::File(weak) => weak.root().is_none(),
                     BlobTracker::Blob(weak) => weak.root().is_none(),
@@ -1646,9 +1678,7 @@ impl GlobalScope {
                     .get(blob_id)
                     .expect("get_blob_bytes for an unknown blob.");
                 match blob_info.blob_impl.blob_data() {
-                    BlobData::Sliced(ref parent, ref rel_pos) => {
-                        Some((parent.clone(), rel_pos.clone()))
-                    },
+                    BlobData::Sliced(ref parent, ref rel_pos) => Some((*parent, rel_pos.clone())),
                     _ => None,
                 }
             } else {
@@ -1711,9 +1741,7 @@ impl GlobalScope {
                     .get(blob_id)
                     .expect("get_blob_bytes_or_file_id for an unknown blob.");
                 match blob_info.blob_impl.blob_data() {
-                    BlobData::Sliced(ref parent, ref rel_pos) => {
-                        Some((parent.clone(), rel_pos.clone()))
-                    },
+                    BlobData::Sliced(ref parent, ref rel_pos) => Some((*parent, rel_pos.clone())),
                     _ => None,
                 }
             } else {
@@ -1774,7 +1802,7 @@ impl GlobalScope {
         }
     }
 
-    /// https://w3c.github.io/FileAPI/#dfn-size
+    /// <https://w3c.github.io/FileAPI/#dfn-size>
     pub fn get_blob_size(&self, blob_id: &BlobId) -> u64 {
         let blob_state = self.blob_state.borrow();
         if let BlobState::Managed(blobs_map) = &*blob_state {
@@ -1783,9 +1811,7 @@ impl GlobalScope {
                     .get(blob_id)
                     .expect("get_blob_size called for a unknown blob.");
                 match blob_info.blob_impl.blob_data() {
-                    BlobData::Sliced(ref parent, ref rel_pos) => {
-                        Some((parent.clone(), rel_pos.clone()))
-                    },
+                    BlobData::Sliced(ref parent, ref rel_pos) => Some((*parent, rel_pos.clone())),
                     _ => None,
                 }
             };
@@ -1829,21 +1855,22 @@ impl GlobalScope {
                 blob_info.has_url = true;
 
                 match blob_info.blob_impl.blob_data() {
-                    BlobData::Sliced(ref parent, ref rel_pos) => {
-                        Some((parent.clone(), rel_pos.clone()))
-                    },
+                    BlobData::Sliced(ref parent, ref rel_pos) => Some((*parent, rel_pos.clone())),
                     _ => None,
                 }
             };
             match parent {
                 Some((parent_id, rel_pos)) => {
-                    let parent_file_id = {
-                        let parent_info = blobs_map
-                            .get_mut(&parent_id)
-                            .expect("Parent of blob whose url is requested is unknown.");
-                        self.promote(parent_info, /* set_valid is */ false)
+                    let parent_info = blobs_map
+                        .get_mut(&parent_id)
+                        .expect("Parent of blob whose url is requested is unknown.");
+                    let parent_file_id = self.promote(parent_info, /* set_valid is */ false);
+                    let parent_size = match parent_info.blob_impl.blob_data() {
+                        BlobData::File(ref f) => f.get_size(),
+                        BlobData::Memory(ref v) => v.len() as u64,
+                        BlobData::Sliced(_, _) => panic!("Blob ancestry should be only one level."),
                     };
-                    let parent_size = self.get_blob_size(&parent_id);
+                    let parent_size = rel_pos.to_abs_range(parent_size as usize).len() as u64;
                     let blob_info = blobs_map
                         .get_mut(blob_id)
                         .expect("Blob whose url is requested is unknown.");
@@ -1873,7 +1900,7 @@ impl GlobalScope {
 
         let (tx, rx) = profile_ipc::channel(self.time_profiler_chan().clone()).unwrap();
         let msg = FileManagerThreadMsg::AddSlicedURLEntry(
-            parent_file_id.clone(),
+            *parent_file_id,
             rel_pos.clone(),
             tx,
             origin.clone(),
@@ -1882,7 +1909,7 @@ impl GlobalScope {
         match rx.recv().expect("File manager thread is down.") {
             Ok(new_id) => {
                 *blob_info.blob_impl.blob_data_mut() = BlobData::File(FileBlob::new(
-                    new_id.clone(),
+                    new_id,
                     None,
                     None,
                     rel_pos.to_abs_range(parent_len as usize).len() as u64,
@@ -1946,7 +1973,7 @@ impl GlobalScope {
         self.send_to_file_manager(msg);
 
         *blob_info.blob_impl.blob_data_mut() = BlobData::File(FileBlob::new(
-            id.clone(),
+            id,
             None,
             Some(bytes.to_vec()),
             bytes.len() as u64,
@@ -1978,7 +2005,7 @@ impl GlobalScope {
 
         let stream = ReadableStream::new_with_external_underlying_source(
             self,
-            ExternalUnderlyingSource::Blob(size as usize),
+            ExternalUnderlyingSource::Blob(size),
         );
 
         let recv = self.send_msg(file_id);
@@ -2089,7 +2116,7 @@ impl GlobalScope {
             .push(AutoCloseWorker {
                 closing,
                 join_handle: Some(join_handle),
-                control_sender: control_sender,
+                control_sender,
                 context,
             });
     }
@@ -2116,7 +2143,7 @@ impl GlobalScope {
     /// Returns the global scope of the realm that the given DOM object's reflector
     /// was created in.
     #[allow(unsafe_code)]
-    pub fn from_reflector<T: DomObject>(reflector: &T) -> DomRoot<Self> {
+    pub fn from_reflector<T: DomObject>(reflector: &T, _realm: &AlreadyInRealm) -> DomRoot<Self> {
         unsafe { GlobalScope::from_object(*reflector.reflector().get_jsobject()) }
     }
 
@@ -2150,7 +2177,7 @@ impl GlobalScope {
         cx: *mut JSContext,
     ) -> DomRoot<Self> {
         if IsWrapper(obj) {
-            obj = UnwrapObjectDynamic(obj, cx, /* stopAtWindowProxy = */ 0);
+            obj = UnwrapObjectDynamic(obj, cx, /* stopAtWindowProxy = */ false);
             assert!(!obj.is_null());
         }
         GlobalScope::from_object(obj)
@@ -2173,6 +2200,9 @@ impl GlobalScope {
         }
     }
 
+    // `Heap` values must stay boxed, as they need semantics like `Pin`
+    // (that is, they cannot be moved).
+    #[allow(clippy::vec_box)]
     pub fn get_uncaught_rejections(&self) -> &DomRefCell<Vec<Box<Heap<*mut JSObject>>>> {
         &self.uncaught_rejections
     }
@@ -2194,6 +2224,9 @@ impl GlobalScope {
         }
     }
 
+    // `Heap` values must stay boxed, as they need semantics like `Pin`
+    // (that is, they cannot be moved).
+    #[allow(clippy::vec_box)]
     pub fn get_consumed_rejections(&self) -> &DomRefCell<Vec<Box<Heap<*mut JSObject>>>> {
         &self.consumed_rejections
     }
@@ -2202,7 +2235,7 @@ impl GlobalScope {
         self.module_map.borrow_mut().insert(url, Rc::new(module));
     }
 
-    pub fn get_module_map(&self) -> &DomRefCell<HashMap<ServoUrl, Rc<ModuleTree>>> {
+    pub fn get_module_map(&self) -> &DomRefCell<HashMapTracedValues<ServoUrl, Rc<ModuleTree>>> {
         &self.module_map
     }
 
@@ -2217,7 +2250,7 @@ impl GlobalScope {
     }
 
     #[allow(unsafe_code)]
-    pub fn get_cx(&self) -> SafeJSContext {
+    pub fn get_cx() -> SafeJSContext {
         unsafe { SafeJSContext::from_ptr(Runtime::get()) }
     }
 
@@ -2240,7 +2273,7 @@ impl GlobalScope {
         }
         match timers.entry(label) {
             Entry::Vacant(entry) => {
-                entry.insert(timestamp_in_ms(get_time()));
+                entry.insert(Instant::now());
                 Ok(())
             },
             Entry::Occupied(_) => Err(()),
@@ -2252,7 +2285,7 @@ impl GlobalScope {
             .borrow_mut()
             .remove(label)
             .ok_or(())
-            .map(|start| timestamp_in_ms(get_time()) - start)
+            .map(|start| (Instant::now() - start).as_millis() as u64)
     }
 
     /// Get an `&IpcSender<ScriptToDevtoolsControlMsg>` to send messages
@@ -2264,16 +2297,19 @@ impl GlobalScope {
     pub fn issue_page_warning(&self, warning: &str) {
         if let Some(ref chan) = self.devtools_chan {
             let _ = chan.send(ScriptToDevtoolsControlMsg::ReportPageError(
-                self.pipeline_id.clone(),
+                self.pipeline_id,
                 PageError {
                     type_: "PageError".to_string(),
-                    errorMessage: warning.to_string(),
-                    sourceName: self.get_url().to_string(),
-                    lineText: "".to_string(),
-                    lineNumber: 0,
-                    columnNumber: 0,
+                    error_message: warning.to_string(),
+                    source_name: self.get_url().to_string(),
+                    line_text: "".to_string(),
+                    line_number: 0,
+                    column_number: 0,
                     category: "script".to_string(),
-                    timeStamp: 0, //TODO
+                    time_stamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
                     error: false,
                     warning: true,
                     exception: true,
@@ -2452,16 +2488,19 @@ impl GlobalScope {
             } else if self.is::<Window>() {
                 if let Some(ref chan) = self.devtools_chan {
                     let _ = chan.send(ScriptToDevtoolsControlMsg::ReportPageError(
-                        self.pipeline_id.clone(),
+                        self.pipeline_id,
                         PageError {
                             type_: "PageError".to_string(),
-                            errorMessage: error_info.message.clone(),
-                            sourceName: error_info.filename.clone(),
-                            lineText: "".to_string(), //TODO
-                            lineNumber: error_info.lineno,
-                            columnNumber: error_info.column,
+                            error_message: error_info.message.clone(),
+                            source_name: error_info.filename.clone(),
+                            line_text: "".to_string(), //TODO
+                            line_number: error_info.lineno,
+                            column_number: error_info.column,
                             category: "script".to_string(),
-                            timeStamp: 0, //TODO
+                            time_stamp: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
                             error: true,
                             warning: false,
                             exception: true,
@@ -2491,6 +2530,16 @@ impl GlobalScope {
         }
         if let Some(worker) = self.downcast::<WorkerGlobalScope>() {
             return worker.script_chan();
+        }
+        unreachable!();
+    }
+
+    /// `TaskSource` to send messages to the gamepad task source of
+    /// this global scope.
+    /// <https://w3c.github.io/gamepad/#dfn-gamepad-task-source>
+    pub fn gamepad_task_source(&self) -> GamepadTaskSource {
+        if let Some(window) = self.downcast::<Window>() {
+            return window.task_manager().gamepad_task_source();
         }
         unreachable!();
     }
@@ -2599,9 +2648,9 @@ impl GlobalScope {
             Some(metadata),
             self.time_profiler_chan().clone(),
             || {
-                let cx = self.get_cx();
+                let cx = GlobalScope::get_cx();
 
-                let ar = enter_realm(&*self);
+                let ar = enter_realm(self);
 
                 let _aes = AutoEntryScript::new(self);
 
@@ -2625,7 +2674,18 @@ impl GlobalScope {
                             }
                         },
                         SourceCode::Compiled(pre_compiled_script) => {
-                            compiled_script.set(pre_compiled_script.source_code.get());
+                            let options = InstantiateOptions {
+                                skipFilenameValidation: false,
+                                hideScriptFromDebugger: false,
+                                deferDebugMetadata: false,
+                            };
+                            let script = InstantiateGlobalStencil(
+                                *cx,
+                                &options,
+                                *pre_compiled_script.source_code,
+                                ptr::null_mut(),
+                            );
+                            compiled_script.set(script);
                         },
                     };
 
@@ -2708,7 +2768,7 @@ impl GlobalScope {
 
     pub fn queue_function_as_microtask(&self, callback: Rc<VoidFunction>) {
         self.enqueue_microtask(Microtask::User(UserMicrotask {
-            callback: callback,
+            callback,
             pipeline: self.pipeline_id(),
         }))
     }
@@ -2718,8 +2778,8 @@ impl GlobalScope {
         image: ImageBitmapSource,
         options: &ImageBitmapOptions,
     ) -> Rc<Promise> {
-        let in_realm_proof = AlreadyInRealm::assert(&self);
-        let p = Promise::new_in_current_realm(&self, InRealm::Already(&in_realm_proof));
+        let in_realm_proof = AlreadyInRealm::assert();
+        let p = Promise::new_in_current_realm(InRealm::Already(&in_realm_proof));
         if options.resizeWidth.map_or(false, |w| w == 0) {
             p.reject_error(Error::InvalidState);
             return p;
@@ -2730,7 +2790,7 @@ impl GlobalScope {
             return p;
         }
 
-        let promise = match image {
+        match image {
             ImageBitmapSource::HTMLCanvasElement(ref canvas) => {
                 // https://html.spec.whatwg.org/multipage/#check-the-usability-of-the-image-argument
                 if !canvas.is_valid() {
@@ -2743,7 +2803,7 @@ impl GlobalScope {
                         .map(|data| data.to_vec())
                         .unwrap_or_else(|| vec![0; size.area() as usize * 4]);
 
-                    let image_bitmap = ImageBitmap::new(&self, size.width, size.height).unwrap();
+                    let image_bitmap = ImageBitmap::new(self, size.width, size.height).unwrap();
 
                     image_bitmap.set_bitmap_data(data);
                     image_bitmap.set_origin_clean(canvas.origin_is_clean());
@@ -2763,7 +2823,7 @@ impl GlobalScope {
                         .map(|data| data.to_vec())
                         .unwrap_or_else(|| vec![0; size.area() as usize * 4]);
 
-                    let image_bitmap = ImageBitmap::new(&self, size.width, size.height).unwrap();
+                    let image_bitmap = ImageBitmap::new(self, size.width, size.height).unwrap();
                     image_bitmap.set_bitmap_data(data);
                     image_bitmap.set_origin_clean(canvas.origin_is_clean());
                     p.resolve_native(&(image_bitmap));
@@ -2772,10 +2832,9 @@ impl GlobalScope {
             },
             _ => {
                 p.reject_error(Error::NotSupported);
-                return p;
+                p
             },
-        };
-        promise
+        }
     }
 
     pub fn fire_timer(&self, handle: TimerEventId) {
@@ -2842,7 +2901,7 @@ impl GlobalScope {
         // Only perform the checkpoint if we're not shutting down.
         if self.can_continue_running() {
             self.microtask_queue.checkpoint(
-                self.get_cx(),
+                GlobalScope::get_cx(),
                 |_| Some(DomRoot::from_ref(self)),
                 vec![DomRoot::from_ref(self)],
             );
@@ -2851,7 +2910,7 @@ impl GlobalScope {
 
     /// Enqueue a microtask for subsequent execution.
     pub fn enqueue_microtask(&self, job: Microtask) {
-        self.microtask_queue.enqueue(job, self.get_cx());
+        self.microtask_queue.enqueue(job, GlobalScope::get_cx());
     }
 
     /// Create a new sender/receiver pair that can be used to implement an on-demand
@@ -2970,7 +3029,7 @@ impl GlobalScope {
         unreachable!();
     }
 
-    // https://w3c.github.io/performance-timeline/#supportedentrytypes-attribute
+    /// <https://w3c.github.io/performance-timeline/#supportedentrytypes-attribute>
     pub fn supported_performance_entry_types(&self, cx: SafeJSContext) -> JSVal {
         if let Some(types) = &*self.frozen_supported_performance_entry_types.borrow() {
             return types.get();
@@ -3022,7 +3081,7 @@ impl GlobalScope {
         false
     }
 
-    /// https://www.w3.org/TR/CSP/#get-csp-of-object
+    /// <https://www.w3.org/TR/CSP/#get-csp-of-object>
     pub fn get_csp_list(&self) -> Option<CspList> {
         if let Some(window) = self.downcast::<Window>() {
             return window.Document().get_csp_list().map(|c| c.clone());
@@ -3031,31 +3090,180 @@ impl GlobalScope {
         None
     }
 
-    pub fn wgpu_id_hub(&self) -> Arc<Mutex<Identities>> {
+    pub fn wgpu_id_hub(&self) -> Arc<Identities> {
         self.gpu_id_hub.clone()
     }
 
     pub fn add_gpu_device(&self, device: &GPUDevice) {
         self.gpu_devices
             .borrow_mut()
-            .insert(device.id(), Dom::from_ref(device));
+            .insert(device.id(), WeakRef::new(device));
     }
 
     pub fn remove_gpu_device(&self, device: WebGPUDevice) {
-        let _ = self.gpu_devices.borrow_mut().remove(&device);
+        let device = self
+            .gpu_devices
+            .borrow_mut()
+            .remove(&device)
+            .expect("GPUDevice should still be in devices hashmap");
+        assert!(device.root().is_none())
     }
 
-    pub fn handle_wgpu_msg(
-        &self,
-        device: WebGPUDevice,
-        scope: Option<ErrorScopeId>,
-        result: WebGPUOpResult,
-    ) {
-        self.gpu_devices
+    pub fn gpu_device_lost(&self, device: WebGPUDevice, reason: DeviceLostReason, msg: String) {
+        let reason = match reason {
+            DeviceLostReason::Unknown => GPUDeviceLostReason::Unknown,
+            DeviceLostReason::Destroyed => GPUDeviceLostReason::Destroyed,
+        };
+        let _ac = enter_realm(self);
+        if let Some(device) = self
+            .gpu_devices
+            .borrow_mut()
+            .get_mut(&device)
+            .expect("GPUDevice should still be in devices hashmap")
+            .root()
+        {
+            device.lose(reason, msg);
+        }
+    }
+
+    pub fn handle_uncaptured_gpu_error(&self, device: WebGPUDevice, error: webgpu::Error) {
+        if let Some(gpu_device) = self
+            .gpu_devices
             .borrow()
             .get(&device)
-            .expect("GPUDevice not found")
-            .handle_server_msg(scope, result);
+            .and_then(|device| device.root())
+        {
+            gpu_device.fire_uncaptured_error(error);
+        } else {
+            warn!("Recived error for lost GPUDevice!")
+        }
+    }
+
+    pub fn handle_gamepad_event(&self, gamepad_event: GamepadEvent) {
+        match gamepad_event {
+            GamepadEvent::Connected(index, name, bounds, supported_haptic_effects) => {
+                self.handle_gamepad_connect(
+                    index.0,
+                    name,
+                    bounds.axis_bounds,
+                    bounds.button_bounds,
+                    supported_haptic_effects,
+                );
+            },
+            GamepadEvent::Disconnected(index) => {
+                self.handle_gamepad_disconnect(index.0);
+            },
+            GamepadEvent::Updated(index, update_type) => {
+                self.receive_new_gamepad_button_or_axis(index.0, update_type);
+            },
+        };
+    }
+
+    /// <https://www.w3.org/TR/gamepad/#dfn-gamepadconnected>
+    pub fn handle_gamepad_connect(
+        &self,
+        // As the spec actually defines how to set the gamepad index, the GilRs index
+        // is currently unused, though in practice it will almost always be the same.
+        // More infra is currently needed to track gamepads across windows.
+        _index: usize,
+        name: String,
+        axis_bounds: (f64, f64),
+        button_bounds: (f64, f64),
+        supported_haptic_effects: GamepadSupportedHapticEffects,
+    ) {
+        // TODO: 2. If document is not null and is not allowed to use the "gamepad" permission,
+        //          then abort these steps.
+        let this = Trusted::new(self);
+        self.gamepad_task_source().queue_with_canceller(
+            task!(gamepad_connected: move || {
+                let global = this.root();
+
+                if let Some(window) = global.downcast::<Window>() {
+                    let navigator = window.Navigator();
+                    let selected_index = navigator.select_gamepad_index();
+                    let gamepad = Gamepad::new(
+                        &global, selected_index, name, axis_bounds, button_bounds, supported_haptic_effects
+                    );
+                    navigator.set_gamepad(selected_index as usize, &gamepad);
+                }
+            }),
+            &self.task_canceller(TaskSourceName::Gamepad)
+        )
+        .expect("Failed to queue gamepad connected task.");
+    }
+
+    /// <https://www.w3.org/TR/gamepad/#dfn-gamepaddisconnected>
+    pub fn handle_gamepad_disconnect(&self, index: usize) {
+        let this = Trusted::new(self);
+        self.gamepad_task_source()
+            .queue_with_canceller(
+                task!(gamepad_disconnected: move || {
+                    let global = this.root();
+                    if let Some(window) = global.downcast::<Window>() {
+                        let navigator = window.Navigator();
+                        if let Some(gamepad) = navigator.get_gamepad(index) {
+                            if window.Document().is_fully_active() {
+                                gamepad.update_connected(false, gamepad.exposed());
+                                navigator.remove_gamepad(index);
+                            }
+                        }
+                    }
+                }),
+                &self.task_canceller(TaskSourceName::Gamepad),
+            )
+            .expect("Failed to queue gamepad disconnected task.");
+    }
+
+    /// <https://www.w3.org/TR/gamepad/#receiving-inputs>
+    pub fn receive_new_gamepad_button_or_axis(&self, index: usize, update_type: GamepadUpdateType) {
+        let this = Trusted::new(self);
+
+        // <https://w3c.github.io/gamepad/#dfn-update-gamepad-state>
+        self.gamepad_task_source()
+            .queue_with_canceller(
+                task!(update_gamepad_state: move || {
+                    let global = this.root();
+                    if let Some(window) = global.downcast::<Window>() {
+                        let navigator = window.Navigator();
+                        if let Some(gamepad) = navigator.get_gamepad(index) {
+                            let current_time = global.performance().Now();
+                            gamepad.update_timestamp(*current_time);
+                            match update_type {
+                                GamepadUpdateType::Axis(index, value) => {
+                                    gamepad.map_and_normalize_axes(index, value);
+                                },
+                                GamepadUpdateType::Button(index, value) => {
+                                    gamepad.map_and_normalize_buttons(index, value);
+                                }
+                            };
+                            if !navigator.has_gamepad_gesture() && contains_user_gesture(update_type) {
+                                navigator.set_has_gamepad_gesture(true);
+                                navigator.GetGamepads()
+                                    .iter()
+                                    .filter_map(|g| g.as_ref())
+                                    .for_each(|gamepad| {
+                                        gamepad.set_exposed(true);
+                                        gamepad.update_timestamp(*current_time);
+                                        let new_gamepad = Trusted::new(&**gamepad);
+                                        if window.Document().is_fully_active() {
+                                            window.task_manager().gamepad_task_source().queue_with_canceller(
+                                                task!(update_gamepad_connect: move || {
+                                                    let gamepad = new_gamepad.root();
+                                                    gamepad.notify_event(GamepadEventType::Connected);
+                                                }),
+                                                &window.upcast::<GlobalScope>()
+                                                    .task_canceller(TaskSourceName::Gamepad),
+                                            )
+                                            .expect("Failed to queue update gamepad connect task.");
+                                        }
+                                });
+                            }
+                        }
+                    }
+                }),
+                &self.task_canceller(TaskSourceName::Gamepad),
+            )
+            .expect("Failed to queue update gamepad state task.");
     }
 
     pub(crate) fn current_group_label(&self) -> Option<DOMString> {
@@ -3073,13 +3281,28 @@ impl GlobalScope {
         let _ = self.console_group_stack.borrow_mut().pop();
     }
 
+    pub(crate) fn increment_console_count(&self, label: &DOMString) -> usize {
+        *self
+            .console_count_map
+            .borrow_mut()
+            .entry(label.clone())
+            .and_modify(|e| *e += 1)
+            .or_insert(1)
+    }
+
+    pub(crate) fn reset_console_count(&self, label: &DOMString) -> Result<(), ()> {
+        match self.console_count_map.borrow_mut().get_mut(label) {
+            Some(value) => {
+                *value = 0;
+                Ok(())
+            },
+            None => Err(()),
+        }
+    }
+
     pub(crate) fn dynamic_module_list(&self) -> RefMut<DynamicModuleList> {
         self.dynamic_modules.borrow_mut()
     }
-}
-
-fn timestamp_in_ms(time: Timespec) -> u64 {
-    (time.sec * 1000 + (time.nsec / 1000000) as i64) as u64
 }
 
 /// Returns the Rust global scope from a JS global object.

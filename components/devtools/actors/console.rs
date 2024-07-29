@@ -2,10 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Liberally derived from the [Firefox JS implementation]
-//! (http://mxr.mozilla.org/mozilla-central/source/toolkit/devtools/server/actors/webconsole.js).
+//! Liberally derived from the [Firefox JS implementation](http://mxr.mozilla.org/mozilla-central/source/toolkit/devtools/server/actors/webconsole.js).
 //! Mediates interaction between the remote web console and equivalent functionality (object
 //! inspection, JS evaluation, autocompletion) in Servo.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::net::TcpStream;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use base::id::TEST_PIPELINE_ID;
+use devtools_traits::EvaluateJSReply::{
+    ActorValue, BooleanValue, NullValue, NumberValue, StringValue, VoidValue,
+};
+use devtools_traits::{
+    CachedConsoleMessage, CachedConsoleMessageTypes, ConsoleLog, ConsoleMessage,
+    DevtoolScriptControlMsg, LogLevel, PageError,
+};
+use ipc_channel::ipc::{self, IpcSender};
+use log::debug;
+use serde::Serialize;
+use serde_json::{self, Map, Number, Value};
+use uuid::Uuid;
 
 use crate::actor::{Actor, ActorMessageStatus, ActorRegistry};
 use crate::actors::browsing_context::BrowsingContextActor;
@@ -13,21 +31,6 @@ use crate::actors::object::ObjectActor;
 use crate::actors::worker::WorkerActor;
 use crate::protocol::JsonPacketStream;
 use crate::{StreamId, UniqueId};
-use devtools_traits::CachedConsoleMessage;
-use devtools_traits::ConsoleMessage;
-use devtools_traits::EvaluateJSReply::{ActorValue, BooleanValue, StringValue};
-use devtools_traits::EvaluateJSReply::{NullValue, NumberValue, VoidValue};
-use devtools_traits::{
-    CachedConsoleMessageTypes, ConsoleAPI, DevtoolScriptControlMsg, LogLevel, PageError,
-};
-use ipc_channel::ipc::{self, IpcSender};
-use msg::constellation_msg::TEST_PIPELINE_ID;
-use serde_json::{self, Map, Number, Value};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::net::TcpStream;
-use time::precise_time_ns;
-use uuid::Uuid;
 
 trait EncodableConsoleMessage {
     fn encode(&self) -> serde_json::Result<String>;
@@ -37,7 +40,7 @@ impl EncodableConsoleMessage for CachedConsoleMessage {
     fn encode(&self) -> serde_json::Result<String> {
         match *self {
             CachedConsoleMessage::PageError(ref a) => serde_json::to_string(a),
-            CachedConsoleMessage::ConsoleAPI(ref a) => serde_json::to_string(a),
+            CachedConsoleMessage::ConsoleLog(ref a) => serde_json::to_string(a),
         }
     }
 }
@@ -46,10 +49,11 @@ impl EncodableConsoleMessage for CachedConsoleMessage {
 struct StartedListenersTraits;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StartedListenersReply {
     from: String,
-    nativeConsoleAPI: bool,
-    startedListeners: Vec<String>,
+    native_console_api: bool,
+    started_listeners: Vec<String>,
     traits: StartedListenersTraits,
 }
 
@@ -60,46 +64,53 @@ struct GetCachedMessagesReply {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StopListenersReply {
     from: String,
-    stoppedListeners: Vec<String>,
+    stopped_listeners: Vec<String>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AutocompleteReply {
     from: String,
     matches: Vec<String>,
-    matchProp: String,
+    match_prop: String,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct EvaluateJSReply {
     from: String,
     input: String,
     result: Value,
     timestamp: u64,
     exception: Value,
-    exceptionMessage: Value,
-    helperResult: Value,
+    exception_message: Value,
+    helper_result: Value,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct EvaluateJSEvent {
     from: String,
-    r#type: String,
+    #[serde(rename = "type")]
+    type_: String,
     input: String,
     result: Value,
     timestamp: u64,
-    resultID: String,
+    #[serde(rename = "resultID")]
+    result_id: String,
     exception: Value,
-    exceptionMessage: Value,
-    helperResult: Value,
+    exception_message: Value,
+    helper_result: Value,
 }
 
 #[derive(Serialize)]
 struct EvaluateJSAsyncReply {
     from: String,
-    resultID: String,
+    #[serde(rename = "resultID")]
+    result_id: String,
 }
 
 #[derive(Serialize)]
@@ -130,23 +141,6 @@ impl ConsoleActor {
         }
     }
 
-    fn streams_mut<'a>(&self, registry: &'a ActorRegistry, cb: impl Fn(&mut TcpStream)) {
-        match &self.root {
-            Root::BrowsingContext(bc) => registry
-                .find::<BrowsingContextActor>(bc)
-                .streams
-                .borrow_mut()
-                .values_mut()
-                .for_each(cb),
-            Root::DedicatedWorker(worker) => registry
-                .find::<WorkerActor>(worker)
-                .streams
-                .borrow_mut()
-                .values_mut()
-                .for_each(cb),
-        }
-    }
-
     fn current_unique_id(&self, registry: &ActorRegistry) -> UniqueId {
         match &self.root {
             Root::BrowsingContext(bc) => UniqueId::Pipeline(
@@ -159,14 +153,14 @@ impl ConsoleActor {
         }
     }
 
-    fn evaluateJS(
+    fn evaluate_js(
         &self,
         registry: &ActorRegistry,
         msg: &Map<String, Value>,
     ) -> Result<EvaluateJSReply, ()> {
         let input = msg.get("text").unwrap().as_str().unwrap().to_owned();
         let (chan, port) = ipc::channel().unwrap();
-        // FIXME: redesign messages so we don't have to fake pipeline ids when
+        // FIXME: Redesign messages so we don't have to fake pipeline ids when
         //        communicating with workers.
         let pipeline = match self.current_unique_id(registry) {
             UniqueId::Pipeline(p) => p,
@@ -180,7 +174,7 @@ impl ConsoleActor {
             ))
             .unwrap();
 
-        //TODO: extract conversion into protocol module or some other useful place
+        // TODO: Extract conversion into protocol module or some other useful place
         let result = match port.recv().map_err(|_| ())? {
             VoidValue => {
                 let mut m = Map::new();
@@ -216,9 +210,9 @@ impl ConsoleActor {
             },
             StringValue(s) => Value::String(s),
             ActorValue { class, uuid } => {
-                //TODO: make initial ActorValue message include these properties?
+                // TODO: Make initial ActorValue message include these properties?
                 let mut m = Map::new();
-                let actor = ObjectActor::new(registry, uuid);
+                let actor = ObjectActor::register(registry, uuid);
 
                 m.insert("type".to_owned(), Value::String("object".to_owned()));
                 m.insert("class".to_owned(), Value::String(class));
@@ -230,15 +224,18 @@ impl ConsoleActor {
             },
         };
 
-        //TODO: catch and return exception values from JS evaluation
+        // TODO: Catch and return exception values from JS evaluation
         let reply = EvaluateJSReply {
             from: self.name(),
-            input: input,
-            result: result,
-            timestamp: 0,
+            input,
+            result,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             exception: Value::Null,
-            exceptionMessage: Value::Null,
-            helperResult: Value::Null,
+            exception_message: Value::Null,
+            helper_result: Value::Null,
         };
         std::result::Result::Ok(reply)
     }
@@ -252,17 +249,14 @@ impl ConsoleActor {
         self.cached_events
             .borrow_mut()
             .entry(id.clone())
-            .or_insert(vec![])
+            .or_default()
             .push(CachedConsoleMessage::PageError(page_error.clone()));
         if id == self.current_unique_id(registry) {
-            let msg = PageErrorMsg {
-                from: self.name(),
-                type_: "pageError".to_owned(),
-                pageError: page_error,
+            if let Root::BrowsingContext(bc) = &self.root {
+                registry
+                    .find::<BrowsingContextActor>(bc)
+                    .page_error(page_error)
             };
-            self.streams_mut(registry, |stream| {
-                let _ = stream.write_json_packet(&msg);
-            });
         }
     }
 
@@ -272,7 +266,7 @@ impl ConsoleActor {
         id: UniqueId,
         registry: &ActorRegistry,
     ) {
-        let level = match console_message.logLevel {
+        let level = match console_message.log_level {
             LogLevel::Debug => "debug",
             LogLevel::Info => "info",
             LogLevel::Warn => "warn",
@@ -281,36 +275,30 @@ impl ConsoleActor {
             _ => "log",
         }
         .to_owned();
+
+        let console_api = ConsoleLog {
+            level: level.clone(),
+            filename: console_message.filename.clone(),
+            line_number: console_message.line_number as u32,
+            column_number: console_message.column_number as u32,
+            time_stamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            arguments: vec![console_message.message.clone()],
+        };
+
         self.cached_events
             .borrow_mut()
             .entry(id.clone())
-            .or_insert(vec![])
-            .push(CachedConsoleMessage::ConsoleAPI(ConsoleAPI {
-                type_: "ConsoleAPI".to_owned(),
-                level: level.clone(),
-                filename: console_message.filename.clone(),
-                lineNumber: console_message.lineNumber as u32,
-                functionName: "".to_string(), //TODO
-                timeStamp: precise_time_ns(),
-                private: false,
-                arguments: vec![console_message.message.clone()],
-            }));
+            .or_default()
+            .push(CachedConsoleMessage::ConsoleLog(console_api.clone()));
         if id == self.current_unique_id(registry) {
-            let msg = ConsoleAPICall {
-                from: self.name(),
-                type_: "consoleAPICall".to_owned(),
-                message: ConsoleMsg {
-                    level: level,
-                    timeStamp: precise_time_ns(),
-                    arguments: vec![console_message.message],
-                    filename: console_message.filename,
-                    lineNumber: console_message.lineNumber,
-                    columnNumber: console_message.columnNumber,
-                },
+            if let Root::BrowsingContext(bc) = &self.root {
+                registry
+                    .find::<BrowsingContextActor>(bc)
+                    .console_message(console_api)
             };
-            self.streams_mut(registry, |stream| {
-                let _ = stream.write_json_packet(&msg);
-            });
         }
     }
 }
@@ -342,7 +330,7 @@ impl Actor for ConsoleActor {
                     .unwrap()
                     .as_array()
                     .unwrap()
-                    .into_iter()
+                    .iter()
                     .map(|json_type| json_type.as_str().unwrap());
                 let mut message_types = CachedConsoleMessageTypes::empty();
                 for str_type in str_types {
@@ -368,7 +356,7 @@ impl Actor for ConsoleActor {
                         {
                             true
                         },
-                        CachedConsoleMessage::ConsoleAPI(_)
+                        CachedConsoleMessage::ConsoleLog(_)
                             if message_types.contains(CachedConsoleMessageTypes::CONSOLE_API) =>
                         {
                             true
@@ -384,7 +372,7 @@ impl Actor for ConsoleActor {
 
                 let msg = GetCachedMessagesReply {
                     from: self.name(),
-                    messages: messages,
+                    messages,
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
@@ -395,8 +383,8 @@ impl Actor for ConsoleActor {
                 let listeners = msg.get("listeners").unwrap().as_array().unwrap().to_owned();
                 let msg = StartedListenersReply {
                     from: self.name(),
-                    nativeConsoleAPI: true,
-                    startedListeners: listeners
+                    native_console_api: true,
+                    started_listeners: listeners
                         .into_iter()
                         .map(|s| s.as_str().unwrap().to_owned())
                         .collect(),
@@ -410,7 +398,7 @@ impl Actor for ConsoleActor {
                 //TODO: actually implement listener filters that support starting/stopping
                 let msg = StopListenersReply {
                     from: self.name(),
-                    stoppedListeners: msg
+                    stopped_listeners: msg
                         .get("listeners")
                         .unwrap()
                         .as_array()
@@ -429,23 +417,23 @@ impl Actor for ConsoleActor {
                 let msg = AutocompleteReply {
                     from: self.name(),
                     matches: vec![],
-                    matchProp: "".to_owned(),
+                    match_prop: "".to_owned(),
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
             },
 
             "evaluateJS" => {
-                let msg = self.evaluateJS(&registry, &msg);
+                let msg = self.evaluate_js(registry, msg);
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
             },
 
             "evaluateJSAsync" => {
-                let resultID = Uuid::new_v4().to_string();
+                let result_id = Uuid::new_v4().to_string();
                 let early_reply = EvaluateJSAsyncReply {
                     from: self.name(),
-                    resultID: resultID.clone(),
+                    result_id: result_id.clone(),
                 };
                 // Emit an eager reply so that the client starts listening
                 // for an async event with the resultID
@@ -459,17 +447,17 @@ impl Actor for ConsoleActor {
                     return Ok(ActorMessageStatus::Processed);
                 }
 
-                let reply = self.evaluateJS(&registry, &msg).unwrap();
+                let reply = self.evaluate_js(registry, msg).unwrap();
                 let msg = EvaluateJSEvent {
                     from: self.name(),
-                    r#type: "evaluationResult".to_owned(),
+                    type_: "evaluationResult".to_owned(),
                     input: reply.input,
                     result: reply.result,
                     timestamp: reply.timestamp,
-                    resultID: resultID,
+                    result_id,
                     exception: reply.exception,
-                    exceptionMessage: reply.exceptionMessage,
-                    helperResult: reply.helperResult,
+                    exception_message: reply.exception_message,
+                    helper_result: reply.helper_result,
                 };
                 // Send the data from evaluateJS along with a resultID
                 let _ = stream.write_json_packet(&msg);
@@ -488,30 +476,4 @@ impl Actor for ConsoleActor {
             _ => ActorMessageStatus::Ignored,
         })
     }
-}
-
-#[derive(Serialize)]
-struct ConsoleAPICall {
-    from: String,
-    #[serde(rename = "type")]
-    type_: String,
-    message: ConsoleMsg,
-}
-
-#[derive(Serialize)]
-struct ConsoleMsg {
-    level: String,
-    timeStamp: u64,
-    arguments: Vec<String>,
-    filename: String,
-    lineNumber: usize,
-    columnNumber: usize,
-}
-
-#[derive(Serialize)]
-struct PageErrorMsg {
-    from: String,
-    #[serde(rename = "type")]
-    type_: String,
-    pageError: PageError,
 }

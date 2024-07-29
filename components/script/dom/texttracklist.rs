@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::TextTrackListBinding::TextTrackListMethods;
 use crate::dom::bindings::codegen::UnionTypes::VideoTrackOrAudioTrackOrTextTrack;
@@ -16,7 +18,6 @@ use crate::dom::texttrack::TextTrack;
 use crate::dom::trackevent::TrackEvent;
 use crate::dom::window::Window;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
 
 #[dom_struct]
 pub struct TextTrackList {
@@ -39,7 +40,7 @@ impl TextTrackList {
     pub fn item(&self, idx: usize) -> Option<DomRoot<TextTrack>> {
         self.dom_tracks
             .borrow()
-            .get(idx as usize)
+            .get(idx)
             .map(|t| DomRoot::from_ref(&**t))
     }
 
@@ -48,8 +49,7 @@ impl TextTrackList {
             .borrow()
             .iter()
             .enumerate()
-            .filter(|(_, t)| **t == track)
-            .next()
+            .find(|(_, t)| **t == track)
             .map(|(i, _)| i)
     }
 
@@ -65,7 +65,7 @@ impl TextTrackList {
                 .task_manager()
                 .media_element_task_source_with_canceller();
 
-            let idx = match self.find(&track) {
+            let idx = match self.find(track) {
                 Some(t) => t,
                 None => return,
             };
@@ -88,7 +88,7 @@ impl TextTrackList {
                         event.upcast::<Event>().fire(this.upcast::<EventTarget>());
                     }
                 }),
-                &canceller,
+                canceller,
             );
             track.add_track_list(self);
         }
@@ -124,8 +124,7 @@ impl TextTrackListMethods for TextTrackList {
         self.dom_tracks
             .borrow()
             .iter()
-            .filter(|track| track.id() == &id_str)
-            .next()
+            .find(|track| track.id() == id_str)
             .map(|t| DomRoot::from_ref(&**t))
     }
 

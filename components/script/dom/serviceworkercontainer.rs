@@ -2,8 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::ServiceWorkerContainerBinding::RegistrationOptions;
-use crate::dom::bindings::codegen::Bindings::ServiceWorkerContainerBinding::ServiceWorkerContainerMethods;
+use std::default::Default;
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use script_traits::{Job, JobError, JobResult, JobResultValue, JobType, ScriptMsg};
+
+use crate::dom::bindings::codegen::Bindings::ServiceWorkerContainerBinding::{
+    RegistrationOptions, ServiceWorkerContainerMethods,
+};
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::refcounted::TrustedPromise;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
@@ -15,18 +24,10 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::dom::serviceworker::ServiceWorker;
 use crate::dom::serviceworkerregistration::ServiceWorkerRegistration;
-use crate::realms::enter_realm;
-use crate::realms::InRealm;
+use crate::realms::{enter_realm, InRealm};
 use crate::task::TaskCanceller;
 use crate::task_source::dom_manipulation::DOMManipulationTaskSource;
-use crate::task_source::TaskSource;
-use crate::task_source::TaskSourceName;
-use dom_struct::dom_struct;
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use script_traits::{Job, JobError, JobResult, JobResultValue, JobType, ScriptMsg};
-use std::default::Default;
-use std::rc::Rc;
+use crate::task_source::{TaskSource, TaskSourceName};
 
 #[dom_struct]
 pub struct ServiceWorkerContainer {
@@ -44,10 +45,10 @@ impl ServiceWorkerContainer {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(global: &GlobalScope) -> DomRoot<ServiceWorkerContainer> {
-        let client = Client::new(&global.as_window());
-        let container = ServiceWorkerContainer::new_inherited(&*client);
+        let client = Client::new(global.as_window());
+        let container = ServiceWorkerContainer::new_inherited(&client);
         reflect_dom_object(Box::new(container), global)
     }
 }
@@ -58,8 +59,8 @@ impl ServiceWorkerContainerMethods for ServiceWorkerContainer {
         self.client.get_controller()
     }
 
-    /// https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-register - A
-    /// and https://w3c.github.io/ServiceWorker/#start-register - B
+    /// <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-register> - A
+    /// and <https://w3c.github.io/ServiceWorker/#start-register> - B
     fn Register(
         &self,
         script_url: USVString,
@@ -70,7 +71,7 @@ impl ServiceWorkerContainerMethods for ServiceWorkerContainer {
         let global = self.client.global();
 
         // A: Step 1
-        let promise = Promise::new_in_current_realm(&*global, comp);
+        let promise = Promise::new_in_current_realm(comp);
         let USVString(ref script_url) = script_url;
 
         // A: Step 3
@@ -87,7 +88,7 @@ impl ServiceWorkerContainerMethods for ServiceWorkerContainer {
         // A: Step 4-5
         let scope = match options.scope {
             Some(ref scope) => {
-                let &USVString(ref inner_scope) = scope;
+                let USVString(inner_scope) = scope;
                 match api_base_url.join(inner_scope) {
                     Ok(url) => url,
                     Err(_) => {
@@ -164,7 +165,7 @@ impl ServiceWorkerContainerMethods for ServiceWorkerContainer {
         );
 
         let scope_things =
-            ServiceWorkerRegistration::create_scope_things(&*global, script_url.clone());
+            ServiceWorkerRegistration::create_scope_things(&global, script_url.clone());
 
         // B: Step 8 - 13
         let job = Job::create_job(

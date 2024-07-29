@@ -2,38 +2,33 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::root::DomRoot;
-use crate::dom::globalscope::GlobalScope;
-use crate::dom::identityhub::Identities;
-use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
-use crate::dom::paintworkletglobalscope::PaintWorkletTask;
-use crate::dom::testworkletglobalscope::TestWorkletGlobalScope;
-use crate::dom::testworkletglobalscope::TestWorkletTask;
-use crate::dom::worklet::WorkletExecutor;
-use crate::script_module::ScriptFetchOptions;
-use crate::script_runtime::JSContext;
-use crate::script_thread::MainThreadScriptMsg;
+use std::borrow::Cow;
+use std::sync::Arc;
+
+use base::id::PipelineId;
 use crossbeam_channel::Sender;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use dom_struct::dom_struct;
 use ipc_channel::ipc::IpcSender;
 use js::jsval::UndefinedValue;
 use js::rust::Runtime;
-use msg::constellation_msg::PipelineId;
 use net_traits::image_cache::ImageCache;
 use net_traits::ResourceThreads;
-use parking_lot::Mutex;
-use profile_traits::mem;
-use profile_traits::time;
-use script_traits::{Painter, ScriptMsg};
-use script_traits::{ScriptToConstellationChan, TimerSchedulerMsg};
+use profile_traits::{mem, time};
+use script_traits::{Painter, ScriptMsg, ScriptToConstellationChan, TimerSchedulerMsg};
 use servo_atoms::Atom;
-use servo_url::ImmutableOrigin;
-use servo_url::MutableOrigin;
-use servo_url::ServoUrl;
-use std::borrow::Cow;
-use std::sync::Arc;
+use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
+
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::globalscope::GlobalScope;
+use crate::dom::identityhub::Identities;
+use crate::dom::paintworkletglobalscope::{PaintWorkletGlobalScope, PaintWorkletTask};
+use crate::dom::testworkletglobalscope::{TestWorkletGlobalScope, TestWorkletTask};
+use crate::dom::worklet::WorkletExecutor;
+use crate::script_module::ScriptFetchOptions;
+use crate::script_runtime::JSContext;
+use crate::script_thread::MainThreadScriptMsg;
 
 #[dom_struct]
 /// <https://drafts.css-houdini.org/worklets/#workletglobalscope>
@@ -41,9 +36,11 @@ pub struct WorkletGlobalScope {
     /// The global for this worklet.
     globalscope: GlobalScope,
     /// The base URL for this worklet.
+    #[no_trace]
     base_url: ServoUrl,
     /// Sender back to the script thread
     #[ignore_malloc_size_of = "channels are hard"]
+    #[no_trace]
     to_script_thread_sender: Sender<MainThreadScriptMsg>,
     /// Worklet task executor
     executor: WorkletExecutor,
@@ -85,16 +82,16 @@ impl WorkletGlobalScope {
     }
 
     /// Get the JS context.
-    pub fn get_cx(&self) -> JSContext {
-        self.globalscope.get_cx()
+    pub fn get_cx() -> JSContext {
+        GlobalScope::get_cx()
     }
 
     /// Evaluate a JS script in this global.
     pub fn evaluate_js(&self, script: &str) -> bool {
         debug!("Evaluating Dom in a worklet.");
-        rooted!(in (*self.globalscope.get_cx()) let mut rval = UndefinedValue());
+        rooted!(in (*GlobalScope::get_cx()) let mut rval = UndefinedValue());
         self.globalscope.evaluate_js_on_global_with_result(
-            &*script,
+            script,
             rval.handle_mut(),
             ScriptFetchOptions::default_classic_script(&self.globalscope),
             self.globalscope.api_base_url(),
@@ -167,7 +164,7 @@ pub struct WorkletGlobalScopeInit {
     /// An optional string allowing the user agent to be set for testing
     pub user_agent: Cow<'static, str>,
     /// Identity manager for WebGPU resources
-    pub gpu_id_hub: Arc<Mutex<Identities>>,
+    pub gpu_id_hub: Arc<Identities>,
     /// Is considered secure
     pub inherited_secure_context: Option<bool>,
 }

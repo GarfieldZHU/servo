@@ -2,32 +2,36 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::cell::ArcRefCell;
-use crate::context::LayoutContext;
-use crate::dom_traversal::{
-    BoxSlot, Contents, NodeAndStyleInfo, NodeExt, NonReplacedContents, TraversalHandler,
-};
-use crate::element_data::LayoutBox;
-use crate::flow::float::FloatBox;
-use crate::flow::inline::{InlineBox, InlineFormattingContext, InlineLevelBox, TextRun};
-use crate::flow::{BlockContainer, BlockFormattingContext, BlockLevelBox};
-use crate::formatting_contexts::IndependentFormattingContext;
-use crate::fragments::Tag;
-use crate::positioned::AbsolutelyPositionedBox;
-use crate::style_ext::{DisplayGeneratingBox, DisplayInside, DisplayOutside};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use rayon_croissant::ParallelIteratorExt;
-use servo_arc::Arc;
 use std::borrow::Cow;
-use std::convert::{TryFrom, TryInto};
-use style::computed_values::white_space::T as WhiteSpace;
+use std::convert::TryFrom;
+
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use servo_arc::Arc;
 use style::properties::longhands::list_style_position::computed_value::T as ListStylePosition;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
+use style::str::char_is_whitespace;
 use style::values::specified::text::TextDecorationLine;
 
+use super::inline::construct::InlineFormattingContextBuilder;
+use super::inline::inline_box::InlineBox;
+use super::inline::InlineFormattingContext;
+use super::OutsideMarker;
+use crate::cell::ArcRefCell;
+use crate::context::LayoutContext;
+use crate::dom::{BoxSlot, LayoutBox, NodeExt};
+use crate::dom_traversal::{
+    Contents, NodeAndStyleInfo, NonReplacedContents, PseudoElementContentItem, TraversalHandler,
+};
+use crate::flow::float::FloatBox;
+use crate::flow::{BlockContainer, BlockFormattingContext, BlockLevelBox};
+use crate::formatting_contexts::IndependentFormattingContext;
+use crate::positioned::AbsolutelyPositionedBox;
+use crate::style_ext::{ComputedValuesExt, DisplayGeneratingBox, DisplayInside, DisplayOutside};
+use crate::table::{AnonymousTableContent, Table};
+
 impl BlockFormattingContext {
-    pub fn construct<'dom, Node>(
+    pub(crate) fn construct<'dom, Node>(
         context: &LayoutContext,
         info: &NodeAndStyleInfo<Node>,
         contents: NonReplacedContents,
@@ -37,39 +41,21 @@ impl BlockFormattingContext {
     where
         Node: NodeExt<'dom>,
     {
-        let (contents, contains_floats) = BlockContainer::construct(
+        Self::from_block_container(BlockContainer::construct(
             context,
             info,
             contents,
             propagated_text_decoration_line,
             is_list_item,
-        );
-        let bfc = Self {
-            contents,
-            contains_floats: contains_floats == ContainsFloats::Yes,
-        };
-        bfc
+        ))
     }
 
-    pub fn construct_for_text_runs<'dom>(
-        runs: impl Iterator<Item = TextRun>,
-        text_decoration_line: TextDecorationLine,
-    ) -> Self {
-        // FIXME: do white space collapsing
-        let inline_level_boxes = runs
-            .map(|run| ArcRefCell::new(InlineLevelBox::TextRun(run)))
-            .collect();
-
-        let ifc = InlineFormattingContext {
-            inline_level_boxes,
-            text_decoration_line,
-        };
-        let contents = BlockContainer::InlineFormattingContext(ifc);
-        let bfc = Self {
+    pub(crate) fn from_block_container(contents: BlockContainer) -> Self {
+        let contains_floats = contents.contains_floats();
+        Self {
             contents,
-            contains_floats: false,
-        };
-        bfc
+            contains_floats,
+        }
     }
 }
 
@@ -94,6 +80,12 @@ enum BlockLevelCreator {
         display_inside: DisplayInside,
         contents: Contents,
     },
+    OutsideMarker {
+        contents: Vec<PseudoElementContentItem>,
+    },
+    AnonymousTable {
+        table_block: ArcRefCell<BlockLevelBox>,
+    },
 }
 
 /// A block container that may still have to be constructed.
@@ -104,7 +96,7 @@ enum BlockLevelCreator {
 ///
 /// Deferring allows using rayon’s `into_par_iter`.
 enum IntermediateBlockContainer {
-    InlineFormattingContext(InlineFormattingContext),
+    InlineFormattingContext(BlockContainer),
     Deferred {
         contents: NonReplacedContents,
         propagated_text_decoration_line: TextDecorationLine,
@@ -116,7 +108,7 @@ enum IntermediateBlockContainer {
 ///
 /// This builder starts from the first child of a given DOM node
 /// and does a preorder traversal of all of its inclusive siblings.
-struct BlockContainerBuilder<'dom, 'style, Node> {
+pub(crate) struct BlockContainerBuilder<'dom, 'style, Node> {
     context: &'style LayoutContext<'style>,
 
     /// This NodeAndStyleInfo contains the root node, the corresponding pseudo
@@ -138,36 +130,23 @@ struct BlockContainerBuilder<'dom, 'style, Node> {
     /// (see `handle_block_level_element`).
     block_level_boxes: Vec<BlockLevelJob<'dom, Node>>,
 
-    /// The ongoing inline formatting context of the builder.
-    ///
-    /// Contains all the complete inline level boxes we found traversing the
-    /// tree so far. If a block-level box is found during traversal,
-    /// this inline formatting context is pushed as a block level box to
-    /// the list of block-level boxes of the builder
-    /// (see `end_ongoing_inline_formatting_context`).
-    ongoing_inline_formatting_context: InlineFormattingContext,
+    /// Whether or not this builder has yet produced a block which would be
+    /// be considered the first line for the purposes of `text-indent`.
+    have_already_seen_first_line_for_text_indent: bool,
 
-    /// The ongoing stack of inline boxes stack of the builder.
-    ///
-    /// Contains all the currently ongoing inline boxes we entered so far.
-    /// The traversal is at all times as deep in the tree as this stack is,
-    /// which is why the code doesn't need to keep track of the actual
-    /// container root (see `handle_inline_level_element`).
-    ///
-    /// Whenever the end of a DOM element that represents an inline box is
-    /// reached, the inline box at the top of this stack is complete and ready
-    /// to be pushed to the children of the next last ongoing inline box
-    /// the ongoing inline formatting context if the stack is now empty,
-    /// which means we reached the end of a child of the actual
-    /// container root (see `move_to_next_sibling`).
-    ongoing_inline_boxes_stack: Vec<InlineBox>,
+    /// The propagated [`TextDecorationLine`].
+    text_decoration_line: TextDecorationLine,
+
+    inline_formatting_context_builder: InlineFormattingContextBuilder,
 
     /// The style of the anonymous block boxes pushed to the list of block-level
     /// boxes, if any (see `end_ongoing_inline_formatting_context`).
     anonymous_style: Option<Arc<ComputedValues>>,
 
-    /// Whether the resulting block container contains any float box.
-    contains_floats: ContainsFloats,
+    /// A collection of content that is being added to an anonymous table. This is
+    /// composed of any sequence of internal table elements or table captions that
+    /// are found outside of a table.
+    anonymous_table_content: Vec<AnonymousTableContent<'dom, Node>>,
 }
 
 impl BlockContainer {
@@ -177,87 +156,159 @@ impl BlockContainer {
         contents: NonReplacedContents,
         propagated_text_decoration_line: TextDecorationLine,
         is_list_item: bool,
-    ) -> (BlockContainer, ContainsFloats)
+    ) -> BlockContainer
     where
         Node: NodeExt<'dom>,
     {
-        let text_decoration_line =
-            propagated_text_decoration_line | info.style.clone_text_decoration_line();
-        let mut builder = BlockContainerBuilder {
-            context,
-            info,
-            block_level_boxes: Vec::new(),
-            ongoing_inline_formatting_context: InlineFormattingContext::new(text_decoration_line),
-            ongoing_inline_boxes_stack: Vec::new(),
-            anonymous_style: None,
-            contains_floats: ContainsFloats::No,
-        };
+        let mut builder =
+            BlockContainerBuilder::new(context, info, propagated_text_decoration_line);
 
         if is_list_item {
             if let Some(marker_contents) = crate::lists::make_marker(context, info) {
-                let _position = info.style.clone_list_style_position();
-                // FIXME: implement support for `outside` and remove this:
-                let position = ListStylePosition::Inside;
-                match position {
+                match info.style.clone_list_style_position() {
                     ListStylePosition::Inside => {
                         builder.handle_list_item_marker_inside(info, marker_contents)
                     },
                     ListStylePosition::Outside => {
-                        // FIXME: implement layout for this case
-                        // https://github.com/servo/servo/issues/27383
-                        // and enable `list-style-position` and the `list-style` shorthand in Stylo.
+                        builder.handle_list_item_marker_outside(info, marker_contents)
                     },
                 }
             }
         }
 
         contents.traverse(context, info, &mut builder);
+        builder.finish()
+    }
+}
 
-        debug_assert!(builder.ongoing_inline_boxes_stack.is_empty());
+impl<'dom, 'style, Node> BlockContainerBuilder<'dom, 'style, Node>
+where
+    Node: NodeExt<'dom>,
+{
+    pub(crate) fn new(
+        context: &'style LayoutContext,
+        info: &'style NodeAndStyleInfo<Node>,
+        propagated_text_decoration_line: TextDecorationLine,
+    ) -> Self {
+        let text_decoration_line =
+            propagated_text_decoration_line | info.style.clone_text_decoration_line();
 
-        if !builder
-            .ongoing_inline_formatting_context
-            .inline_level_boxes
-            .is_empty()
-        {
-            if builder.block_level_boxes.is_empty() {
-                let container = BlockContainer::InlineFormattingContext(
-                    builder.ongoing_inline_formatting_context,
-                );
-                return (container, builder.contains_floats);
+        BlockContainerBuilder {
+            context,
+            info,
+            block_level_boxes: Vec::new(),
+            text_decoration_line,
+            have_already_seen_first_line_for_text_indent: false,
+            anonymous_style: None,
+            anonymous_table_content: Vec::new(),
+            inline_formatting_context_builder: InlineFormattingContextBuilder::new(),
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> BlockContainer {
+        debug_assert!(!self
+            .inline_formatting_context_builder
+            .currently_processing_inline_box());
+
+        self.finish_anonymous_table_if_needed();
+
+        if let Some(inline_formatting_context) = self.inline_formatting_context_builder.finish(
+            self.context,
+            self.text_decoration_line,
+            !self.have_already_seen_first_line_for_text_indent,
+            self.info.is_single_line_text_input(),
+        ) {
+            // There are two options here. This block was composed of both one or more inline formatting contexts
+            // and child blocks OR this block was a single inline formatting context. In the latter case, we
+            // just return the inline formatting context as the block itself.
+            if self.block_level_boxes.is_empty() {
+                return BlockContainer::InlineFormattingContext(inline_formatting_context);
             }
-            builder.end_ongoing_inline_formatting_context();
+            self.push_block_level_job_for_inline_formatting_context(inline_formatting_context);
         }
 
-        let mut contains_floats = builder.contains_floats;
-        let mapfold = |contains_floats: &mut ContainsFloats, creator: BlockLevelJob<'dom, _>| {
-            let (block_level_box, box_contains_floats) = creator.finish(context);
-            *contains_floats |= box_contains_floats;
-            block_level_box
-        };
-        let block_level_boxes = if context.use_rayon {
-            builder
-                .block_level_boxes
+        let context = self.context;
+        let block_level_boxes = if self.context.use_rayon {
+            self.block_level_boxes
                 .into_par_iter()
-                .mapfold_reduce_into(
-                    &mut contains_floats,
-                    mapfold,
-                    || ContainsFloats::No,
-                    |left, right| {
-                        *left |= right;
-                    },
-                )
+                .map(|block_level_job| block_level_job.finish(context))
                 .collect()
         } else {
-            builder
-                .block_level_boxes
+            self.block_level_boxes
                 .into_iter()
-                .map(|x| mapfold(&mut contains_floats, x))
+                .map(|block_level_job| block_level_job.finish(context))
                 .collect()
         };
-        let container = BlockContainer::BlockLevelBoxes(block_level_boxes);
 
-        (container, contains_floats)
+        BlockContainer::BlockLevelBoxes(block_level_boxes)
+    }
+
+    fn finish_anonymous_table_if_needed(&mut self) {
+        if self.anonymous_table_content.is_empty() {
+            return;
+        }
+
+        // From https://drafts.csswg.org/css-tables/#fixup-algorithm:
+        //  > If the box’s parent is an inline, run-in, or ruby box (or any box that would perform
+        //  > inlinification of its children), then an inline-table box must be generated; otherwise
+        //  > it must be a table box.
+        //
+        // Note that text content in the inline formatting context isn't enough to force the
+        // creation of an inline table. It requires the parent to be an inline box.
+        let inline_table = self
+            .inline_formatting_context_builder
+            .currently_processing_inline_box();
+
+        // Text decorations are not propagated to atomic inline-level descendants.
+        // From https://drafts.csswg.org/css2/#lining-striking-props:
+        // >  Note that text decorations are not propagated to floating and absolutely
+        // > positioned descendants, nor to the contents of atomic inline-level descendants
+        // > such as inline blocks and inline tables.
+        let propagated_text_decoration_line = if inline_table {
+            TextDecorationLine::NONE
+        } else {
+            self.text_decoration_line
+        };
+
+        let contents: Vec<AnonymousTableContent<'dom, Node>> =
+            self.anonymous_table_content.drain(..).collect();
+        let last_text = match contents.last() {
+            Some(AnonymousTableContent::Text(info, text)) => Some((info.clone(), text.clone())),
+            _ => None,
+        };
+
+        let ifc = Table::construct_anonymous(
+            self.context,
+            self.info,
+            contents,
+            propagated_text_decoration_line,
+        );
+
+        if inline_table {
+            self.inline_formatting_context_builder.push_atomic(ifc);
+        } else {
+            let anonymous_info = self.info.new_anonymous(ifc.style().clone());
+            let table_block = ArcRefCell::new(BlockLevelBox::Independent(ifc));
+            self.end_ongoing_inline_formatting_context();
+            self.block_level_boxes.push(BlockLevelJob {
+                info: anonymous_info,
+                box_slot: BoxSlot::dummy(),
+                kind: BlockLevelCreator::AnonymousTable { table_block },
+            });
+        }
+
+        // If the last element in the anonymous table content is whitespace, that
+        // whitespace doesn't actually belong to the table. It should be processed outside
+        // ie become a space between the anonymous table and the rest of the block
+        // content. Anonymous tables are really only constructed around internal table
+        // elements and the whitespace between them, so this trailing whitespace should
+        // not be included.
+        //
+        // See https://drafts.csswg.org/css-tables/#fixup-algorithm sections "Remove
+        // irrelevant boxes" and "Generate missing parents."
+        if let Some((info, text)) = last_text {
+            self.handle_text(&info, text);
+        }
     }
 }
 
@@ -273,118 +324,58 @@ where
         box_slot: BoxSlot<'dom>,
     ) {
         match display {
-            DisplayGeneratingBox::OutsideInside { outside, inside } => match outside {
-                DisplayOutside::Inline => box_slot.set(LayoutBox::InlineLevel(
-                    self.handle_inline_level_element(info, inside, contents),
-                )),
-                DisplayOutside::Block => {
-                    let box_style = info.style.get_box();
-                    // Floats and abspos cause blockification, so they only happen in this case.
-                    // https://drafts.csswg.org/css2/visuren.html#dis-pos-flo
-                    if box_style.position.is_absolutely_positioned() {
-                        self.handle_absolutely_positioned_element(info, inside, contents, box_slot)
-                    } else if box_style.float.is_floating() {
-                        self.handle_float_element(info, inside, contents, box_slot)
-                    } else {
-                        self.handle_block_level_element(info, inside, contents, box_slot)
-                    }
-                },
+            DisplayGeneratingBox::OutsideInside { outside, inside } => {
+                self.finish_anonymous_table_if_needed();
+
+                match outside {
+                    DisplayOutside::Inline => {
+                        self.handle_inline_level_element(info, inside, contents, box_slot)
+                    },
+                    DisplayOutside::Block => {
+                        let box_style = info.style.get_box();
+                        // Floats and abspos cause blockification, so they only happen in this case.
+                        // https://drafts.csswg.org/css2/visuren.html#dis-pos-flo
+                        if box_style.position.is_absolutely_positioned() {
+                            self.handle_absolutely_positioned_element(
+                                info, inside, contents, box_slot,
+                            )
+                        } else if box_style.float.is_floating() {
+                            self.handle_float_element(info, inside, contents, box_slot)
+                        } else {
+                            self.handle_block_level_element(info, inside, contents, box_slot)
+                        }
+                    },
+                };
+            },
+            DisplayGeneratingBox::LayoutInternal(_) => {
+                self.anonymous_table_content
+                    .push(AnonymousTableContent::Element {
+                        info: info.clone(),
+                        display,
+                        contents,
+                        box_slot,
+                    });
             },
         }
     }
 
-    fn handle_text(&mut self, info: &NodeAndStyleInfo<Node>, input: Cow<'dom, str>) {
-        // Skip any leading whitespace as dictated by the node's style.
-        let white_space = info.style.get_inherited_text().white_space;
-        let (preserved_leading_whitespace, mut input) =
-            self.handle_leading_whitespace(&input, white_space);
-
-        if !preserved_leading_whitespace && input.is_empty() {
+    fn handle_text(&mut self, info: &NodeAndStyleInfo<Node>, text: Cow<'dom, str>) {
+        if text.is_empty() {
             return;
         }
 
-        // This text node should be pushed either to the next ongoing
-        // inline level box with the parent style of that inline level box
-        // that will be ended, or directly to the ongoing inline formatting
-        // context with the parent style of that builder.
-        let inlines = self.current_inline_level_boxes();
-
-        let mut new_text_run_contents;
-        let output;
-
-        {
-            let mut last_box = inlines.last_mut().map(|last| last.borrow_mut());
-            let last_text = last_box.as_mut().and_then(|last| match &mut **last {
-                InlineLevelBox::TextRun(last) => Some(&mut last.text),
-                _ => None,
-            });
-
-            if let Some(text) = last_text {
-                // Append to the existing text run
-                new_text_run_contents = None;
-                output = text;
-            } else {
-                new_text_run_contents = Some(String::new());
-                output = new_text_run_contents.as_mut().unwrap();
-            }
-
-            if preserved_leading_whitespace {
-                output.push(' ')
-            }
-
-            match (
-                white_space.preserve_spaces(),
-                white_space.preserve_newlines(),
-            ) {
-                // All whitespace is significant, so we don't need to transform
-                // the input at all.
-                (true, true) => {
-                    output.push_str(input);
-                },
-
-                // There are no cases in CSS where where need to preserve spaces
-                // but not newlines.
-                (true, false) => unreachable!(),
-
-                // Spaces are not significant, but newlines might be. We need
-                // to collapse non-significant whitespace as appropriate.
-                (false, preserve_newlines) => loop {
-                    // If there are any spaces that need preserving, split the string
-                    // that precedes them, collapse them into a single whitespace,
-                    // then process the remainder of the string independently.
-                    if let Some(i) = input
-                        .bytes()
-                        .position(|b| b.is_ascii_whitespace() && (!preserve_newlines || b != b'\n'))
-                    {
-                        let (non_whitespace, rest) = input.split_at(i);
-                        output.push_str(non_whitespace);
-                        output.push(' ');
-
-                        // Find the first byte that is either significant whitespace or
-                        // non-whitespace to continue processing it.
-                        if let Some(i) = rest.bytes().position(|b| {
-                            !b.is_ascii_whitespace() || (preserve_newlines && b == b'\n')
-                        }) {
-                            input = &rest[i..];
-                        } else {
-                            break;
-                        }
-                    } else {
-                        // No whitespace found, so no transformation is required.
-                        output.push_str(input);
-                        break;
-                    }
-                },
-            }
+        // If we are building an anonymous table ie this text directly followed internal
+        // table elements that did not have a `<table>` ancestor, then we forward all
+        // whitespace to the table builder.
+        if !self.anonymous_table_content.is_empty() && text.chars().all(char_is_whitespace) {
+            self.anonymous_table_content
+                .push(AnonymousTableContent::Text(info.clone(), text));
+            return;
+        } else {
+            self.finish_anonymous_table_if_needed();
         }
 
-        if let Some(text) = new_text_run_contents {
-            inlines.push(ArcRefCell::new(InlineLevelBox::TextRun(TextRun {
-                tag: Tag::from_node_and_style_info(info),
-                parent_style: Arc::clone(&info.style),
-                text,
-            })))
-        }
+        self.inline_formatting_context_builder.push_text(text, info);
     }
 }
 
@@ -392,69 +383,6 @@ impl<'dom, Node> BlockContainerBuilder<'dom, '_, Node>
 where
     Node: NodeExt<'dom>,
 {
-    /// Returns:
-    ///
-    /// * Whether this text run has preserved (non-collapsible) leading whitespace
-    /// * The contents starting at the first non-whitespace character (or the empty string)
-    fn handle_leading_whitespace<'text>(
-        &mut self,
-        text: &'text str,
-        white_space: WhiteSpace,
-    ) -> (bool, &'text str) {
-        // FIXME: this is only an approximation of
-        // https://drafts.csswg.org/css2/text.html#white-space-model
-        if !text.starts_with(|c: char| c.is_ascii_whitespace()) || white_space.preserve_spaces() {
-            return (false, text);
-        }
-
-        let preserved = match whitespace_is_preserved(self.current_inline_level_boxes()) {
-            WhitespacePreservedResult::Unknown => {
-                // Paragraph start.
-                false
-            },
-            WhitespacePreservedResult::NotPreserved => false,
-            WhitespacePreservedResult::Preserved => true,
-        };
-
-        let text = text.trim_start_matches(|c: char| c.is_ascii_whitespace());
-        return (preserved, text);
-
-        fn whitespace_is_preserved(
-            inline_level_boxes: &[ArcRefCell<InlineLevelBox>],
-        ) -> WhitespacePreservedResult {
-            for inline_level_box in inline_level_boxes.iter().rev() {
-                match *inline_level_box.borrow() {
-                    InlineLevelBox::TextRun(ref r) => {
-                        if r.text.ends_with(' ') {
-                            return WhitespacePreservedResult::NotPreserved;
-                        }
-                        return WhitespacePreservedResult::Preserved;
-                    },
-                    InlineLevelBox::Atomic { .. } => {
-                        return WhitespacePreservedResult::NotPreserved;
-                    },
-                    InlineLevelBox::OutOfFlowAbsolutelyPositionedBox(_) |
-                    InlineLevelBox::OutOfFlowFloatBox(_) => {},
-                    InlineLevelBox::InlineBox(ref b) => {
-                        match whitespace_is_preserved(&b.children) {
-                            WhitespacePreservedResult::Unknown => {},
-                            result => return result,
-                        }
-                    },
-                }
-            }
-
-            WhitespacePreservedResult::Unknown
-        }
-
-        #[derive(Clone, Copy, PartialEq)]
-        enum WhitespacePreservedResult {
-            Preserved,
-            NotPreserved,
-            Unknown,
-        }
-    }
-
     fn handle_list_item_marker_inside(
         &mut self,
         info: &NodeAndStyleInfo<Node>,
@@ -466,7 +394,7 @@ where
             .stylist
             .style_for_anonymous::<Node::ConcreteElement>(
                 &self.context.shared_context().guards,
-                &PseudoElement::ServoText, // FIMXE: use `PseudoElement::Marker` when we add it
+                &PseudoElement::ServoLegacyText, // FIMXE: use `PseudoElement::Marker` when we add it
                 &info.style,
             );
         self.handle_inline_level_element(
@@ -474,8 +402,21 @@ where
             DisplayInside::Flow {
                 is_list_item: false,
             },
-            Contents::OfPseudoElement(contents),
+            NonReplacedContents::OfPseudoElement(contents).into(),
+            BoxSlot::dummy(),
         );
+    }
+
+    fn handle_list_item_marker_outside(
+        &mut self,
+        info: &NodeAndStyleInfo<Node>,
+        contents: Vec<crate::dom_traversal::PseudoElementContentItem>,
+    ) {
+        self.block_level_boxes.push(BlockLevelJob {
+            info: info.clone(),
+            box_slot: BoxSlot::dummy(),
+            kind: BlockLevelCreator::OutsideMarker { contents },
+        });
     }
 
     fn handle_inline_level_element(
@@ -483,43 +424,13 @@ where
         info: &NodeAndStyleInfo<Node>,
         display_inside: DisplayInside,
         contents: Contents,
-    ) -> ArcRefCell<InlineLevelBox> {
-        let box_ = if let (DisplayInside::Flow { is_list_item }, false) =
+        box_slot: BoxSlot<'dom>,
+    ) {
+        let (DisplayInside::Flow { is_list_item }, false) =
             (display_inside, contents.is_replaced())
-        {
-            // We found un inline box.
-            // Whatever happened before, all we need to do before recurring
-            // is to remember this ongoing inline level box.
-            self.ongoing_inline_boxes_stack.push(InlineBox {
-                tag: Tag::from_node_and_style_info(info),
-                style: info.style.clone(),
-                first_fragment: true,
-                last_fragment: false,
-                children: vec![],
-            });
-
-            if is_list_item {
-                if let Some(marker_contents) = crate::lists::make_marker(self.context, info) {
-                    // Ignore `list-style-position` here:
-                    // “If the list item is an inline box: this value is equivalent to `inside`.”
-                    // https://drafts.csswg.org/css-lists/#list-style-position-outside
-                    self.handle_list_item_marker_inside(info, marker_contents)
-                }
-            }
-
-            // `unwrap` doesn’t panic here because `is_replaced` returned `false`.
-            NonReplacedContents::try_from(contents)
-                .unwrap()
-                .traverse(self.context, info, self);
-
-            let mut inline_box = self
-                .ongoing_inline_boxes_stack
-                .pop()
-                .expect("no ongoing inline level box found");
-            inline_box.last_fragment = true;
-            ArcRefCell::new(InlineLevelBox::InlineBox(inline_box))
-        } else {
-            ArcRefCell::new(InlineLevelBox::Atomic(
+        else {
+            // If this inline element is an atomic, handle it and return.
+            let atomic = self.inline_formatting_context_builder.push_atomic(
                 IndependentFormattingContext::construct(
                     self.context,
                     info,
@@ -528,10 +439,35 @@ where
                     // Text decorations are not propagated to atomic inline-level descendants.
                     TextDecorationLine::NONE,
                 ),
-            ))
+            );
+            box_slot.set(LayoutBox::InlineLevel(atomic));
+            return;
         };
-        self.current_inline_level_boxes().push(box_.clone());
-        box_
+
+        // Otherwise, this is just a normal inline box. Whatever happened before, all we need to do
+        // before recurring is to remember this ongoing inline level box.
+        self.inline_formatting_context_builder
+            .start_inline_box(InlineBox::new(info));
+
+        if is_list_item {
+            if let Some(marker_contents) = crate::lists::make_marker(self.context, info) {
+                // Ignore `list-style-position` here:
+                // “If the list item is an inline box: this value is equivalent to `inside`.”
+                // https://drafts.csswg.org/css-lists/#list-style-position-outside
+                self.handle_list_item_marker_inside(info, marker_contents)
+            }
+        }
+
+        // `unwrap` doesn’t panic here because `is_replaced` returned `false`.
+        NonReplacedContents::try_from(contents)
+            .unwrap()
+            .traverse(self.context, info, self);
+
+        self.finish_anonymous_table_if_needed();
+
+        box_slot.set(LayoutBox::InlineBox(
+            self.inline_formatting_context_builder.end_inline_box(),
+        ));
     }
 
     fn handle_block_level_element(
@@ -542,55 +478,28 @@ where
         box_slot: BoxSlot<'dom>,
     ) {
         // We just found a block level element, all ongoing inline level boxes
-        // need to be split around it. We iterate on the fragmented inline
-        // level box stack to take their contents and set their first_fragment
-        // field to false, for the fragmented inline level boxes that will
-        // come after the block level element.
-        let mut fragmented_inline_boxes =
-            self.ongoing_inline_boxes_stack
-                .iter_mut()
-                .rev()
-                .map(|ongoing| {
-                    let fragmented = InlineBox {
-                        tag: ongoing.tag,
-                        style: ongoing.style.clone(),
-                        first_fragment: ongoing.first_fragment,
-                        // The fragmented boxes before the block level element
-                        // are obviously not the last fragment.
-                        last_fragment: false,
-                        children: std::mem::take(&mut ongoing.children),
-                    };
-                    ongoing.first_fragment = false;
-                    fragmented
-                });
-
-        if let Some(last) = fragmented_inline_boxes.next() {
-            // There were indeed some ongoing inline level boxes before
-            // the block, we accumulate them as a single inline level box
-            // to be pushed to the ongoing inline formatting context.
-            let mut fragmented_inline = InlineLevelBox::InlineBox(last);
-            for mut fragmented_parent_inline_box in fragmented_inline_boxes {
-                fragmented_parent_inline_box
-                    .children
-                    .push(ArcRefCell::new(fragmented_inline));
-                fragmented_inline = InlineLevelBox::InlineBox(fragmented_parent_inline_box);
-            }
-
-            self.ongoing_inline_formatting_context
-                .inline_level_boxes
-                .push(ArcRefCell::new(fragmented_inline));
+        // need to be split around it.
+        //
+        // After calling `split_around_block_and_finish`,
+        // `self.inline_formatting_context_builder` is set up with the state
+        // that we want to have after we push the block below.
+        if let Some(inline_formatting_context) = self
+            .inline_formatting_context_builder
+            .split_around_block_and_finish(
+                self.context,
+                self.text_decoration_line,
+                !self.have_already_seen_first_line_for_text_indent,
+            )
+        {
+            self.push_block_level_job_for_inline_formatting_context(inline_formatting_context);
         }
 
-        let propagated_text_decoration_line =
-            self.ongoing_inline_formatting_context.text_decoration_line;
-
-        // We found a block level element, so the ongoing inline formatting
-        // context needs to be ended.
-        self.end_ongoing_inline_formatting_context();
-
-        let kind = match contents.try_into() {
-            Ok(contents) => match display_inside {
-                DisplayInside::Flow { is_list_item } => {
+        let propagated_text_decoration_line = self.text_decoration_line;
+        let kind = match contents {
+            Contents::NonReplaced(contents) => match display_inside {
+                DisplayInside::Flow { is_list_item }
+                    if !info.style.establishes_block_formatting_context() =>
+                {
                     BlockLevelCreator::SameFormattingContextBlock(
                         IntermediateBlockContainer::Deferred {
                             contents,
@@ -605,7 +514,7 @@ where
                     propagated_text_decoration_line,
                 },
             },
-            Err(contents) => {
+            Contents::Replaced(contents) => {
                 let contents = Contents::Replaced(contents);
                 BlockLevelCreator::Independent {
                     display_inside,
@@ -619,6 +528,10 @@ where
             box_slot,
             kind,
         });
+
+        // Any block also counts as the first line for the purposes of text indent. Even if
+        // they don't actually indent.
+        self.have_already_seen_first_line_for_text_indent = true;
     }
 
     fn handle_absolutely_positioned_element(
@@ -628,28 +541,28 @@ where
         contents: Contents,
         box_slot: BoxSlot<'dom>,
     ) {
-        if !self.has_ongoing_inline_formatting_context() {
-            let kind = BlockLevelCreator::OutOfFlowAbsolutelyPositionedBox {
-                contents,
-                display_inside,
-            };
-            self.block_level_boxes.push(BlockLevelJob {
-                info: info.clone(),
-                box_slot,
-                kind,
-            });
-        } else {
-            let box_ = ArcRefCell::new(InlineLevelBox::OutOfFlowAbsolutelyPositionedBox(
-                ArcRefCell::new(AbsolutelyPositionedBox::construct(
+        if !self.inline_formatting_context_builder.is_empty() {
+            let inline_level_box = self
+                .inline_formatting_context_builder
+                .push_absolutely_positioned_box(AbsolutelyPositionedBox::construct(
                     self.context,
                     info,
                     display_inside,
                     contents,
-                )),
-            ));
-            self.current_inline_level_boxes().push(box_.clone());
-            box_slot.set(LayoutBox::InlineLevel(box_))
+                ));
+            box_slot.set(LayoutBox::InlineLevel(inline_level_box));
+            return;
         }
+
+        let kind = BlockLevelCreator::OutOfFlowAbsolutelyPositionedBox {
+            contents,
+            display_inside,
+        };
+        self.block_level_boxes.push(BlockLevelJob {
+            info: info.clone(),
+            box_slot,
+            kind,
+        });
     }
 
     fn handle_float_element(
@@ -659,80 +572,71 @@ where
         contents: Contents,
         box_slot: BoxSlot<'dom>,
     ) {
-        self.contains_floats = ContainsFloats::Yes;
-
-        if !self.has_ongoing_inline_formatting_context() {
-            let kind = BlockLevelCreator::OutOfFlowFloatBox {
-                contents,
-                display_inside,
-            };
-            self.block_level_boxes.push(BlockLevelJob {
-                info: info.clone(),
-                box_slot,
-                kind,
-            });
-        } else {
-            let box_ = ArcRefCell::new(InlineLevelBox::OutOfFlowFloatBox(FloatBox::construct(
-                self.context,
-                info,
-                display_inside,
-                contents,
-            )));
-            self.current_inline_level_boxes().push(box_.clone());
-            box_slot.set(LayoutBox::InlineLevel(box_))
-        }
-    }
-
-    fn end_ongoing_inline_formatting_context(&mut self) {
-        if self
-            .ongoing_inline_formatting_context
-            .inline_level_boxes
-            .is_empty()
-        {
-            // There should never be an empty inline formatting context.
+        if !self.inline_formatting_context_builder.is_empty() {
+            let inline_level_box =
+                self.inline_formatting_context_builder
+                    .push_float_box(FloatBox::construct(
+                        self.context,
+                        info,
+                        display_inside,
+                        contents,
+                    ));
+            box_slot.set(LayoutBox::InlineLevel(inline_level_box));
             return;
         }
 
-        let context = self.context;
-        let block_container_style = &self.info.style;
-        let anonymous_style = self.anonymous_style.get_or_insert_with(|| {
-            context
-                .shared_context()
-                .stylist
-                .style_for_anonymous::<Node::ConcreteElement>(
-                    &context.shared_context().guards,
-                    &PseudoElement::ServoText,
-                    block_container_style,
-                )
-        });
-
-        let kind = BlockLevelCreator::SameFormattingContextBlock(
-            IntermediateBlockContainer::InlineFormattingContext(std::mem::take(
-                &mut self.ongoing_inline_formatting_context,
-            )),
-        );
-        let info = self.info.new_replacing_style(anonymous_style.clone());
+        let kind = BlockLevelCreator::OutOfFlowFloatBox {
+            contents,
+            display_inside,
+        };
         self.block_level_boxes.push(BlockLevelJob {
-            info,
-            // FIXME(nox): We should be storing this somewhere.
-            box_slot: BoxSlot::dummy(),
+            info: info.clone(),
+            box_slot,
             kind,
         });
     }
 
-    fn current_inline_level_boxes(&mut self) -> &mut Vec<ArcRefCell<InlineLevelBox>> {
-        match self.ongoing_inline_boxes_stack.last_mut() {
-            Some(last) => &mut last.children,
-            None => &mut self.ongoing_inline_formatting_context.inline_level_boxes,
+    fn end_ongoing_inline_formatting_context(&mut self) {
+        if let Some(inline_formatting_context) = self.inline_formatting_context_builder.finish(
+            self.context,
+            self.text_decoration_line,
+            !self.have_already_seen_first_line_for_text_indent,
+            self.info.is_single_line_text_input(),
+        ) {
+            self.push_block_level_job_for_inline_formatting_context(inline_formatting_context);
         }
     }
 
-    fn has_ongoing_inline_formatting_context(&self) -> bool {
-        !self
-            .ongoing_inline_formatting_context
-            .inline_level_boxes
-            .is_empty() ||
-            !self.ongoing_inline_boxes_stack.is_empty()
+    fn push_block_level_job_for_inline_formatting_context(
+        &mut self,
+        inline_formatting_context: InlineFormattingContext,
+    ) {
+        let block_container_style = &self.info.style;
+        let layout_context = self.context;
+        let anonymous_style = self.anonymous_style.get_or_insert_with(|| {
+            layout_context
+                .shared_context()
+                .stylist
+                .style_for_anonymous::<Node::ConcreteElement>(
+                    &layout_context.shared_context().guards,
+                    &PseudoElement::ServoAnonymousBox,
+                    block_container_style,
+                )
+        });
+
+        let info = self.info.new_anonymous(anonymous_style.clone());
+        self.block_level_boxes.push(BlockLevelJob {
+            info,
+            // FIXME(nox): We should be storing this somewhere.
+            box_slot: BoxSlot::dummy(),
+            kind: BlockLevelCreator::SameFormattingContextBlock(
+                IntermediateBlockContainer::InlineFormattingContext(
+                    BlockContainer::InlineFormattingContext(inline_formatting_context),
+                ),
+            ),
+        });
+
+        self.have_already_seen_first_line_for_text_indent = true;
     }
 }
 
@@ -740,17 +644,18 @@ impl<'dom, Node> BlockLevelJob<'dom, Node>
 where
     Node: NodeExt<'dom>,
 {
-    fn finish(self, context: &LayoutContext) -> (ArcRefCell<BlockLevelBox>, ContainsFloats) {
+    fn finish(self, context: &LayoutContext) -> ArcRefCell<BlockLevelBox> {
         let info = &self.info;
-        let (block_level_box, contains_floats) = match self.kind {
-            BlockLevelCreator::SameFormattingContextBlock(contents) => {
-                let (contents, contains_floats) = contents.finish(context, info);
-                let block_level_box = ArcRefCell::new(BlockLevelBox::SameFormattingContextBlock {
-                    tag: Tag::from_node_and_style_info(info),
+        let block_level_box = match self.kind {
+            BlockLevelCreator::SameFormattingContextBlock(intermediate_block_container) => {
+                let contents = intermediate_block_container.finish(context, info);
+                let contains_floats = contents.contains_floats();
+                ArcRefCell::new(BlockLevelBox::SameFormattingContextBlock {
+                    base_fragment_info: info.into(),
                     contents,
                     style: Arc::clone(&info.style),
-                });
-                (block_level_box, contains_floats)
+                    contains_floats,
+                })
             },
             BlockLevelCreator::Independent {
                 display_inside,
@@ -764,35 +669,56 @@ where
                     contents,
                     propagated_text_decoration_line,
                 );
-                (
-                    ArcRefCell::new(BlockLevelBox::Independent(context)),
-                    ContainsFloats::No,
-                )
+                ArcRefCell::new(BlockLevelBox::Independent(context))
             },
             BlockLevelCreator::OutOfFlowAbsolutelyPositionedBox {
                 display_inside,
                 contents,
-            } => {
-                let block_level_box = ArcRefCell::new(
-                    BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(ArcRefCell::new(
-                        AbsolutelyPositionedBox::construct(context, info, display_inside, contents),
-                    )),
-                );
-                (block_level_box, ContainsFloats::No)
-            },
+            } => ArcRefCell::new(BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(
+                ArcRefCell::new(AbsolutelyPositionedBox::construct(
+                    context,
+                    info,
+                    display_inside,
+                    contents,
+                )),
+            )),
             BlockLevelCreator::OutOfFlowFloatBox {
                 display_inside,
                 contents,
-            } => {
-                let block_level_box = ArcRefCell::new(BlockLevelBox::OutOfFlowFloatBox(
-                    FloatBox::construct(context, info, display_inside, contents),
-                ));
-                (block_level_box, ContainsFloats::Yes)
+            } => ArcRefCell::new(BlockLevelBox::OutOfFlowFloatBox(FloatBox::construct(
+                context,
+                info,
+                display_inside,
+                contents,
+            ))),
+            BlockLevelCreator::OutsideMarker { contents } => {
+                let marker_style = context
+                    .shared_context()
+                    .stylist
+                    .style_for_anonymous::<Node::ConcreteElement>(
+                        &context.shared_context().guards,
+                        &PseudoElement::ServoLegacyText, // FIMXE: use `PseudoElement::Marker` when we add it
+                        &info.style,
+                    );
+                let contents = NonReplacedContents::OfPseudoElement(contents);
+                let block_container = BlockContainer::construct(
+                    context,
+                    &info.new_replacing_style(marker_style.clone()),
+                    contents,
+                    TextDecorationLine::empty(),
+                    false, /* is_list_item */
+                );
+                ArcRefCell::new(BlockLevelBox::OutsideMarker(OutsideMarker {
+                    marker_style,
+                    list_item_style: info.style.clone(),
+                    block_container,
+                }))
             },
+            BlockLevelCreator::AnonymousTable { table_block } => table_block,
         };
         self.box_slot
             .set(LayoutBox::BlockLevel(block_level_box.clone()));
-        (block_level_box, contains_floats)
+        block_level_box
     }
 }
 
@@ -801,7 +727,7 @@ impl IntermediateBlockContainer {
         self,
         context: &LayoutContext,
         info: &NodeAndStyleInfo<Node>,
-    ) -> (BlockContainer, ContainsFloats)
+    ) -> BlockContainer
     where
         Node: NodeExt<'dom>,
     {
@@ -817,29 +743,7 @@ impl IntermediateBlockContainer {
                 propagated_text_decoration_line,
                 is_list_item,
             ),
-            IntermediateBlockContainer::InlineFormattingContext(ifc) => {
-                // If that inline formatting context contained any float, those
-                // were already taken into account during the first phase of
-                // box construction.
-                (
-                    BlockContainer::InlineFormattingContext(ifc),
-                    ContainsFloats::No,
-                )
-            },
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ContainsFloats {
-    No,
-    Yes,
-}
-
-impl std::ops::BitOrAssign for ContainsFloats {
-    fn bitor_assign(&mut self, other: Self) {
-        if other == ContainsFloats::Yes {
-            *self = ContainsFloats::Yes;
+            IntermediateBlockContainer::InlineFormattingContext(block_container) => block_container,
         }
     }
 }

@@ -4,8 +4,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import
-from __future__ import print_function
 import os
 import re
 import subprocess
@@ -14,7 +12,7 @@ import six.moves.BaseHTTPServer
 import six.moves.SimpleHTTPServer
 import six.moves.socketserver
 import threading
-import six.moves.urllib.parse
+import urllib
 import six
 
 # List of jQuery modules that will be tested.
@@ -149,13 +147,13 @@ def run_http_server():
             path = self.translate_path(self.path)
             f = None
             if os.path.isdir(path):
-                parts = six.moves.urllib.parse.urlsplit(self.path)
+                parts = urllib.parse.urlsplit(self.path)
                 if not parts.path.endswith('/'):
                     # redirect browser - doing basically what apache does
                     self.send_response(301)
                     new_parts = (parts[0], parts[1], parts[2] + '/',
                                  parts[3], parts[4])
-                    new_url = six.moves.urllib.parse.urlunsplit(new_parts)
+                    new_url = urllib.parse.urlunsplit(new_parts)
                     self.send_header("Location", new_url)
                     self.end_headers()
                     return None

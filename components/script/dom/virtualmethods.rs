@@ -2,14 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use html5ever::LocalName;
+use style::attr::AttrValue;
+
+use super::htmltablecolelement::HTMLTableColElement;
 use crate::dom::attr::Attr;
-use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::inheritance::ElementTypeId;
-use crate::dom::bindings::inheritance::HTMLElementTypeId;
-use crate::dom::bindings::inheritance::HTMLMediaElementTypeId;
-use crate::dom::bindings::inheritance::NodeTypeId;
-use crate::dom::bindings::inheritance::SVGElementTypeId;
-use crate::dom::bindings::inheritance::SVGGraphicsElementTypeId;
+use crate::dom::bindings::inheritance::{
+    Castable, ElementTypeId, HTMLElementTypeId, HTMLMediaElementTypeId, NodeTypeId,
+    SVGElementTypeId, SVGGraphicsElementTypeId,
+};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
 use crate::dom::element::{AttributeMutation, Element};
@@ -39,6 +40,7 @@ use crate::dom::htmlobjectelement::HTMLObjectElement;
 use crate::dom::htmloptgroupelement::HTMLOptGroupElement;
 use crate::dom::htmloptionelement::HTMLOptionElement;
 use crate::dom::htmloutputelement::HTMLOutputElement;
+use crate::dom::htmlpreelement::HTMLPreElement;
 use crate::dom::htmlscriptelement::HTMLScriptElement;
 use crate::dom::htmlselectelement::HTMLSelectElement;
 use crate::dom::htmlsourceelement::HTMLSourceElement;
@@ -54,8 +56,6 @@ use crate::dom::htmlvideoelement::HTMLVideoElement;
 use crate::dom::node::{BindContext, ChildrenMutation, CloneChildrenFlag, Node, UnbindContext};
 use crate::dom::svgelement::SVGElement;
 use crate::dom::svgsvgelement::SVGSVGElement;
-use html5ever::LocalName;
-use style::attr::AttrValue;
 
 /// Trait to allow DOM nodes to opt-in to overriding (or adding to) common
 /// behaviours. Replicates the effect of C++ virtual methods.
@@ -86,7 +86,7 @@ pub trait VirtualMethods {
     /// on this element.
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match self.super_type() {
-            Some(ref s) => s.parse_plain_attribute(name, value),
+            Some(s) => s.parse_plain_attribute(name, value),
             _ => AttrValue::String(value.into()),
         }
     }
@@ -94,7 +94,7 @@ pub trait VirtualMethods {
     /// Called when a Node is appended to a tree, where 'tree_connected' indicates
     /// whether the tree is part of a Document.
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
     }
@@ -104,14 +104,14 @@ pub trait VirtualMethods {
     /// Implements removing steps:
     /// <https://dom.spec.whatwg.org/#concept-node-remove-ext>
     fn unbind_from_tree(&self, context: &UnbindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.unbind_from_tree(context);
         }
     }
 
     /// Called on the parent when its children are changed.
     fn children_changed(&self, mutation: &ChildrenMutation) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.children_changed(mutation);
         }
     }
@@ -125,7 +125,7 @@ pub trait VirtualMethods {
 
     /// <https://dom.spec.whatwg.org/#concept-node-adopt-ext>
     fn adopting_steps(&self, old_doc: &Document) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.adopting_steps(old_doc);
         }
     }
@@ -137,7 +137,7 @@ pub trait VirtualMethods {
         maybe_doc: Option<&Document>,
         clone_children: CloneChildrenFlag,
     ) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.cloning_steps(copy, maybe_doc, clone_children);
         }
     }
@@ -145,7 +145,7 @@ pub trait VirtualMethods {
     /// Called on an element when it is popped off the stack of open elements
     /// of a parser.
     fn pop(&self) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.pop();
         }
     }
@@ -234,6 +234,9 @@ pub fn vtable_for(node: &Node) -> &dyn VirtualMethods {
         NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLOutputElement)) => {
             node.downcast::<HTMLOutputElement>().unwrap() as &dyn VirtualMethods
         },
+        NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLPreElement)) => {
+            node.downcast::<HTMLPreElement>().unwrap() as &dyn VirtualMethods
+        },
         NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLScriptElement)) => {
             node.downcast::<HTMLScriptElement>().unwrap() as &dyn VirtualMethods
         },
@@ -252,6 +255,9 @@ pub fn vtable_for(node: &Node) -> &dyn VirtualMethods {
         NodeTypeId::Element(ElementTypeId::HTMLElement(
             HTMLElementTypeId::HTMLTableCellElement,
         )) => node.downcast::<HTMLTableCellElement>().unwrap() as &dyn VirtualMethods,
+        NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTableColElement)) => {
+            node.downcast::<HTMLTableColElement>().unwrap() as &dyn VirtualMethods
+        },
         NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTableRowElement)) => {
             node.downcast::<HTMLTableRowElement>().unwrap() as &dyn VirtualMethods
         },

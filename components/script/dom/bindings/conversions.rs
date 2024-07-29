@@ -32,6 +32,28 @@
 //! | sequences               | `Vec<T>`        |                |
 //! | union types             | `T`             |                |
 
+use std::{char, ffi, ptr, slice};
+
+use js::conversions::latin1_to_string;
+pub use js::conversions::{
+    ConversionBehavior, ConversionResult, FromJSValConvertible, ToJSValConvertible,
+};
+use js::error::throw_type_error;
+use js::glue::{GetProxyReservedSlot, IsWrapper, JS_GetReservedSlot, UnwrapObjectDynamic};
+use js::jsapi::{
+    Heap, IsWindowProxy, JSContext, JSObject, JSString, JS_DeprecatedStringHasLatin1Chars,
+    JS_GetLatin1StringCharsAndLength, JS_GetTwoByteStringCharsAndLength, JS_IsExceptionPending,
+    JS_NewStringCopyN,
+};
+use js::jsval::{ObjectValue, StringValue, UndefinedValue};
+use js::rust::wrappers::{IsArrayObject, JS_GetProperty, JS_HasProperty};
+use js::rust::{
+    get_object_class, is_dom_class, is_dom_object, maybe_wrap_value, HandleId, HandleObject,
+    HandleValue, MutableHandleValue, ToString,
+};
+use num_traits::Float;
+use servo_config::opts;
+
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
@@ -46,27 +68,6 @@ use crate::dom::htmlformcontrolscollection::HTMLFormControlsCollection;
 use crate::dom::htmloptionscollection::HTMLOptionsCollection;
 use crate::dom::nodelist::NodeList;
 use crate::dom::windowproxy::WindowProxy;
-use js::conversions::latin1_to_string;
-pub use js::conversions::ConversionBehavior;
-pub use js::conversions::{ConversionResult, FromJSValConvertible, ToJSValConvertible};
-use js::error::throw_type_error;
-use js::glue::GetProxyReservedSlot;
-use js::glue::JS_GetReservedSlot;
-use js::glue::{IsWrapper, UnwrapObjectDynamic};
-use js::glue::{RUST_JSID_IS_INT, RUST_JSID_TO_INT};
-use js::glue::{RUST_JSID_IS_STRING, RUST_JSID_TO_STRING};
-use js::jsapi::{Heap, JSContext, JSObject, JSString};
-use js::jsapi::{IsWindowProxy, JS_DeprecatedStringHasLatin1Chars, JS_NewStringCopyN};
-use js::jsapi::{
-    JS_GetLatin1StringCharsAndLength, JS_GetTwoByteStringCharsAndLength, JS_IsExceptionPending,
-};
-use js::jsval::{ObjectValue, StringValue, UndefinedValue};
-use js::rust::wrappers::{IsArrayObject, JS_GetProperty, JS_HasProperty};
-use js::rust::{get_object_class, is_dom_class, is_dom_object, maybe_wrap_value, ToString};
-use js::rust::{HandleId, HandleObject, HandleValue, MutableHandleValue};
-use num_traits::Float;
-use servo_config::opts;
-use std::{char, ffi, ptr, slice};
 
 /// A trait to check whether a given `JSObject` implements an IDL interface.
 pub trait IDLInterface {
@@ -160,13 +161,13 @@ where
 ///
 /// Handling of invalid UTF-16 in strings depends on the relevant option.
 pub unsafe fn jsid_to_string(cx: *mut JSContext, id: HandleId) -> Option<DOMString> {
-    let id_raw = id.into();
-    if RUST_JSID_IS_STRING(id_raw) {
-        return Some(jsstring_to_str(cx, RUST_JSID_TO_STRING(id_raw)));
+    let id_raw = *id;
+    if id_raw.is_string() {
+        return Some(jsstring_to_str(cx, id_raw.to_string()));
     }
 
-    if RUST_JSID_IS_INT(id_raw) {
-        return Some(RUST_JSID_TO_INT(id_raw).to_string().into());
+    if id_raw.is_int() {
+        return Some(id_raw.to_int().to_string().into());
     }
 
     None
@@ -227,8 +228,8 @@ pub unsafe fn jsstring_to_str(cx: *mut JSContext, s: *mut JSString) -> DOMString
         let mut length = 0;
         let chars = JS_GetTwoByteStringCharsAndLength(cx, ptr::null(), s, &mut length);
         assert!(!chars.is_null());
-        let potentially_ill_formed_utf16 = slice::from_raw_parts(chars, length as usize);
-        let mut s = String::with_capacity(length as usize);
+        let potentially_ill_formed_utf16 = slice::from_raw_parts(chars, length);
+        let mut s = String::with_capacity(length);
         for item in char::decode_utf16(potentially_ill_formed_utf16.iter().cloned()) {
             match item {
                 Ok(c) => s.push(c),
@@ -241,7 +242,7 @@ pub unsafe fn jsstring_to_str(cx: *mut JSContext, s: *mut JSString) -> DOMString
                              please comment on https://github.com/servo/servo/issues/6564"
                         };
                     }
-                    if opts::get().replace_surrogates {
+                    if opts::get().debug.replace_surrogates {
                         error!(message!());
                         s.push('\u{FFFD}');
                     } else {
@@ -281,7 +282,7 @@ impl FromJSValConvertible for USVString {
         let mut length = 0;
         let chars = JS_GetTwoByteStringCharsAndLength(cx, ptr::null(), jsstr, &mut length);
         assert!(!chars.is_null());
-        let char_vec = slice::from_raw_parts(chars as *const u16, length as usize);
+        let char_vec = slice::from_raw_parts(chars, length);
         Ok(ConversionResult::Success(USVString(
             String::from_utf16_lossy(char_vec),
         )))
@@ -323,7 +324,7 @@ impl FromJSValConvertible for ByteString {
             let chars = JS_GetLatin1StringCharsAndLength(cx, ptr::null(), string, &mut length);
             assert!(!chars.is_null());
 
-            let char_slice = slice::from_raw_parts(chars as *mut u8, length as usize);
+            let char_slice = slice::from_raw_parts(chars as *mut u8, length);
             return Ok(ConversionResult::Success(ByteString::new(
                 char_slice.to_vec(),
             )));
@@ -331,7 +332,7 @@ impl FromJSValConvertible for ByteString {
 
         let mut length = 0;
         let chars = JS_GetTwoByteStringCharsAndLength(cx, ptr::null(), string, &mut length);
-        let char_vec = slice::from_raw_parts(chars, length as usize);
+        let char_vec = slice::from_raw_parts(chars, length);
 
         if char_vec.iter().any(|&c| c > 0xFF) {
             throw_type_error(cx, "Invalid ByteString");
@@ -358,7 +359,7 @@ pub fn is_dom_proxy(obj: *mut JSObject) -> bool {
     use js::glue::IsProxyHandlerFamily;
     unsafe {
         let clasp = get_object_class(obj);
-        ((*clasp).flags & js::JSCLASS_IS_PROXY) != 0 && IsProxyHandlerFamily(obj) != 0
+        ((*clasp).flags & js::JSCLASS_IS_PROXY) != 0 && IsProxyHandlerFamily(obj)
     }
 }
 
@@ -386,14 +387,15 @@ pub unsafe fn private_from_object(obj: *mut JSObject) -> *const libc::c_void {
 
 /// Get the `DOMClass` from `obj`, or `Err(())` if `obj` is not a DOM object.
 pub unsafe fn get_dom_class(obj: *mut JSObject) -> Result<&'static DOMClass, ()> {
-    use crate::dom::bindings::utils::DOMJSClass;
     use js::glue::GetProxyHandlerExtra;
+
+    use crate::dom::bindings::utils::DOMJSClass;
 
     let clasp = get_object_class(obj);
     if is_dom_class(&*clasp) {
         trace!("plain old dom object");
         let domjsclass: *const DOMJSClass = clasp as *const DOMJSClass;
-        return Ok(&(&*domjsclass).dom_class);
+        return Ok(&(*domjsclass).dom_class);
     }
     if is_dom_proxy(obj) {
         trace!("proxy dom object");
@@ -424,7 +426,7 @@ pub(crate) unsafe fn private_from_proto_check(
     let dom_class = get_dom_class(obj).or_else(|_| {
         if IsWrapper(obj) {
             trace!("found wrapper");
-            obj = UnwrapObjectDynamic(obj, cx, /* stopAtWindowProxy = */ 0);
+            obj = UnwrapObjectDynamic(obj, cx, /* stopAtWindowProxy = */ false);
             if obj.is_null() {
                 trace!("unwrapping security wrapper failed");
                 Err(())

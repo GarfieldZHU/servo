@@ -13,7 +13,7 @@ interface HTMLFieldSetElement : HTMLElement {
   [CEReactions]
            attribute DOMString name;
 
-  //readonly attribute DOMString type;
+  readonly attribute DOMString type;
 
   [SameObject] readonly attribute HTMLCollection elements;
 
@@ -22,5 +22,5 @@ interface HTMLFieldSetElement : HTMLElement {
   readonly attribute DOMString validationMessage;
   boolean checkValidity();
   boolean reportValidity();
-  void setCustomValidity(DOMString error);
+  undefined setCustomValidity(DOMString error);
 };

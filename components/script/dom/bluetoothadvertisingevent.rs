@@ -2,20 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::BluetoothAdvertisingEventBinding::BluetoothAdvertisingEventInit;
-use crate::dom::bindings::codegen::Bindings::BluetoothAdvertisingEventBinding::BluetoothAdvertisingEventMethods;
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventBinding::EventMethods;
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+
+use crate::dom::bindings::codegen::Bindings::BluetoothAdvertisingEventBinding::{
+    BluetoothAdvertisingEventInit, BluetoothAdvertisingEventMethods,
+};
+use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bluetoothdevice::BluetoothDevice;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_atoms::Atom;
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothadvertisingevent
 #[dom_struct]
@@ -40,15 +43,17 @@ impl BluetoothAdvertisingEvent {
         BluetoothAdvertisingEvent {
             event: Event::new_inherited(),
             device: Dom::from_ref(device),
-            name: name,
-            appearance: appearance,
-            tx_power: tx_power,
-            rssi: rssi,
+            name,
+            appearance,
+            tx_power,
+            rssi,
         }
     }
 
-    pub fn new(
+    #[allow(clippy::too_many_arguments)]
+    fn new(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         type_: Atom,
         bubbles: EventBubbles,
         cancelable: EventCancelable,
@@ -58,11 +63,12 @@ impl BluetoothAdvertisingEvent {
         txPower: Option<i8>,
         rssi: Option<i8>,
     ) -> DomRoot<BluetoothAdvertisingEvent> {
-        let ev = reflect_dom_object(
+        let ev = reflect_dom_object_with_proto(
             Box::new(BluetoothAdvertisingEvent::new_inherited(
                 device, name, appearance, txPower, rssi,
             )),
             global,
+            proto,
         );
         {
             let event = ev.upcast::<Event>();
@@ -74,18 +80,20 @@ impl BluetoothAdvertisingEvent {
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothadvertisingevent-bluetoothadvertisingevent
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         type_: DOMString,
         init: &BluetoothAdvertisingEventInit,
     ) -> Fallible<DomRoot<BluetoothAdvertisingEvent>> {
         let global = window.upcast::<GlobalScope>();
         let name = init.name.clone();
-        let appearance = init.appearance.clone();
-        let txPower = init.txPower.clone();
-        let rssi = init.rssi.clone();
+        let appearance = init.appearance;
+        let txPower = init.txPower;
+        let rssi = init.rssi;
         let bubbles = EventBubbles::from(init.parent.bubbles);
         let cancelable = EventCancelable::from(init.parent.cancelable);
         Ok(BluetoothAdvertisingEvent::new(
             global,
+            proto,
             Atom::from(type_),
             bubbles,
             cancelable,

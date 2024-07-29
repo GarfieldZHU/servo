@@ -2,6 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::default::Default;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use pixels::Image;
+use servo_arc::Arc;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HTMLObjectElementBinding::HTMLObjectElementMethods;
@@ -16,16 +24,12 @@ use crate::dom::node::{window_from_node, Node};
 use crate::dom::validation::Validatable;
 use crate::dom::validitystate::ValidityState;
 use crate::dom::virtualmethods::VirtualMethods;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use net_traits::image::base::Image;
-use servo_arc::Arc;
-use std::default::Default;
 
 #[dom_struct]
 pub struct HTMLObjectElement {
     htmlelement: HTMLElement,
     #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
     image: DomRefCell<Option<Arc<Image>>>,
     form_owner: MutNullableDom<HTMLFormElement>,
     validity_state: MutNullableDom<ValidityState>,
@@ -45,17 +49,19 @@ impl HTMLObjectElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLObjectElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLObjectElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 }
@@ -68,17 +74,14 @@ impl<'a> ProcessDataURL for &'a HTMLObjectElement {
     // Makes the local `data` member match the status of the `data` attribute and starts
     /// prefetching the image. This method must be called after `data` is changed.
     fn process_data_url(&self) {
-        let elem = self.upcast::<Element>();
+        let element = self.upcast::<Element>();
 
         // TODO: support other values
-        match (
-            elem.get_attribute(&ns!(), &local_name!("type")),
-            elem.get_attribute(&ns!(), &local_name!("data")),
+        if let (None, Some(_uri)) = (
+            element.get_attribute(&ns!(), &local_name!("type")),
+            element.get_attribute(&ns!(), &local_name!("data")),
         ) {
-            (None, Some(_uri)) => {
-                // TODO(gw): Prefetch the image here.
-            },
-            _ => {},
+            // TODO(gw): Prefetch the image here.
         }
     }
 }
@@ -149,13 +152,13 @@ impl VirtualMethods for HTMLObjectElement {
 
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
-        match attr.local_name() {
-            &local_name!("data") => {
+        match *attr.local_name() {
+            local_name!("data") => {
                 if let AttributeMutation::Set(_) = mutation {
                     self.process_data_url();
                 }
             },
-            &local_name!("form") => {
+            local_name!("form") => {
                 self.form_attribute_mutated(mutation);
             },
             _ => {},
@@ -172,7 +175,7 @@ impl FormControl for HTMLObjectElement {
         self.form_owner.set(form);
     }
 
-    fn to_element<'a>(&'a self) -> &'a Element {
+    fn to_element(&self) -> &Element {
         self.upcast::<Element>()
     }
 }

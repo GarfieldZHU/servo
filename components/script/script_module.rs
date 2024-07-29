@@ -5,12 +5,51 @@
 //! The script module mod contains common traits and structs
 //! related to `type=module` for script thread or worker threads.
 
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::{mem, ptr};
+
+use encoding_rs::UTF_8;
+use html5ever::local_name;
+use hyper_serde::Serde;
+use indexmap::IndexSet;
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use js::jsapi::{
+    CompileModule1, ExceptionStackBehavior, FinishDynamicModuleImport, GetModuleRequestSpecifier,
+    GetModuleResolveHook, GetRequestedModuleSpecifier, GetRequestedModulesCount,
+    Handle as RawHandle, HandleObject, HandleValue as RawHandleValue, Heap, JSAutoRealm, JSContext,
+    JSObject, JSRuntime, JSString, JS_ClearPendingException, JS_DefineProperty4,
+    JS_IsExceptionPending, JS_NewStringCopyN, ModuleErrorBehaviour, ModuleEvaluate, ModuleLink,
+    MutableHandleValue, SetModuleDynamicImportHook, SetModuleMetadataHook, SetModulePrivate,
+    SetModuleResolveHook, SetScriptPrivateReferenceHooks, ThrowOnModuleEvaluationFailure, Value,
+    JSPROP_ENUMERATE,
+};
+use js::jsval::{JSVal, PrivateValue, UndefinedValue};
+use js::rust::jsapi_wrapped::JS_GetPendingException;
+use js::rust::wrappers::JS_SetPendingException;
+use js::rust::{
+    transform_str_to_source_text, CompileOptionsWrapper, Handle, HandleValue, IntoHandle,
+};
+use mime::Mime;
+use net_traits::request::{
+    CredentialsMode, Destination, ParserMetadata, Referrer, RequestBuilder, RequestMode,
+};
+use net_traits::{
+    CoreResourceMsg, FetchChannels, FetchMetadata, FetchResponseListener, IpcSend, Metadata,
+    NetworkError, ReferrerPolicy, ResourceFetchTiming, ResourceTimingType,
+};
+use servo_url::ServoUrl;
+use url::ParseError as UrlParseError;
+use uuid::Uuid;
+
 use crate::document_loader::LoadType;
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::conversions::jsstring_to_str;
-use crate::dom::bindings::error::report_pending_exception;
-use crate::dom::bindings::error::Error;
+use crate::dom::bindings::error::{report_pending_exception, Error};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomObject;
@@ -22,67 +61,27 @@ use crate::dom::document::Document;
 use crate::dom::dynamicmoduleowner::{DynamicModuleId, DynamicModuleOwner};
 use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::htmlscriptelement::{HTMLScriptElement, ScriptId};
-use crate::dom::htmlscriptelement::{ScriptOrigin, ScriptType, SCRIPT_JS_MIMES};
+use crate::dom::htmlscriptelement::{
+    HTMLScriptElement, ScriptId, ScriptOrigin, ScriptType, SCRIPT_JS_MIMES,
+};
 use crate::dom::node::document_from_node;
 use crate::dom::performanceresourcetiming::InitiatorType;
 use crate::dom::promise::Promise;
 use crate::dom::promisenativehandler::{Callback, PromiseNativeHandler};
 use crate::dom::window::Window;
 use crate::dom::worker::TrustedWorkerAddress;
-use crate::network_listener::{self, NetworkListener};
-use crate::network_listener::{PreInvoke, ResourceTimingListener};
+use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
 use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext as SafeJSContext;
 use crate::task::TaskBox;
 use crate::task_source::TaskSourceName;
-use encoding_rs::UTF_8;
-use hyper_serde::Serde;
-use indexmap::IndexSet;
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use js::jsapi::Handle as RawHandle;
-use js::jsapi::HandleObject;
-use js::jsapi::HandleValue as RawHandleValue;
-use js::jsapi::Value;
-use js::jsapi::{CompileModule1, ExceptionStackBehavior, FinishDynamicModuleImport_NoTLA};
-use js::jsapi::{DynamicImportStatus, SetModuleDynamicImportHook, SetScriptPrivateReferenceHooks};
-use js::jsapi::{GetModuleResolveHook, JSRuntime, SetModuleResolveHook};
-use js::jsapi::{GetRequestedModules, SetModuleMetadataHook};
-use js::jsapi::{Heap, JSContext, JS_ClearPendingException, SetModulePrivate};
-use js::jsapi::{JSAutoRealm, JSObject, JSString};
-use js::jsapi::{JS_DefineProperty4, JS_IsExceptionPending, JS_NewStringCopyN, JSPROP_ENUMERATE};
-use js::jsapi::{ModuleEvaluate, ModuleInstantiate};
-use js::jsval::{JSVal, PrivateValue, UndefinedValue};
-use js::rust::jsapi_wrapped::{GetArrayLength, JS_GetElement};
-use js::rust::jsapi_wrapped::{GetRequestedModuleSpecifier, JS_GetPendingException};
-use js::rust::transform_str_to_source_text;
-use js::rust::wrappers::JS_SetPendingException;
-use js::rust::CompileOptionsWrapper;
-use js::rust::{Handle, HandleValue, IntoHandle};
-use mime::Mime;
-use net_traits::request::{CredentialsMode, Destination, ParserMetadata};
-use net_traits::request::{Referrer, RequestBuilder, RequestMode};
-use net_traits::IpcSend;
-use net_traits::{CoreResourceMsg, FetchChannels};
-use net_traits::{FetchMetadata, Metadata, ReferrerPolicy};
-use net_traits::{FetchResponseListener, NetworkError};
-use net_traits::{ResourceFetchTiming, ResourceTimingType};
-use servo_url::ServoUrl;
-use std::collections::{HashMap, HashSet};
-use std::mem;
-use std::rc::Rc;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use url::ParseError as UrlParseError;
-use uuid::Uuid;
 
 #[allow(unsafe_code)]
 unsafe fn gen_type_error(global: &GlobalScope, string: String) -> RethrowError {
-    rooted!(in(*global.get_cx()) let mut thrown = UndefinedValue());
-    Error::Type(string).to_jsval(*global.get_cx(), &global, thrown.handle_mut());
+    rooted!(in(*GlobalScope::get_cx()) let mut thrown = UndefinedValue());
+    Error::Type(string).to_jsval(*GlobalScope::get_cx(), global, thrown.handle_mut());
 
-    return RethrowError(RootedTraceableBox::from_box(Heap::boxed(thrown.get())));
+    RethrowError(RootedTraceableBox::from_box(Heap::boxed(thrown.get())))
 }
 
 #[derive(JSTraceable)]
@@ -106,9 +105,7 @@ impl RethrowError {
 
 impl Clone for RethrowError {
     fn clone(&self) -> Self {
-        Self(RootedTraceableBox::from_box(Heap::boxed(
-            self.0.get().clone(),
-        )))
+        Self(RootedTraceableBox::from_box(Heap::boxed(self.0.get())))
     }
 }
 
@@ -143,7 +140,7 @@ impl ModuleScript {
 #[derive(Clone, Debug, Eq, Hash, JSTraceable, PartialEq)]
 pub enum ModuleIdentity {
     ScriptId(ScriptId),
-    ModuleUrl(ServoUrl),
+    ModuleUrl(#[no_trace] ServoUrl),
 }
 
 impl ModuleIdentity {
@@ -155,7 +152,7 @@ impl ModuleIdentity {
             },
             ModuleIdentity::ScriptId(script_id) => {
                 let inline_module_map = global.get_inline_module_map().borrow();
-                inline_module_map.get(&script_id).unwrap().clone()
+                inline_module_map.get(script_id).unwrap().clone()
             },
         }
     }
@@ -163,6 +160,7 @@ impl ModuleIdentity {
 
 #[derive(JSTraceable)]
 pub struct ModuleTree {
+    #[no_trace]
     url: ServoUrl,
     text: DomRefCell<Rc<DOMString>>,
     record: DomRefCell<Option<ModuleObject>>,
@@ -175,12 +173,17 @@ pub struct ModuleTree {
     // By default all maps in web specs are ordered maps
     // (https://infra.spec.whatwg.org/#ordered-map), however we can usually get away with using
     // stdlib maps and sets because we rarely iterate over them.
+    #[custom_trace]
     parent_identities: DomRefCell<IndexSet<ModuleIdentity>>,
+    #[no_trace]
     descendant_urls: DomRefCell<IndexSet<ServoUrl>>,
     // A set to memoize which descendants are under fetching
+    #[no_trace]
     incomplete_fetch_urls: DomRefCell<IndexSet<ServoUrl>>,
+    #[no_trace]
     visited_urls: DomRefCell<HashSet<ServoUrl>>,
     rethrow_error: DomRefCell<Option<RethrowError>>,
+    #[no_trace]
     network_error: DomRefCell<Option<NetworkError>>,
     // A promise for owners to execute when the module tree
     // is finished
@@ -207,7 +210,7 @@ impl ModuleTree {
     }
 
     pub fn get_status(&self) -> ModuleStatus {
-        self.status.borrow().clone()
+        *self.status.borrow()
     }
 
     pub fn set_status(&self, status: ModuleStatus) {
@@ -270,12 +273,16 @@ impl ModuleTree {
         self.parent_identities.borrow_mut().insert(parent_identity);
     }
 
-    pub fn insert_incomplete_fetch_url(&self, dependency: ServoUrl) {
-        self.incomplete_fetch_urls.borrow_mut().insert(dependency);
+    pub fn insert_incomplete_fetch_url(&self, dependency: &ServoUrl) {
+        self.incomplete_fetch_urls
+            .borrow_mut()
+            .insert(dependency.clone());
     }
 
-    pub fn remove_incomplete_fetch_url(&self, dependency: ServoUrl) {
-        self.incomplete_fetch_urls.borrow_mut().remove(&dependency);
+    pub fn remove_incomplete_fetch_url(&self, dependency: &ServoUrl) {
+        self.incomplete_fetch_urls
+            .borrow_mut()
+            .shift_remove(dependency);
     }
 
     /// recursively checks if all of the transitive descendants are
@@ -303,7 +310,7 @@ impl ModuleTree {
                     }
 
                     let all_ready_descendants = ModuleTree::recursive_check_descendants(
-                        &descendant_module,
+                        descendant_module,
                         module_map,
                         discovered_urls,
                     );
@@ -315,14 +322,14 @@ impl ModuleTree {
             }
         }
 
-        return true;
+        true
     }
 
     fn has_all_ready_descendants(&self, global: &GlobalScope) -> bool {
         let module_map = global.get_module_map().borrow();
         let mut discovered_urls = HashSet::new();
 
-        return ModuleTree::recursive_check_descendants(&self, &module_map, &mut discovered_urls);
+        ModuleTree::recursive_check_descendants(self, &module_map.0, &mut discovered_urls)
     }
 
     // We just leverage the power of Promise to run the task for `finish` the owner.
@@ -349,13 +356,13 @@ impl ModuleTree {
 
         let realm = enter_realm(&*owner.global());
         let comp = InRealm::Entered(&realm);
-        let _ais = AutoIncumbentScript::new(&*owner.global());
+        let _ais = AutoIncumbentScript::new(&owner.global());
 
         let mut promise = self.promise.borrow_mut();
         match promise.as_ref() {
             Some(promise) => promise.append_native_handler(&handler, comp),
             None => {
-                let new_promise = Promise::new_in_current_realm(&owner.global(), comp);
+                let new_promise = Promise::new_in_current_realm(comp);
                 new_promise.append_native_handler(&handler, comp);
                 *promise = Some(new_promise);
             },
@@ -385,13 +392,13 @@ impl ModuleTree {
 
         let realm = enter_realm(&*owner.global());
         let comp = InRealm::Entered(&realm);
-        let _ais = AutoIncumbentScript::new(&*owner.global());
+        let _ais = AutoIncumbentScript::new(&owner.global());
 
         let mut promise = self.promise.borrow_mut();
         match promise.as_ref() {
             Some(promise) => promise.append_native_handler(&handler, comp),
             None => {
-                let new_promise = Promise::new_in_current_realm(&owner.global(), comp);
+                let new_promise = Promise::new_in_current_realm(comp);
                 new_promise.append_native_handler(&handler, comp);
                 *promise = Some(new_promise);
             },
@@ -409,24 +416,24 @@ pub enum ModuleStatus {
 
 impl ModuleTree {
     #[allow(unsafe_code)]
-    /// https://html.spec.whatwg.org/multipage/#creating-a-module-script
+    /// <https://html.spec.whatwg.org/multipage/#creating-a-module-script>
     /// Step 7-11.
     fn compile_module_script(
         &self,
         global: &GlobalScope,
         owner: ModuleOwner,
         module_script_text: Rc<DOMString>,
-        url: ServoUrl,
+        url: &ServoUrl,
         options: ScriptFetchOptions,
     ) -> Result<ModuleObject, RethrowError> {
-        let _ac = JSAutoRealm::new(*global.get_cx(), *global.reflector().get_jsobject());
+        let cx = GlobalScope::get_cx();
+        let _ac = JSAutoRealm::new(*cx, *global.reflector().get_jsobject());
 
-        let compile_options =
-            unsafe { CompileOptionsWrapper::new(*global.get_cx(), url.as_str(), 1) };
+        let compile_options = unsafe { CompileOptionsWrapper::new(*cx, url.as_str(), 1) };
 
         unsafe {
-            rooted!(in(*global.get_cx()) let mut module_script = CompileModule1(
-                *global.get_cx(),
+            rooted!(in(*cx) let mut module_script = CompileModule1(
+                *cx,
                 compile_options.ptr,
                 &mut transform_str_to_source_text(&module_script_text),
             ));
@@ -434,12 +441,9 @@ impl ModuleTree {
             if module_script.is_null() {
                 warn!("fail to compile module script of {}", url);
 
-                rooted!(in(*global.get_cx()) let mut exception = UndefinedValue());
-                assert!(JS_GetPendingException(
-                    *global.get_cx(),
-                    &mut exception.handle_mut()
-                ));
-                JS_ClearPendingException(*global.get_cx());
+                rooted!(in(*cx) let mut exception = UndefinedValue());
+                assert!(JS_GetPendingException(*cx, &mut exception.handle_mut()));
+                JS_ClearPendingException(*cx);
 
                 return Err(RethrowError(RootedTraceableBox::from_box(Heap::boxed(
                     exception.get(),
@@ -456,34 +460,32 @@ impl ModuleTree {
             debug!("module script of {} compile done", url);
 
             self.resolve_requested_module_specifiers(
-                &global,
+                global,
                 module_script.handle().into_handle(),
-                url.clone(),
+                url,
             )
             .map(|_| ModuleObject(Heap::boxed(*module_script)))
         }
     }
 
     #[allow(unsafe_code)]
-    /// https://html.spec.whatwg.org/multipage/#fetch-the-descendants-of-and-link-a-module-script
+    /// <https://html.spec.whatwg.org/multipage/#fetch-the-descendants-of-and-link-a-module-script>
     /// Step 5-2.
     pub fn instantiate_module_tree(
         &self,
         global: &GlobalScope,
         module_record: HandleObject,
     ) -> Result<(), RethrowError> {
-        let _ac = JSAutoRealm::new(*global.get_cx(), *global.reflector().get_jsobject());
+        let cx = GlobalScope::get_cx();
+        let _ac = JSAutoRealm::new(*cx, *global.reflector().get_jsobject());
 
         unsafe {
-            if !ModuleInstantiate(*global.get_cx(), module_record) {
-                warn!("fail to instantiate module");
+            if !ModuleLink(*cx, module_record) {
+                warn!("fail to link & instantiate module");
 
-                rooted!(in(*global.get_cx()) let mut exception = UndefinedValue());
-                assert!(JS_GetPendingException(
-                    *global.get_cx(),
-                    &mut exception.handle_mut()
-                ));
-                JS_ClearPendingException(*global.get_cx());
+                rooted!(in(*cx) let mut exception = UndefinedValue());
+                assert!(JS_GetPendingException(*cx, &mut exception.handle_mut()));
+                JS_ClearPendingException(*cx);
 
                 Err(RethrowError(RootedTraceableBox::from_box(Heap::boxed(
                     exception.get(),
@@ -501,20 +503,31 @@ impl ModuleTree {
         &self,
         global: &GlobalScope,
         module_record: HandleObject,
+        eval_result: MutableHandleValue,
     ) -> Result<(), RethrowError> {
-        let _ac = JSAutoRealm::new(*global.get_cx(), *global.reflector().get_jsobject());
+        let cx = GlobalScope::get_cx();
+        let _ac = JSAutoRealm::new(*cx, *global.reflector().get_jsobject());
 
         unsafe {
-            rooted!(in(*global.get_cx()) let mut rval = UndefinedValue());
-            if !ModuleEvaluate(*global.get_cx(), module_record, rval.handle_mut().into()) {
+            let ok = ModuleEvaluate(*cx, module_record, eval_result);
+            assert!(ok, "module evaluation failed");
+
+            rooted!(in(*cx) let mut evaluation_promise = ptr::null_mut::<JSObject>());
+            if eval_result.is_object() {
+                evaluation_promise.set(eval_result.to_object());
+            }
+
+            let throw_result = ThrowOnModuleEvaluationFailure(
+                *cx,
+                evaluation_promise.handle().into(),
+                ModuleErrorBehaviour::ThrowModuleErrorsSync,
+            );
+            if !throw_result {
                 warn!("fail to evaluate module");
 
-                rooted!(in(*global.get_cx()) let mut exception = UndefinedValue());
-                assert!(JS_GetPendingException(
-                    *global.get_cx(),
-                    &mut exception.handle_mut()
-                ));
-                JS_ClearPendingException(*global.get_cx());
+                rooted!(in(*cx) let mut exception = UndefinedValue());
+                assert!(JS_GetPendingException(*cx, &mut exception.handle_mut()));
+                JS_ClearPendingException(*cx);
 
                 Err(RethrowError(RootedTraceableBox::from_box(Heap::boxed(
                     exception.get(),
@@ -532,13 +545,13 @@ impl ModuleTree {
 
         if let Some(exception) = &*module_error {
             unsafe {
-                let ar = enter_realm(&*global);
+                let ar = enter_realm(global);
                 JS_SetPendingException(
-                    *global.get_cx(),
+                    *GlobalScope::get_cx(),
                     exception.handle(),
                     ExceptionStackBehavior::Capture,
                 );
-                report_pending_exception(*global.get_cx(), true, InRealm::Entered(&ar));
+                report_pending_exception(*GlobalScope::get_cx(), true, InRealm::Entered(&ar));
             }
         }
     }
@@ -548,52 +561,30 @@ impl ModuleTree {
         &self,
         global: &GlobalScope,
         module_object: HandleObject,
-        base_url: ServoUrl,
+        base_url: &ServoUrl,
     ) -> Result<IndexSet<ServoUrl>, RethrowError> {
-        let _ac = JSAutoRealm::new(*global.get_cx(), *global.reflector().get_jsobject());
+        let cx = GlobalScope::get_cx();
+        let _ac = JSAutoRealm::new(*cx, *global.reflector().get_jsobject());
 
         let mut specifier_urls = IndexSet::new();
 
         unsafe {
-            rooted!(in(*global.get_cx()) let requested_modules = GetRequestedModules(*global.get_cx(), module_object));
-
-            let mut length = 0;
-
-            if !GetArrayLength(*global.get_cx(), requested_modules.handle(), &mut length) {
-                let module_length_error =
-                    gen_type_error(&global, "Wrong length of requested modules".to_owned());
-
-                return Err(module_length_error);
-            }
+            let length = GetRequestedModulesCount(*cx, module_object);
 
             for index in 0..length {
-                rooted!(in(*global.get_cx()) let mut element = UndefinedValue());
-
-                if !JS_GetElement(
-                    *global.get_cx(),
-                    requested_modules.handle(),
-                    index,
-                    &mut element.handle_mut(),
-                ) {
-                    let get_element_error =
-                        gen_type_error(&global, "Failed to get requested module".to_owned());
-
-                    return Err(get_element_error);
-                }
-
-                rooted!(in(*global.get_cx()) let specifier = GetRequestedModuleSpecifier(
-                    *global.get_cx(), element.handle()
+                rooted!(in(*cx) let specifier = GetRequestedModuleSpecifier(
+                    *cx, module_object, index
                 ));
 
                 let url = ModuleTree::resolve_module_specifier(
-                    *global.get_cx(),
-                    &base_url,
+                    *cx,
+                    base_url,
                     specifier.handle().into_handle(),
                 );
 
                 if url.is_err() {
                     let specifier_error =
-                        gen_type_error(&global, "Wrong module specifier".to_owned());
+                        gen_type_error(global, "Wrong module specifier".to_owned());
 
                     return Err(specifier_error);
                 }
@@ -611,7 +602,7 @@ impl ModuleTree {
     ///
     /// Bareword module specifiers are currently disallowed as these may be given
     /// special meanings in the future.
-    /// https://html.spec.whatwg.org/multipage/#resolve-a-module-specifier
+    /// <https://html.spec.whatwg.org/multipage/#resolve-a-module-specifier>
     #[allow(unsafe_code)]
     fn resolve_module_specifier(
         cx: *mut JSContext,
@@ -626,7 +617,7 @@ impl ModuleTree {
         }
 
         // Step 2.
-        if !specifier_str.starts_with("/") &&
+        if !specifier_str.starts_with('/') &&
             !specifier_str.starts_with("./") &&
             !specifier_str.starts_with("../")
         {
@@ -634,10 +625,10 @@ impl ModuleTree {
         }
 
         // Step 3.
-        return ServoUrl::parse_with_base(Some(url), &specifier_str.clone());
+        ServoUrl::parse_with_base(Some(url), &specifier_str)
     }
 
-    /// https://html.spec.whatwg.org/multipage/#finding-the-first-parse-error
+    /// <https://html.spec.whatwg.org/multipage/#finding-the-first-parse-error>
     fn find_first_parse_error(
         &self,
         global: &GlobalScope,
@@ -672,7 +663,7 @@ impl ModuleTree {
 
             // 8-3.
             let (child_network_error, child_parse_error) =
-                descendant_module.find_first_parse_error(&global, discovered_urls);
+                descendant_module.find_first_parse_error(global, discovered_urls);
 
             // Due to network error's priority higher than parse error,
             // we will return directly when we meet a network error.
@@ -691,11 +682,11 @@ impl ModuleTree {
         }
 
         // Step 9.
-        return (None, parse_error);
+        (None, parse_error)
     }
 
     #[allow(unsafe_code)]
-    /// https://html.spec.whatwg.org/multipage/#fetch-the-descendants-of-a-module-script
+    /// <https://html.spec.whatwg.org/multipage/#fetch-the-descendants-of-a-module-script>
     fn fetch_module_descendants(
         &self,
         owner: &ModuleOwner,
@@ -703,7 +694,7 @@ impl ModuleTree {
         options: &ScriptFetchOptions,
         parent_identity: ModuleIdentity,
     ) {
-        debug!("Start to load dependencies of {}", self.url.clone());
+        debug!("Start to load dependencies of {}", self.url);
 
         let global = owner.global();
 
@@ -717,7 +708,7 @@ impl ModuleTree {
                     self.set_status(ModuleStatus::Finished);
                     debug!(
                         "Module {} doesn't have module record but tried to load descendants.",
-                        self.url.clone()
+                        self.url
                     );
                     return;
                 },
@@ -725,15 +716,15 @@ impl ModuleTree {
                 Some(raw_record) => self.resolve_requested_module_specifiers(
                     &global,
                     raw_record.handle(),
-                    self.url.clone(),
+                    &self.url,
                 ),
             }
         };
 
         match specifier_urls {
             // Step 3.
-            Ok(valid_specifier_urls) if valid_specifier_urls.len() == 0 => {
-                debug!("Module {} doesn't have any dependencies.", self.url.clone());
+            Ok(valid_specifier_urls) if valid_specifier_urls.is_empty() => {
+                debug!("Module {} doesn't have any dependencies.", self.url);
                 self.advance_finished_and_link(&global);
             },
             Ok(valid_specifier_urls) => {
@@ -752,15 +743,15 @@ impl ModuleTree {
                         // Step 5-3-2.
                         visited_urls.insert(parsed_url.clone());
 
-                        self.insert_incomplete_fetch_url(parsed_url.clone());
+                        self.insert_incomplete_fetch_url(&parsed_url);
                     }
                 }
 
                 // Step 3.
-                if urls.len() == 0 {
+                if urls.is_empty() {
                     debug!(
                         "After checking with visited urls, module {} doesn't have dependencies to load.",
-                        self.url.clone()
+                        &self.url
                     );
                     self.advance_finished_and_link(&global);
                     return;
@@ -778,9 +769,9 @@ impl ModuleTree {
                     // Step 2.
                     fetch_single_module_script(
                         owner.clone(),
-                        url.clone(),
+                        url,
                         visited_urls.clone(),
-                        destination.clone(),
+                        destination,
                         options,
                         Some(parent_identity.clone()),
                         false,
@@ -795,18 +786,18 @@ impl ModuleTree {
         }
     }
 
-    /// https://html.spec.whatwg.org/multipage/#fetch-the-descendants-of-and-link-a-module-script
+    /// <https://html.spec.whatwg.org/multipage/#fetch-the-descendants-of-and-link-a-module-script>
     /// step 4-7.
     fn advance_finished_and_link(&self, global: &GlobalScope) {
         {
-            if !self.has_all_ready_descendants(&global) {
+            if !self.has_all_ready_descendants(global) {
                 return;
             }
         }
 
         self.set_status(ModuleStatus::Finished);
 
-        debug!("Going to advance and finish for: {}", self.url.clone());
+        debug!("Going to advance and finish for: {}", self.url);
 
         {
             // Notify parents of this module to finish
@@ -815,7 +806,7 @@ impl ModuleTree {
             // fetches, then it means we don't need to notify it.
             let parent_identities = self.parent_identities.borrow();
             for parent_identity in parent_identities.iter() {
-                let parent_tree = parent_identity.get_module_tree(&global);
+                let parent_tree = parent_identity.get_module_tree(global);
 
                 let incomplete_count_before_remove = {
                     let incomplete_urls = parent_tree.get_incomplete_fetch_urls().borrow();
@@ -823,15 +814,15 @@ impl ModuleTree {
                 };
 
                 if incomplete_count_before_remove > 0 {
-                    parent_tree.remove_incomplete_fetch_url(self.url.clone());
-                    parent_tree.advance_finished_and_link(&global);
+                    parent_tree.remove_incomplete_fetch_url(&self.url);
+                    parent_tree.advance_finished_and_link(global);
                 }
             }
         }
 
         let mut discovered_urls: HashSet<ServoUrl> = HashSet::new();
         let (network_error, rethrow_error) =
-            self.find_first_parse_error(&global, &mut discovered_urls);
+            self.find_first_parse_error(global, &mut discovered_urls);
 
         match (network_error, rethrow_error) {
             (Some(network_error), _) => {
@@ -840,7 +831,7 @@ impl ModuleTree {
             (None, None) => {
                 let module_record = self.get_record().borrow();
                 if let Some(record) = &*module_record {
-                    let instantiated = self.instantiate_module_tree(&global, record.handle());
+                    let instantiated = self.instantiate_module_tree(global, record.handle());
 
                     if let Err(exception) = instantiated {
                         self.set_rethrow_error(exception);
@@ -917,7 +908,7 @@ impl ModuleOwner {
 
                     let network_error = module_tree.get_network_error().borrow();
                     match network_error.as_ref() {
-                        Some(network_error) => Err(network_error.clone()),
+                        Some(network_error) => Err(network_error.clone().into()),
                         None => match module_identity {
                             ModuleIdentity::ModuleUrl(script_src) => Ok(ScriptOrigin::external(
                                 Rc::clone(&module_tree.get_text().borrow()),
@@ -940,12 +931,12 @@ impl ModuleOwner {
                     .upcast::<Element>()
                     .has_attribute(&local_name!("async"));
 
-                if !asynch && (&*script.root()).get_parser_inserted() {
-                    document.deferred_script_loaded(&*script.root(), load);
-                } else if !asynch && !(&*script.root()).get_non_blocking() {
-                    document.asap_in_order_script_loaded(&*script.root(), load);
+                if !asynch && (*script.root()).get_parser_inserted() {
+                    document.deferred_script_loaded(&script.root(), load);
+                } else if !asynch && !(*script.root()).get_non_blocking() {
+                    document.asap_in_order_script_loaded(&script.root(), load);
                 } else {
-                    document.asap_script_loaded(&*script.root(), load);
+                    document.asap_script_loaded(&script.root(), load);
                 };
             },
         }
@@ -963,7 +954,7 @@ impl ModuleOwner {
 
         let module = global.dynamic_module_list().remove(dynamic_module_id);
 
-        let cx = global.get_cx();
+        let cx = GlobalScope::get_cx();
         let module_tree = module_identity.get_module_tree(&global);
 
         // In the timing of executing this `finish_dynamic_module` function,
@@ -973,7 +964,8 @@ impl ModuleOwner {
         let network_error = module_tree.get_network_error().borrow().as_ref().cloned();
         let existing_rethrow_error = module_tree.get_rethrow_error().borrow().as_ref().cloned();
 
-        let execution_err = if network_error.is_none() && existing_rethrow_error.is_none() {
+        rooted!(in(*cx) let mut rval = UndefinedValue());
+        if network_error.is_none() && existing_rethrow_error.is_none() {
             let record = module_tree
                 .get_record()
                 .borrow()
@@ -981,60 +973,54 @@ impl ModuleOwner {
                 .map(|record| record.handle());
 
             if let Some(record) = record {
-                let evaluated = module_tree.execute_module(&global, record).err();
+                let evaluated = module_tree
+                    .execute_module(&global, record, rval.handle_mut().into())
+                    .err();
 
                 if let Some(exception) = evaluated.clone() {
                     module_tree.set_rethrow_error(exception);
                 }
-
-                evaluated
-            } else {
-                None
             }
-        } else {
-            None
-        };
+        }
 
         // Ensure any failures related to importing this dynamic module are immediately reported.
-        let status = match (network_error, existing_rethrow_error, execution_err) {
-            (Some(_), _, _) => unsafe {
+        match (network_error, existing_rethrow_error) {
+            (Some(_), _) => unsafe {
                 let err = gen_type_error(&global, "Dynamic import failed".to_owned());
                 JS_SetPendingException(*cx, err.handle(), ExceptionStackBehavior::Capture);
-                DynamicImportStatus::Failed
             },
-            (None, _, Some(execution_err)) => unsafe {
-                JS_SetPendingException(
-                    *cx,
-                    execution_err.handle(),
-                    ExceptionStackBehavior::Capture,
-                );
-                DynamicImportStatus::Failed
-            },
-            (None, Some(rethrow_error), _) => unsafe {
+            (None, Some(rethrow_error)) => unsafe {
                 JS_SetPendingException(
                     *cx,
                     rethrow_error.handle(),
                     ExceptionStackBehavior::Capture,
                 );
-                DynamicImportStatus::Failed
             },
             // do nothing if there's no errors
-            (None, None, None) => DynamicImportStatus::Ok,
+            (None, None) => {},
         };
 
         debug!("Finishing dynamic import for {:?}", module_identity);
 
+        rooted!(in(*cx) let mut evaluation_promise = ptr::null_mut::<JSObject>());
+        if rval.is_object() {
+            evaluation_promise.set(rval.to_object());
+        }
+
         unsafe {
-            FinishDynamicModuleImport_NoTLA(
+            let ok = FinishDynamicModuleImport(
                 *cx,
-                status,
+                evaluation_promise.handle().into(),
                 module.referencing_private.handle(),
                 module.specifier.handle(),
                 module.promise.reflector().get_jsobject().into_handle(),
             );
-            assert!(!JS_IsExceptionPending(*cx));
+            if ok {
+                assert!(!JS_IsExceptionPending(*cx));
+            } else {
+                warn!("failed to finish dynamic module import");
+            }
         }
-        return;
     }
 }
 
@@ -1126,7 +1112,7 @@ impl FetchResponseListener for ModuleContext {
                 } else {
                     return Err(NetworkError::Internal(format!(
                         "Failed to parse MIME type: {}",
-                        content_type.to_string()
+                        content_type
                     )));
                 }
             } else {
@@ -1145,15 +1131,15 @@ impl FetchResponseListener for ModuleContext {
 
         let module_tree = {
             let module_map = global.get_module_map().borrow();
-            module_map.get(&self.url.clone()).unwrap().clone()
+            module_map.get(&self.url).unwrap().clone()
         };
 
-        module_tree.remove_incomplete_fetch_url(self.url.clone());
+        module_tree.remove_incomplete_fetch_url(&self.url);
 
         // Step 12.
         match load {
             Err(err) => {
-                error!("Failed to fetch {} with error {:?}", self.url.clone(), err);
+                error!("Failed to fetch {} with error {:?}", &self.url, err);
                 module_tree.set_network_error(err);
                 module_tree.advance_finished_and_link(&global);
             },
@@ -1164,7 +1150,7 @@ impl FetchResponseListener for ModuleContext {
                     &global,
                     self.owner.clone(),
                     resp_mod_script.text(),
-                    self.url.clone(),
+                    &self.url,
                     self.options.clone(),
                 );
 
@@ -1178,7 +1164,7 @@ impl FetchResponseListener for ModuleContext {
 
                         module_tree.fetch_module_descendants(
                             &self.owner,
-                            self.destination.clone(),
+                            self.destination,
                             &self.options,
                             ModuleIdentity::ModuleUrl(self.url.clone()),
                         );
@@ -1249,7 +1235,7 @@ unsafe extern "C" fn host_release_top_level_script(value: *const Value) {
 pub unsafe extern "C" fn host_import_module_dynamically(
     cx: *mut JSContext,
     reference_private: RawHandleValue,
-    specifier: RawHandle<*mut JSString>,
+    specifier: RawHandle<*mut JSObject>,
     promise: RawHandle<*mut JSObject>,
 ) -> bool {
     // Step 1.
@@ -1291,11 +1277,15 @@ pub unsafe extern "C" fn host_import_module_dynamically(
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 /// <https://html.spec.whatwg.org/multipage/#script-fetch-options>
 pub struct ScriptFetchOptions {
+    #[no_trace]
     pub referrer: Referrer,
     pub integrity_metadata: String,
+    #[no_trace]
     pub credentials_mode: CredentialsMode,
     pub cryptographic_nonce: String,
+    #[no_trace]
     pub parser_metadata: ParserMetadata,
+    #[no_trace]
     pub referrer_policy: Option<ReferrerPolicy>,
 }
 
@@ -1326,7 +1316,7 @@ impl ScriptFetchOptions {
 }
 
 #[allow(unsafe_code)]
-unsafe fn module_script_from_reference_private<'a>(
+unsafe fn module_script_from_reference_private(
     reference_private: &RawHandle<JSVal>,
 ) -> Option<&ModuleScript> {
     if reference_private.get().is_undefined() {
@@ -1339,19 +1329,21 @@ unsafe fn module_script_from_reference_private<'a>(
 #[allow(unsafe_code)]
 fn fetch_an_import_module_script_graph(
     global: &GlobalScope,
-    specifier: RawHandle<*mut JSString>,
+    module_request: RawHandle<*mut JSObject>,
     reference_private: RawHandleValue,
     base_url: ServoUrl,
     options: ScriptFetchOptions,
     promise: Rc<Promise>,
 ) -> Result<(), RethrowError> {
     // Step 1.
-    let url = ModuleTree::resolve_module_specifier(*global.get_cx(), &base_url, specifier);
+    let cx = GlobalScope::get_cx();
+    rooted!(in(*cx) let specifier = unsafe { GetModuleRequestSpecifier(*cx, module_request) });
+    let url = ModuleTree::resolve_module_specifier(*cx, &base_url, specifier.handle().into());
 
     // Step 2.
     if url.is_err() {
         let specifier_error =
-            unsafe { gen_type_error(&global, "Wrong module specifier".to_owned()) };
+            unsafe { gen_type_error(global, "Wrong module specifier".to_owned()) };
         return Err(specifier_error);
     }
 
@@ -1363,7 +1355,7 @@ fn fetch_an_import_module_script_graph(
         _ => ModuleOwner::DynamicModule(Trusted::new(&DynamicModuleOwner::new(
             global,
             promise.clone(),
-            dynamic_module_id.clone(),
+            dynamic_module_id,
         ))),
     };
 
@@ -1373,7 +1365,7 @@ fn fetch_an_import_module_script_graph(
         referencing_private: Heap::default(),
         id: dynamic_module_id,
     });
-    dynamic_module.specifier.set(specifier.get());
+    dynamic_module.specifier.set(module_request.get());
     dynamic_module
         .referencing_private
         .set(reference_private.get());
@@ -1397,12 +1389,12 @@ fn fetch_an_import_module_script_graph(
 }
 
 #[allow(unsafe_code, non_snake_case)]
-/// https://tc39.github.io/ecma262/#sec-hostresolveimportedmodule
-/// https://html.spec.whatwg.org/multipage/#hostresolveimportedmodule(referencingscriptormodule%2C-specifier)
+/// <https://tc39.github.io/ecma262/#sec-hostresolveimportedmodule>
+/// <https://html.spec.whatwg.org/multipage/#hostresolveimportedmodule(referencingscriptormodule%2C-specifier)>
 unsafe extern "C" fn HostResolveImportedModule(
     cx: *mut JSContext,
     reference_private: RawHandleValue,
-    specifier: RawHandle<*mut JSString>,
+    specifier: RawHandle<*mut JSObject>,
 ) -> *mut JSObject {
     let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
     let global_scope = GlobalScope::from_context(cx, InRealm::Already(&in_realm_proof));
@@ -1417,7 +1409,12 @@ unsafe extern "C" fn HostResolveImportedModule(
     }
 
     // Step 5.
-    let url = ModuleTree::resolve_module_specifier(*global_scope.get_cx(), &base_url, specifier);
+    rooted!(in(*GlobalScope::get_cx()) let specifier = GetModuleRequestSpecifier(cx, specifier));
+    let url = ModuleTree::resolve_module_specifier(
+        *GlobalScope::get_cx(),
+        &base_url,
+        specifier.handle().into(),
+    );
 
     // Step 6.
     assert!(url.is_ok());
@@ -1446,8 +1443,8 @@ unsafe extern "C" fn HostResolveImportedModule(
 }
 
 #[allow(unsafe_code, non_snake_case)]
-/// https://tc39.es/ecma262/#sec-hostgetimportmetaproperties
-/// https://html.spec.whatwg.org/multipage/#hostgetimportmetaproperties
+/// <https://tc39.es/ecma262/#sec-hostgetimportmetaproperties>
+/// <https://html.spec.whatwg.org/multipage/#hostgetimportmetaproperties>
 unsafe extern "C" fn HostPopulateImportMeta(
     cx: *mut JSContext,
     reference_private: RawHandleValue,
@@ -1472,13 +1469,13 @@ unsafe extern "C" fn HostPopulateImportMeta(
     JS_DefineProperty4(
         cx,
         meta_object,
-        "url\0".as_ptr() as *const _,
+        c"url".as_ptr(),
         url_string.handle().into_handle(),
         JSPROP_ENUMERATE.into(),
     )
 }
 
-/// https://html.spec.whatwg.org/multipage/#fetch-a-module-script-tree
+/// <https://html.spec.whatwg.org/multipage/#fetch-a-module-script-tree>
 pub(crate) fn fetch_external_module_script(
     owner: ModuleOwner,
     url: ServoUrl,
@@ -1502,7 +1499,7 @@ pub(crate) fn fetch_external_module_script(
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub(crate) struct DynamicModuleList {
     requests: Vec<RootedTraceableBox<DynamicModule>>,
 
@@ -1536,20 +1533,21 @@ impl DynamicModuleList {
     }
 }
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 struct DynamicModule {
     #[ignore_malloc_size_of = "Rc is hard"]
     promise: Rc<Promise>,
     #[ignore_malloc_size_of = "GC types are hard"]
-    specifier: Heap<*mut JSString>,
+    specifier: Heap<*mut JSObject>,
     #[ignore_malloc_size_of = "GC types are hard"]
     referencing_private: Heap<JSVal>,
     #[ignore_malloc_size_of = "Defined in uuid"]
     id: DynamicModuleId,
 }
 
-/// https://html.spec.whatwg.org/multipage/#fetch-a-single-module-script
+/// <https://html.spec.whatwg.org/multipage/#fetch-a-single-module-script>
+#[allow(clippy::too_many_arguments)]
 fn fetch_single_module_script(
     owner: ModuleOwner,
     url: ServoUrl,
@@ -1631,13 +1629,13 @@ fn fetch_single_module_script(
         module_tree.insert_parent_identity(parent_identity);
     }
 
-    module_tree.insert_incomplete_fetch_url(url.clone());
+    module_tree.insert_incomplete_fetch_url(&url);
 
     // Step 4.
     global.set_module_map(url.clone(), module_tree);
 
     // Step 5-6.
-    let mode = match destination.clone() {
+    let mode = match destination {
         Destination::Worker | Destination::SharedWorker if top_level_module_fetch => {
             RequestMode::SameOrigin
         },
@@ -1651,7 +1649,7 @@ fn fetch_single_module_script(
 
     // Step 7-8.
     let request = RequestBuilder::new(url.clone(), global.get_referrer())
-        .destination(destination.clone())
+        .destination(destination)
         .origin(global.origin().immutable().clone())
         .parser_metadata(options.parser_metadata)
         .integrity_metadata(options.integrity_metadata.clone())
@@ -1663,7 +1661,7 @@ fn fetch_single_module_script(
         data: vec![],
         metadata: None,
         url: url.clone(),
-        destination: destination.clone(),
+        destination,
         options,
         status: Ok(()),
         resource_timing: ResourceFetchTiming::new(ResourceTimingType::Resource),
@@ -1689,7 +1687,7 @@ fn fetch_single_module_script(
     match document {
         Some(doc) => doc.fetch_async(LoadType::Script(url), request, action_sender),
         None => {
-            let _ = global
+            global
                 .resource_threads()
                 .sender()
                 .send(CoreResourceMsg::Fetch(
@@ -1702,7 +1700,7 @@ fn fetch_single_module_script(
 }
 
 #[allow(unsafe_code)]
-/// https://html.spec.whatwg.org/multipage/#fetch-an-inline-module-script-graph
+/// <https://html.spec.whatwg.org/multipage/#fetch-an-inline-module-script-graph>
 pub(crate) fn fetch_inline_module_script(
     owner: ModuleOwner,
     module_script_text: Rc<DOMString>,
@@ -1718,7 +1716,7 @@ pub(crate) fn fetch_inline_module_script(
         &global,
         owner.clone(),
         module_script_text,
-        url.clone(),
+        &url,
         options.clone(),
     );
 
@@ -1726,7 +1724,7 @@ pub(crate) fn fetch_inline_module_script(
         Ok(record) => {
             module_tree.append_handler(
                 owner.clone(),
-                ModuleIdentity::ScriptId(script_id.clone()),
+                ModuleIdentity::ScriptId(script_id),
                 options.clone(),
             );
             module_tree.set_record(record);
@@ -1752,7 +1750,7 @@ pub(crate) fn fetch_inline_module_script(
         Err(exception) => {
             module_tree.set_rethrow_error(exception);
             module_tree.set_status(ModuleStatus::Finished);
-            global.set_inline_module_map(script_id.clone(), module_tree);
+            global.set_inline_module_map(script_id, module_tree);
             owner.notify_owner_to_finish(ModuleIdentity::ScriptId(script_id), options);
         },
     }

@@ -2,11 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum PrefValue {
@@ -14,6 +16,7 @@ pub enum PrefValue {
     Int(i64),
     Str(String),
     Bool(bool),
+    Array(Vec<PrefValue>),
     Missing,
 }
 
@@ -51,10 +54,7 @@ impl PrefValue {
     }
 
     pub fn is_missing(&self) -> bool {
-        match self {
-            PrefValue::Missing => true,
-            _ => false,
-        }
+        matches!(self, PrefValue::Missing)
     }
 
     pub fn from_json_value(value: &Value) -> Option<Self> {
@@ -147,6 +147,35 @@ impl_from_pref! {
     PrefValue::Bool => bool,
 }
 
+impl From<[f64; 4]> for PrefValue {
+    fn from(other: [f64; 4]) -> PrefValue {
+        PrefValue::Array(IntoIterator::into_iter(other).map(|v| v.into()).collect())
+    }
+}
+
+impl From<PrefValue> for [f64; 4] {
+    fn from(other: PrefValue) -> [f64; 4] {
+        match other {
+            PrefValue::Array(values) if values.len() == 4 => {
+                let f = values.into_iter().map(Into::into).collect::<Vec<f64>>();
+                if f.len() == 4 {
+                    [f[0], f[1], f[2], f[3]]
+                } else {
+                    panic!(
+                        "Cannot convert PrefValue to {:?}",
+                        std::any::type_name::<[f64; 4]>()
+                    )
+                }
+            },
+            _ => panic!(
+                "Cannot convert {:?} to {:?}",
+                other,
+                std::any::type_name::<[f64; 4]>()
+            ),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum PrefError {
     NoSuchPref(String),
@@ -157,7 +186,7 @@ pub enum PrefError {
 impl fmt::Display for PrefError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            PrefError::NoSuchPref(s) | PrefError::InvalidValue(s) => f.write_str(&s),
+            PrefError::NoSuchPref(s) | PrefError::InvalidValue(s) => f.write_str(s),
             PrefError::JsonParseErr(e) => e.fmt(f),
         }
     }
@@ -167,6 +196,7 @@ impl std::error::Error for PrefError {}
 
 pub struct Accessor<P, V> {
     pub getter: Box<dyn Fn(&P) -> V + Sync>,
+    #[allow(clippy::type_complexity)]
     pub setter: Box<dyn Fn(&mut P, V) + Sync>,
 }
 
@@ -184,7 +214,7 @@ impl<P, V> Accessor<P, V> {
 }
 
 pub struct Preferences<'m, P> {
-    user_prefs: Arc<RwLock<P>>,
+    user_prefs: RwLock<P>,
     default_prefs: P,
     accessors: &'m HashMap<String, Accessor<P, PrefValue>>,
 }
@@ -194,15 +224,15 @@ impl<'m, P: Clone> Preferences<'m, P> {
     /// can always be restored using `reset` or `reset_all`.
     pub fn new(default_prefs: P, accessors: &'m HashMap<String, Accessor<P, PrefValue>>) -> Self {
         Self {
-            user_prefs: Arc::new(RwLock::new(default_prefs.clone())),
+            user_prefs: RwLock::new(default_prefs.clone()),
             default_prefs,
             accessors,
         }
     }
 
     /// Access to the data structure holding the preference values.
-    pub fn values(&self) -> Arc<RwLock<P>> {
-        Arc::clone(&self.user_prefs)
+    pub fn values(&self) -> &RwLock<P> {
+        &self.user_prefs
     }
 
     /// Retrieve a preference using its key
@@ -227,7 +257,7 @@ impl<'m, P: Clone> Preferences<'m, P> {
     }
 
     /// Creates an iterator over all keys and values
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (String, PrefValue)> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = (String, PrefValue)> + '_ {
         let prefs = self.user_prefs.read().unwrap();
         self.accessors
             .iter()
@@ -235,16 +265,17 @@ impl<'m, P: Clone> Preferences<'m, P> {
     }
 
     /// Creates an iterator over all keys
-    pub fn keys<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+    pub fn keys(&self) -> impl Iterator<Item = &'_ str> {
         self.accessors.keys().map(String::as_str)
     }
 
-    fn set_inner<V>(&self, key: &str, mut prefs: &mut P, val: V) -> Result<(), PrefError>
+    fn set_inner<V>(&self, key: &str, prefs: &mut P, val: V) -> Result<(), PrefError>
     where
         V: Into<PrefValue>,
     {
         if let Some(accessor) = self.accessors.get(key) {
-            Ok((accessor.setter)(&mut prefs, val.into()))
+            (accessor.setter)(prefs, val.into());
+            Ok(())
         } else {
             Err(PrefError::NoSuchPref(String::from(key)))
         }

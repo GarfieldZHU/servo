@@ -5,7 +5,9 @@
 //! This is an abstraction used by `HTMLInputElement` and `HTMLTextAreaElement` to implement the
 //! text control selection DOM API.
 //!
-//! https://html.spec.whatwg.org/multipage/#textFieldSelection
+//! <https://html.spec.whatwg.org/multipage/#textFieldSelection>
+
+use script_traits::ScriptToConstellationChan;
 
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HTMLFormElementBinding::SelectionMode;
@@ -16,7 +18,6 @@ use crate::dom::event::{EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::node::{window_from_node, Node, NodeDamage};
 use crate::textinput::{SelectionDirection, SelectionState, TextInput, UTF8Bytes};
-use script_traits::ScriptToConstellationChan;
 
 pub trait TextControlElement: DerivedFrom<EventTarget> + DerivedFrom<Node> {
     fn selection_api_applies(&self) -> bool;
@@ -125,7 +126,7 @@ impl<'a, E: TextControlElement> TextControlSelection<'a, E> {
         self.set_range(
             Some(self.start()),
             Some(self.end()),
-            direction.map(|d| SelectionDirection::from(d)),
+            direction.map(SelectionDirection::from),
             None,
         );
         Ok(())
@@ -142,7 +143,7 @@ impl<'a, E: TextControlElement> TextControlSelection<'a, E> {
         self.set_range(
             Some(start),
             Some(end),
-            direction.map(|d| SelectionDirection::from(d)),
+            direction.map(SelectionDirection::from),
             None,
         );
         Ok(())
@@ -304,7 +305,7 @@ impl<'a, E: TextControlElement> TextControlSelection<'a, E> {
                 .task_manager()
                 .user_interaction_task_source()
                 .queue_event(
-                    &self.element.upcast::<EventTarget>(),
+                    self.element.upcast::<EventTarget>(),
                     atom!("select"),
                     EventBubbles::Bubbles,
                     EventCancelable::NotCancelable,

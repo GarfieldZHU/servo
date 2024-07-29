@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use net_traits::ResourceFetchTiming;
+use servo_url::ServoUrl;
+
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
 use crate::dom::bindings::codegen::Bindings::PerformanceResourceTimingBinding::PerformanceResourceTimingMethods;
 use crate::dom::bindings::reflector::reflect_dom_object;
@@ -10,9 +14,6 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::performance::reduce_timing_resolution;
 use crate::dom::performanceentry::PerformanceEntry;
-use dom_struct::dom_struct;
-use net_traits::ResourceFetchTiming;
-use servo_url::ServoUrl;
 
 // TODO UA may choose to limit how many resources are included as PerformanceResourceTiming objects
 // recommended minimum is 150, can be changed by setResourceTimingBufferSize in performance
@@ -79,12 +80,12 @@ impl PerformanceResourceTiming {
                 0.,
                 0.,
             ),
-            initiator_type: initiator_type,
-            next_hop: next_hop,
+            initiator_type,
+            next_hop,
             worker_start: 0.,
             redirect_start: 0.,
             redirect_end: 0.,
-            fetch_start: fetch_start,
+            fetch_start,
             domain_lookup_end: 0.,
             domain_lookup_start: 0.,
             connect_start: 0.,
@@ -100,7 +101,7 @@ impl PerformanceResourceTiming {
     }
 
     //TODO fetch start should be in RFT
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn from_resource_timing(
         url: ServoUrl,
         initiator_type: InitiatorType,
@@ -114,8 +115,8 @@ impl PerformanceResourceTiming {
                 resource_timing.start_time as f64,
                 resource_timing.response_end as f64 - resource_timing.start_time as f64,
             ),
-            initiator_type: initiator_type,
-            next_hop: next_hop,
+            initiator_type,
+            next_hop,
             worker_start: 0.,
             redirect_start: resource_timing.redirect_start as f64,
             redirect_end: resource_timing.redirect_end as f64,
@@ -172,7 +173,7 @@ impl PerformanceResourceTimingMethods for PerformanceResourceTiming {
     // when a proxy is configured
     fn NextHopProtocol(&self) -> DOMString {
         match self.next_hop {
-            Some(ref protocol) => DOMString::from(protocol.clone()),
+            Some(ref protocol) => protocol.clone(),
             None => DOMString::from(""),
         }
     }

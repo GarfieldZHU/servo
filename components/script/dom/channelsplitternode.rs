@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_media::audio::node::AudioNodeInit;
+
 use crate::dom::audionode::{AudioNode, MAX_CHANNEL_COUNT};
 use crate::dom::baseaudiocontext::BaseAudioContext;
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
@@ -9,11 +13,9 @@ use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::ChannelSplitterNodeBinding::ChannelSplitterOptions;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_media::audio::node::AudioNodeInit;
 
 #[dom_struct]
 pub struct ChannelSplitterNode {
@@ -21,7 +23,7 @@ pub struct ChannelSplitterNode {
 }
 
 impl ChannelSplitterNode {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         _: &Window,
         context: &BaseAudioContext,
@@ -54,22 +56,32 @@ impl ChannelSplitterNode {
         Ok(ChannelSplitterNode { node })
     }
 
-    #[allow(unrooted_must_root)]
     pub fn new(
         window: &Window,
         context: &BaseAudioContext,
         options: &ChannelSplitterOptions,
     ) -> Fallible<DomRoot<ChannelSplitterNode>> {
+        Self::new_with_proto(window, None, context, options)
+    }
+
+    #[allow(crown::unrooted_must_root)]
+    fn new_with_proto(
+        window: &Window,
+        proto: Option<HandleObject>,
+        context: &BaseAudioContext,
+        options: &ChannelSplitterOptions,
+    ) -> Fallible<DomRoot<ChannelSplitterNode>> {
         let node = ChannelSplitterNode::new_inherited(window, context, options)?;
-        Ok(reflect_dom_object(Box::new(node), window))
+        Ok(reflect_dom_object_with_proto(Box::new(node), window, proto))
     }
 
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         context: &BaseAudioContext,
         options: &ChannelSplitterOptions,
     ) -> Fallible<DomRoot<ChannelSplitterNode>> {
-        ChannelSplitterNode::new(window, context, options)
+        ChannelSplitterNode::new_with_proto(window, proto, context, options)
     }
 }

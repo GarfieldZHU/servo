@@ -2,13 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::TouchBinding::TouchMethods;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{DomRoot, MutDom};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
 
 #[dom_struct]
 pub struct Touch {
@@ -24,6 +25,7 @@ pub struct Touch {
 }
 
 impl Touch {
+    #[allow(clippy::too_many_arguments)]
     fn new_inherited(
         identifier: i32,
         target: &EventTarget,
@@ -36,7 +38,7 @@ impl Touch {
     ) -> Touch {
         Touch {
             reflector_: Reflector::new(),
-            identifier: identifier,
+            identifier,
             target: MutDom::new(target),
             screen_x: *screen_x,
             screen_y: *screen_y,
@@ -47,6 +49,7 @@ impl Touch {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         window: &Window,
         identifier: i32,

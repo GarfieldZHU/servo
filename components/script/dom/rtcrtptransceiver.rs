@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::RTCRtpTransceiverBinding::{
     RTCRtpTransceiverDirection, RTCRtpTransceiverMethods,
 };
@@ -9,8 +13,6 @@ use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::rtcrtpsender::RTCRtpSender;
-use dom_struct::dom_struct;
-use std::cell::Cell;
 
 #[dom_struct]
 pub struct RTCRtpTransceiver {
@@ -38,17 +40,17 @@ impl RTCRtpTransceiver {
 }
 
 impl RTCRtpTransceiverMethods for RTCRtpTransceiver {
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcrtptransceiver-direction
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcrtptransceiver-direction>
     fn Direction(&self) -> RTCRtpTransceiverDirection {
         self.direction.get()
     }
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcrtptransceiver-direction
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcrtptransceiver-direction>
     fn SetDirection(&self, direction: RTCRtpTransceiverDirection) {
         self.direction.set(direction);
     }
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcrtptransceiver-sender
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcrtptransceiver-sender>
     fn Sender(&self) -> DomRoot<RTCRtpSender> {
         DomRoot::from_ref(&*self.sender)
     }

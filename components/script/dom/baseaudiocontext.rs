@@ -2,6 +2,25 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use base::id::PipelineId;
+use dom_struct::dom_struct;
+use js::rust::CustomAutoRooterGuard;
+use js::typedarray::ArrayBuffer;
+use servo_media::audio::context::{
+    AudioContext, AudioContextOptions, OfflineAudioContextOptions, ProcessingState,
+    RealTimeAudioContextOptions,
+};
+use servo_media::audio::decoder::AudioDecoderCallbacks;
+use servo_media::audio::graph::NodeId;
+use servo_media::{ClientContextId, ServoMedia};
+use uuid::Uuid;
+
 use crate::dom::analysernode::AnalyserNode;
 use crate::dom::audiobuffer::AudioBuffer;
 use crate::dom::audiobuffersourcenode::AudioBufferSourceNode;
@@ -12,14 +31,12 @@ use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::AnalyserNodeBinding::AnalyserOptions;
 use crate::dom::bindings::codegen::Bindings::AudioBufferSourceNodeBinding::AudioBufferSourceOptions;
-use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::AudioNodeOptions;
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
-    ChannelCountMode, ChannelInterpretation,
+    AudioNodeOptions, ChannelCountMode, ChannelInterpretation,
 };
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::AudioContextState;
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContextMethods;
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::DecodeErrorCallback;
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::DecodeSuccessCallback;
+use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::{
+    AudioContextState, BaseAudioContextMethods, DecodeErrorCallback, DecodeSuccessCallback,
+};
 use crate::dom::bindings::codegen::Bindings::BiquadFilterNodeBinding::BiquadFilterOptions;
 use crate::dom::bindings::codegen::Bindings::ChannelMergerNodeBinding::ChannelMergerOptions;
 use crate::dom::bindings::codegen::Bindings::ChannelSplitterNodeBinding::ChannelSplitterOptions;
@@ -48,22 +65,6 @@ use crate::dom::stereopannernode::StereoPannerNode;
 use crate::dom::window::Window;
 use crate::realms::InRealm;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use js::rust::CustomAutoRooterGuard;
-use js::typedarray::ArrayBuffer;
-use msg::constellation_msg::PipelineId;
-use servo_media::audio::context::{AudioContext, AudioContextOptions, ProcessingState};
-use servo_media::audio::context::{OfflineAudioContextOptions, RealTimeAudioContextOptions};
-use servo_media::audio::decoder::AudioDecoderCallbacks;
-use servo_media::audio::graph::NodeId;
-use servo_media::{ClientContextId, ServoMedia};
-use std::cell::Cell;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
-use std::mem;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 
 #[allow(dead_code)]
 pub enum BaseAudioContextOptions {
@@ -78,25 +79,28 @@ struct DecodeResolver {
     pub error_callback: Option<Rc<DecodeErrorCallback>>,
 }
 
+type BoxedSliceOfPromises = Box<[Rc<Promise>]>;
+
 #[dom_struct]
 pub struct BaseAudioContext {
     eventtarget: EventTarget,
     #[ignore_malloc_size_of = "servo_media"]
+    #[no_trace]
     audio_context_impl: Arc<Mutex<AudioContext>>,
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-destination
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-destination>
     destination: MutNullableDom<AudioDestinationNode>,
     listener: MutNullableDom<AudioListener>,
     /// Resume promises which are soon to be fulfilled by a queued task.
     #[ignore_malloc_size_of = "promises are hard"]
-    in_flight_resume_promises_queue: DomRefCell<VecDeque<(Box<[Rc<Promise>]>, ErrorResult)>>,
-    /// https://webaudio.github.io/web-audio-api/#pendingresumepromises
+    in_flight_resume_promises_queue: DomRefCell<VecDeque<(BoxedSliceOfPromises, ErrorResult)>>,
+    /// <https://webaudio.github.io/web-audio-api/#pendingresumepromises>
     #[ignore_malloc_size_of = "promises are hard"]
     pending_resume_promises: DomRefCell<Vec<Rc<Promise>>>,
     #[ignore_malloc_size_of = "promises are hard"]
     decode_resolvers: DomRefCell<HashMap<String, DecodeResolver>>,
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-samplerate
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-samplerate>
     sample_rate: f32,
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-state
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-state>
     /// Although servo-media already keeps track of the control thread state,
     /// we keep a state flag here as well. This is so that we can synchronously
     /// throw when trying to do things on the context when the context has just
@@ -106,7 +110,7 @@ pub struct BaseAudioContext {
 }
 
 impl BaseAudioContext {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         options: BaseAudioContextOptions,
         pipeline_id: PipelineId,
@@ -120,7 +124,7 @@ impl BaseAudioContext {
 
         let client_context_id =
             ClientContextId::build(pipeline_id.namespace_id.0, pipeline_id.index.0.get());
-        let context = BaseAudioContext {
+        BaseAudioContext {
             eventtarget: EventTarget::new_inherited(),
             audio_context_impl: ServoMedia::get()
                 .unwrap()
@@ -133,9 +137,7 @@ impl BaseAudioContext {
             sample_rate,
             state: Cell::new(AudioContextState::Suspended),
             channel_count: channel_count.into(),
-        };
-
-        context
+        }
     }
 
     /// Tells whether this is an OfflineAudioContext or not.
@@ -178,7 +180,7 @@ impl BaseAudioContext {
     /// which were taken and moved to the in-flight queue.
     fn take_pending_resume_promises(&self, result: ErrorResult) {
         let pending_resume_promises =
-            mem::replace(&mut *self.pending_resume_promises.borrow_mut(), vec![]);
+            std::mem::take(&mut *self.pending_resume_promises.borrow_mut());
         self.in_flight_resume_promises_queue
             .borrow_mut()
             .push_back((pending_resume_promises.into(), result));
@@ -190,9 +192,9 @@ impl BaseAudioContext {
     /// does not take a list of promises to fulfill. Callers cannot just pop
     /// the front list off of `in_flight_resume_promises_queue` and later fulfill
     /// the promises because that would mean putting
-    /// `#[allow(unrooted_must_root)]` on even more functions, potentially
+    /// `#[allow(crown::unrooted_must_root)]` on even more functions, potentially
     /// hiding actual safety bugs.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn fulfill_in_flight_resume_promises<F>(&self, f: F)
     where
         F: FnOnce(),
@@ -265,26 +267,26 @@ impl BaseAudioContext {
 }
 
 impl BaseAudioContextMethods for BaseAudioContext {
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-samplerate
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-samplerate>
     fn SampleRate(&self) -> Finite<f32> {
         Finite::wrap(self.sample_rate)
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-currenttime
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-currenttime>
     fn CurrentTime(&self) -> Finite<f64> {
         let current_time = self.audio_context_impl.lock().unwrap().current_time();
         Finite::wrap(current_time)
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-state
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-state>
     fn State(&self) -> AudioContextState {
         self.state.get()
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-resume
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-resume>
     fn Resume(&self, comp: InRealm) -> Rc<Promise> {
         // Step 1.
-        let promise = Promise::new_in_current_realm(&self.global(), comp);
+        let promise = Promise::new_in_current_realm(comp);
 
         // Step 2.
         if self.audio_context_impl.lock().unwrap().state() == ProcessingState::Closed {
@@ -312,7 +314,7 @@ impl BaseAudioContextMethods for BaseAudioContext {
         promise
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-destination
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-destination>
     fn Destination(&self) -> DomRoot<AudioDestinationNode> {
         let global = self.global();
         self.destination.or_init(|| {
@@ -324,97 +326,93 @@ impl BaseAudioContextMethods for BaseAudioContext {
         })
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-listener
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-listener>
     fn Listener(&self) -> DomRoot<AudioListener> {
         let global = self.global();
         let window = global.as_window();
-        self.listener.or_init(|| AudioListener::new(&window, self))
+        self.listener.or_init(|| AudioListener::new(window, self))
     }
 
     // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-onstatechange
     event_handler!(statechange, GetOnstatechange, SetOnstatechange);
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createoscillator
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createoscillator>
     fn CreateOscillator(&self) -> Fallible<DomRoot<OscillatorNode>> {
-        OscillatorNode::new(
-            &self.global().as_window(),
-            &self,
-            &OscillatorOptions::empty(),
-        )
+        OscillatorNode::new(self.global().as_window(), self, &OscillatorOptions::empty())
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-creategain
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-creategain>
     fn CreateGain(&self) -> Fallible<DomRoot<GainNode>> {
-        GainNode::new(&self.global().as_window(), &self, &GainOptions::empty())
+        GainNode::new(self.global().as_window(), self, &GainOptions::empty())
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createpanner
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createpanner>
     fn CreatePanner(&self) -> Fallible<DomRoot<PannerNode>> {
-        PannerNode::new(&self.global().as_window(), &self, &PannerOptions::empty())
+        PannerNode::new(self.global().as_window(), self, &PannerOptions::empty())
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createanalyser
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createanalyser>
     fn CreateAnalyser(&self) -> Fallible<DomRoot<AnalyserNode>> {
-        AnalyserNode::new(&self.global().as_window(), &self, &AnalyserOptions::empty())
+        AnalyserNode::new(self.global().as_window(), self, &AnalyserOptions::empty())
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbiquadfilter
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbiquadfilter>
     fn CreateBiquadFilter(&self) -> Fallible<DomRoot<BiquadFilterNode>> {
         BiquadFilterNode::new(
-            &self.global().as_window(),
-            &self,
+            self.global().as_window(),
+            self,
             &BiquadFilterOptions::empty(),
         )
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createstereopanner
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createstereopanner>
     fn CreateStereoPanner(&self) -> Fallible<DomRoot<StereoPannerNode>> {
         StereoPannerNode::new(
-            &self.global().as_window(),
-            &self,
+            self.global().as_window(),
+            self,
             &StereoPannerOptions::empty(),
         )
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createconstantsource
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createconstantsource>
     fn CreateConstantSource(&self) -> Fallible<DomRoot<ConstantSourceNode>> {
         ConstantSourceNode::new(
-            &self.global().as_window(),
-            &self,
+            self.global().as_window(),
+            self,
             &ConstantSourceOptions::empty(),
         )
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createchannelmerger
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createchannelmerger>
     fn CreateChannelMerger(&self, count: u32) -> Fallible<DomRoot<ChannelMergerNode>> {
         let mut opts = ChannelMergerOptions::empty();
         opts.numberOfInputs = count;
-        ChannelMergerNode::new(&self.global().as_window(), &self, &opts)
+        ChannelMergerNode::new(self.global().as_window(), self, &opts)
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createchannelsplitter
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createchannelsplitter>
     fn CreateChannelSplitter(&self, count: u32) -> Fallible<DomRoot<ChannelSplitterNode>> {
         let mut opts = ChannelSplitterOptions::empty();
         opts.numberOfOutputs = count;
-        ChannelSplitterNode::new(&self.global().as_window(), &self, &opts)
+        ChannelSplitterNode::new(self.global().as_window(), self, &opts)
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbuffer
+    /// <https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbuffer>
     fn CreateBuffer(
         &self,
         number_of_channels: u32,
         length: u32,
         sample_rate: Finite<f32>,
     ) -> Fallible<DomRoot<AudioBuffer>> {
-        if number_of_channels <= 0 ||
+        if number_of_channels == 0 ||
             number_of_channels > MAX_CHANNEL_COUNT ||
-            length <= 0 ||
+            length == 0 ||
             *sample_rate <= 0.
         {
             return Err(Error::NotSupported);
         }
         Ok(AudioBuffer::new(
-            &self.global().as_window(),
+            self.global().as_window(),
             number_of_channels,
             length,
             *sample_rate,
@@ -425,8 +423,8 @@ impl BaseAudioContextMethods for BaseAudioContext {
     // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbuffersource
     fn CreateBufferSource(&self) -> Fallible<DomRoot<AudioBufferSourceNode>> {
         AudioBufferSourceNode::new(
-            &self.global().as_window(),
-            &self,
+            self.global().as_window(),
+            self,
             &AudioBufferSourceOptions::empty(),
         )
     }
@@ -440,14 +438,14 @@ impl BaseAudioContextMethods for BaseAudioContext {
         comp: InRealm,
     ) -> Rc<Promise> {
         // Step 1.
-        let promise = Promise::new_in_current_realm(&self.global(), comp);
+        let promise = Promise::new_in_current_realm(comp);
         let global = self.global();
         let window = global.as_window();
 
         if audio_data.len() > 0 {
             // Step 2.
             // XXX detach array buffer.
-            let uuid = Uuid::new_v4().to_simple().to_string();
+            let uuid = Uuid::new_v4().simple().to_string();
             let uuid_ = uuid.clone();
             self.decode_resolvers.borrow_mut().insert(
                 uuid.clone(),
@@ -504,7 +502,7 @@ impl BaseAudioContextMethods for BaseAudioContext {
                                 0
                             };
                             let buffer = AudioBuffer::new(
-                                &this.global().as_window(),
+                                this.global().as_window(),
                                 decoded_audio.len() as u32 /* number of channels */,
                                 length as u32,
                                 this.sample_rate,

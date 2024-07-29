@@ -2,15 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasFillRule;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasImageSource;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineCap;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineJoin;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasRenderingContext2DMethods;
+use std::cell::Cell;
+
+use canvas_traits::canvas::{CanvasImageData, CanvasMsg, FromLayoutMsg};
+use dom_struct::dom_struct;
+use euclid::{Scale, Size2D};
+use ipc_channel::ipc::IpcSender;
+use servo_url::ServoUrl;
+use style_traits::{CSSPixel, DevicePixel};
+
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
+    CanvasFillRule, CanvasImageSource, CanvasLineCap, CanvasLineJoin,
+    CanvasRenderingContext2DMethods,
+};
 use crate::dom::bindings::codegen::Bindings::PaintRenderingContext2DBinding::PaintRenderingContext2DMethods;
 use crate::dom::bindings::codegen::UnionTypes::StringOrCanvasGradientOrCanvasPattern;
-use crate::dom::bindings::error::ErrorResult;
-use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::error::{ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::reflect_dom_object;
@@ -21,20 +28,11 @@ use crate::dom::canvaspattern::CanvasPattern;
 use crate::dom::canvasrenderingcontext2d::CanvasRenderingContext2D;
 use crate::dom::dommatrix::DOMMatrix;
 use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
-use canvas_traits::canvas::CanvasImageData;
-use canvas_traits::canvas::CanvasMsg;
-use canvas_traits::canvas::FromLayoutMsg;
-use dom_struct::dom_struct;
-use euclid::{Scale, Size2D};
-use ipc_channel::ipc::IpcSender;
-use servo_url::ServoUrl;
-use std::cell::Cell;
-use style_traits::CSSPixel;
-use style_traits::DevicePixel;
 
 #[dom_struct]
 pub struct PaintRenderingContext2D {
     context: CanvasRenderingContext2D,
+    #[no_trace]
     device_pixel_ratio: Cell<Scale<f32, CSSPixel, DevicePixel>>,
 }
 
@@ -95,6 +93,11 @@ impl PaintRenderingContext2DMethods for PaintRenderingContext2D {
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-restore
     fn Restore(&self) {
         self.context.Restore()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-reset>
+    fn Reset(&self) {
+        self.context.Reset()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-scale

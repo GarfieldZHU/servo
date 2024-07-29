@@ -4,18 +4,22 @@
 
 #![cfg(not(target_os = "windows"))]
 
-use crate::fetch;
-use crate::fetch_with_context;
-use crate::make_server;
-use crate::new_fetch_context;
-use cookie_rs::Cookie as CookiePair;
+use std::collections::HashMap;
+use std::io::Write;
+use std::str;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
+
+use base::id::TEST_PIPELINE_ID;
+use cookie::Cookie as CookiePair;
 use crossbeam_channel::{unbounded, Receiver};
-use devtools_traits::HttpRequest as DevtoolsHttpRequest;
-use devtools_traits::HttpResponse as DevtoolsHttpResponse;
-use devtools_traits::{ChromeToDevtoolsControlMsg, DevtoolsControlMsg, NetworkEvent};
+use devtools_traits::{
+    ChromeToDevtoolsControlMsg, DevtoolsControlMsg, HttpRequest as DevtoolsHttpRequest,
+    HttpResponse as DevtoolsHttpResponse, NetworkEvent,
+};
 use flate2::write::{DeflateEncoder, GzEncoder};
 use flate2::Compression;
-use futures::{self, Future, Stream};
 use headers::authorization::Basic;
 use headers::{
     Authorization, ContentLength, Date, HeaderMapExt, Host, StrictTransportSecurity, UserAgent,
@@ -23,12 +27,10 @@ use headers::{
 use http::header::{self, HeaderMap, HeaderValue};
 use http::uri::Authority;
 use http::{Method, StatusCode};
-use hyper::body::Body;
-use hyper::{Request as HyperRequest, Response as HyperResponse};
+use hyper::{Body, Request as HyperRequest, Response as HyperResponse};
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
-use msg::constellation_msg::TEST_PIPELINE_ID;
-use net::cookie::Cookie;
+use net::cookie::ServoCookie;
 use net::cookie_storage::CookieStorage;
 use net::http_loader::determine_requests_referrer;
 use net::resource_thread::AuthCacheEntry;
@@ -40,22 +42,11 @@ use net_traits::request::{
 use net_traits::response::ResponseBody;
 use net_traits::{CookieSource, NetworkError, ReferrerPolicy};
 use servo_url::{ImmutableOrigin, ServoUrl};
-use std::collections::HashMap;
-use std::io::Write;
-use std::str;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+
+use crate::{fetch, fetch_with_context, make_server, new_fetch_context};
 
 fn mock_origin() -> ImmutableOrigin {
     ServoUrl::parse("http://servo.org").unwrap().origin()
-}
-
-fn read_response(req: HyperRequest<Body>) -> impl Future<Item = String, Error = ()> {
-    req.into_body()
-        .concat2()
-        .and_then(|body| futures::future::ok(str::from_utf8(&body).unwrap().to_owned()))
-        .map_err(|_| ())
 }
 
 fn assert_cookie_for_domain(
@@ -145,14 +136,12 @@ fn test_check_default_headers_loaded_in_every_request() {
 
     headers.insert(
         header::ACCEPT,
-        HeaderValue::from_static(
-            "text/html, application/xhtml+xml, application/xml; q=0.9, */*; q=0.8",
-        ),
+        HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
     );
 
     headers.insert(
         header::ACCEPT_LANGUAGE,
-        HeaderValue::from_static("en-US, en; q=0.5"),
+        HeaderValue::from_static("en-US,en;q=0.5"),
     );
 
     headers.typed_insert::<UserAgent>(crate::DEFAULT_USER_AGENT.parse().unwrap());
@@ -278,23 +267,21 @@ fn test_request_and_response_data_with_network_messages() {
     let mut headers = HeaderMap::new();
 
     headers.insert(
-        header::ACCEPT_ENCODING,
-        HeaderValue::from_static("gzip, deflate, br"),
-    );
-
-    headers.insert(
         header::ACCEPT,
-        HeaderValue::from_static(
-            "text/html, application/xhtml+xml, application/xml; q=0.9, */*; q=0.8",
-        ),
+        HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
     );
 
     headers.insert(
         header::ACCEPT_LANGUAGE,
-        HeaderValue::from_static("en-US, en; q=0.5"),
+        HeaderValue::from_static("en-US,en;q=0.5"),
     );
 
     headers.typed_insert::<UserAgent>(crate::DEFAULT_USER_AGENT.parse().unwrap());
+
+    headers.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, deflate, br"),
+    );
 
     let httprequest = DevtoolsHttpRequest {
         url: url,
@@ -302,8 +289,8 @@ fn test_request_and_response_data_with_network_messages() {
         headers: headers,
         body: Some(vec![]),
         pipeline_id: TEST_PIPELINE_ID,
-        startedDateTime: devhttprequest.startedDateTime,
-        timeStamp: devhttprequest.timeStamp,
+        started_date_time: devhttprequest.started_date_time,
+        time_stamp: devhttprequest.time_stamp,
         connect_time: devhttprequest.connect_time,
         send_time: devhttprequest.send_time,
         is_xhr: false,
@@ -521,28 +508,18 @@ fn test_load_should_decode_the_response_as_gzip_when_response_headers_have_conte
 
 #[test]
 fn test_load_doesnt_send_request_body_on_any_redirect() {
+    use hyper::body::HttpBody;
+
     let post_handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
         assert_eq!(request.method(), Method::GET);
-        read_response(request)
-            .and_then(|data| {
-                assert_eq!(data, "");
-                futures::future::ok(())
-            })
-            .poll()
-            .unwrap();
+        assert_eq!(request.size_hint().exact(), Some(0));
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (post_server, post_url) = make_server(post_handler);
 
     let post_redirect_url = post_url.clone();
     let pre_handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        read_response(request)
-            .and_then(|data| {
-                assert_eq!(data, "Body on POST");
-                futures::future::ok(())
-            })
-            .poll()
-            .unwrap();
+        assert_eq!(request.size_hint().exact(), Some(13));
         response.headers_mut().insert(
             header::LOCATION,
             HeaderValue::from_str(&post_redirect_url.to_string()).unwrap(),
@@ -671,7 +648,7 @@ fn test_load_sets_requests_cookies_header_for_url_by_getting_cookies_from_the_re
 
     {
         let mut cookie_jar = context.state.cookie_jar.write().unwrap();
-        let cookie = Cookie::new_wrapped(
+        let cookie = ServoCookie::new_wrapped(
             CookiePair::new("mozillaIs".to_owned(), "theBest".to_owned()),
             &url,
             CookieSource::HTTP,
@@ -717,7 +694,7 @@ fn test_load_sends_cookie_if_nonhttp() {
 
     {
         let mut cookie_jar = context.state.cookie_jar.write().unwrap();
-        let cookie = Cookie::new_wrapped(
+        let cookie = ServoCookie::new_wrapped(
             CookiePair::new("mozillaIs".to_owned(), "theBest".to_owned()),
             &url,
             CookieSource::NonHTTP,
@@ -921,7 +898,7 @@ fn test_load_sets_default_accept_to_html_xhtml_xml_and_then_anything_else() {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "text/html, application/xhtml+xml, application/xml; q=0.9, */*; q=0.8"
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         );
         *response.body_mut() = b"Yay!".to_vec().into();
     };
@@ -1215,7 +1192,7 @@ fn test_redirect_from_x_to_y_provides_y_cookies_from_y() {
     let mut context = new_fetch_context(None, None, None);
     {
         let mut cookie_jar = context.state.cookie_jar.write().unwrap();
-        let cookie_x = Cookie::new_wrapped(
+        let cookie_x = ServoCookie::new_wrapped(
             CookiePair::new("mozillaIsNot".to_owned(), "dotOrg".to_owned()),
             &url_x,
             CookieSource::HTTP,
@@ -1224,7 +1201,7 @@ fn test_redirect_from_x_to_y_provides_y_cookies_from_y() {
 
         cookie_jar.push(cookie_x, &url_x, CookieSource::HTTP);
 
-        let cookie_y = Cookie::new_wrapped(
+        let cookie_y = ServoCookie::new_wrapped(
             CookiePair::new("mozillaIs".to_owned(), "theBest".to_owned()),
             &url_y,
             CookieSource::HTTP,

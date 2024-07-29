@@ -2,10 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::cmp::Ordering;
+use std::collections::VecDeque;
+
+use dom_struct::dom_struct;
+use metrics::ToMs;
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::PerformanceBinding::PerformanceEntryList as DOMPerformanceEntryList;
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::{
-    DOMHighResTimeStamp, PerformanceMethods,
+    DOMHighResTimeStamp, PerformanceEntryList as DOMPerformanceEntryList, PerformanceMethods,
 };
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -22,13 +28,8 @@ use crate::dom::performancenavigation::PerformanceNavigation;
 use crate::dom::performancenavigationtiming::PerformanceNavigationTiming;
 use crate::dom::performanceobserver::PerformanceObserver as DOMPerformanceObserver;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use metrics::ToMs;
-use std::cell::Cell;
-use std::cmp::Ordering;
-use std::collections::VecDeque;
 
-const INVALID_ENTRY_NAMES: &'static [&'static str] = &[
+const INVALID_ENTRY_NAMES: &[&str] = &[
     "navigationStart",
     "unloadEventStart",
     "unloadEventEnd",
@@ -56,7 +57,7 @@ const INVALID_ENTRY_NAMES: &'static [&'static str] = &[
 /// Performance and PerformanceObserverEntryList interfaces implementations.
 #[derive(JSTraceable, MallocSizeOf)]
 pub struct PerformanceEntryList {
-    /// https://w3c.github.io/performance-timeline/#dfn-performance-entry-buffer
+    /// <https://w3c.github.io/performance-timeline/#dfn-performance-entry-buffer>
     entries: DOMPerformanceEntryList,
 }
 
@@ -79,7 +80,7 @@ impl PerformanceEntryList {
                         .as_ref()
                         .map_or(true, |type_| *e.entry_type() == *type_)
             })
-            .map(|e| e.clone())
+            .cloned()
             .collect::<Vec<DomRoot<PerformanceEntry>>>();
         res.sort_by(|a, b| {
             a.start_time()
@@ -92,13 +93,11 @@ impl PerformanceEntryList {
     pub fn clear_entries_by_name_and_type(
         &mut self,
         name: Option<DOMString>,
-        entry_type: Option<DOMString>,
+        entry_type: DOMString,
     ) {
         self.entries.retain(|e| {
-            name.as_ref().map_or(true, |name_| *e.name() != *name_) &&
-                entry_type
-                    .as_ref()
-                    .map_or(true, |type_| *e.entry_type() != *type_)
+            *e.entry_type() != *entry_type ||
+                name.as_ref().map_or(false, |name_| *e.name() != *name_)
         });
     }
 
@@ -141,7 +140,7 @@ pub struct Performance {
     observers: DomRefCell<Vec<PerformanceObserver>>,
     pending_notification_observers_task: Cell<bool>,
     navigation_start_precise: u64,
-    /// https://w3c.github.io/performance-timeline/#dfn-maxbuffersize
+    /// <https://w3c.github.io/performance-timeline/#dfn-maxbuffersize>
     /// The max-size of the buffer, set to 0 once the pipeline exits.
     /// TODO: have one max-size per entry type.
     resource_timing_buffer_size_limit: Cell<usize>,
@@ -212,7 +211,7 @@ impl Performance {
             let buffer = self.buffer.borrow();
             let mut new_entries =
                 buffer.get_entries_by_name_and_type(None, Some(entry_type.clone()));
-            if new_entries.len() > 0 {
+            if !new_entries.is_empty() {
                 let mut obs_entries = observer.entries();
                 obs_entries.append(&mut new_entries);
                 observer.set_entries(obs_entries);
@@ -371,7 +370,7 @@ impl Performance {
         self.resource_timing_buffer_pending_full_event.set(false);
     }
     /// `add a PerformanceResourceTiming entry` paragraph of
-    /// https://w3c.github.io/resource-timing/#sec-extensions-performance-interface
+    /// <https://w3c.github.io/resource-timing/#sec-extensions-performance-interface>
     fn should_queue_resource_entry(&self, entry: &PerformanceEntry) -> bool {
         // Step 1 is done in the args list.
         if !self.resource_timing_buffer_pending_full_event.get() {
@@ -407,7 +406,7 @@ impl PerformanceMethods for Performance {
     // https://dvcs.w3.org/hg/webperf/raw-file/tip/specs/NavigationTiming/Overview.html#performance-timing-attribute
     fn Timing(&self) -> DomRoot<PerformanceNavigationTiming> {
         let entries = self.GetEntriesByType(DOMString::from("navigation"));
-        if entries.len() > 0 {
+        if !entries.is_empty() {
             return DomRoot::from_ref(
                 entries[0]
                     .downcast::<PerformanceNavigationTiming>()
@@ -468,7 +467,7 @@ impl PerformanceMethods for Performance {
         // Steps 2 to 6.
         let entry = PerformanceMark::new(&global, mark_name, self.now(), 0.);
         // Steps 7 and 8.
-        self.queue_entry(&entry.upcast::<PerformanceEntry>());
+        self.queue_entry(entry.upcast::<PerformanceEntry>());
 
         // Step 9.
         Ok(())
@@ -478,7 +477,7 @@ impl PerformanceMethods for Performance {
     fn ClearMarks(&self, mark_name: Option<DOMString>) {
         self.buffer
             .borrow_mut()
-            .clear_entries_by_name_and_type(mark_name, Some(DOMString::from("mark")));
+            .clear_entries_by_name_and_type(mark_name, DOMString::from("mark"));
     }
 
     // https://w3c.github.io/user-timing/#dom-performance-measure
@@ -515,7 +514,7 @@ impl PerformanceMethods for Performance {
         );
 
         // Step 9 and 10.
-        self.queue_entry(&entry.upcast::<PerformanceEntry>());
+        self.queue_entry(entry.upcast::<PerformanceEntry>());
 
         // Step 11.
         Ok(())
@@ -525,13 +524,13 @@ impl PerformanceMethods for Performance {
     fn ClearMeasures(&self, measure_name: Option<DOMString>) {
         self.buffer
             .borrow_mut()
-            .clear_entries_by_name_and_type(measure_name, Some(DOMString::from("measure")));
+            .clear_entries_by_name_and_type(measure_name, DOMString::from("measure"));
     }
     // https://w3c.github.io/resource-timing/#dom-performance-clearresourcetimings
     fn ClearResourceTimings(&self) {
         self.buffer
             .borrow_mut()
-            .clear_entries_by_name_and_type(None, Some(DOMString::from("resource")));
+            .clear_entries_by_name_and_type(None, DOMString::from("resource"));
         self.resource_timing_buffer_current_size.set(0);
     }
 

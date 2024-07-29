@@ -2,21 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use servo_arc::Arc;
+use style::shared_lock::{Locked, ToCssWithGuard};
+use style::stylesheets::{CssRuleType, FontFaceRule};
+
 use crate::dom::bindings::reflector::reflect_dom_object;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::cssrule::{CSSRule, SpecificCSSRule};
 use crate::dom::cssstylesheet::CSSStyleSheet;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_arc::Arc;
-use style::shared_lock::{Locked, ToCssWithGuard};
-use style::stylesheets::FontFaceRule;
 
 #[dom_struct]
 pub struct CSSFontFaceRule {
     cssrule: CSSRule,
     #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
     fontfacerule: Arc<Locked<FontFaceRule>>,
 }
 
@@ -27,11 +29,11 @@ impl CSSFontFaceRule {
     ) -> CSSFontFaceRule {
         CSSFontFaceRule {
             cssrule: CSSRule::new_inherited(parent_stylesheet),
-            fontfacerule: fontfacerule,
+            fontfacerule,
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         window: &Window,
         parent_stylesheet: &CSSStyleSheet,
@@ -48,9 +50,8 @@ impl CSSFontFaceRule {
 }
 
 impl SpecificCSSRule for CSSFontFaceRule {
-    fn ty(&self) -> u16 {
-        use crate::dom::bindings::codegen::Bindings::CSSRuleBinding::CSSRuleConstants;
-        CSSRuleConstants::FONT_FACE_RULE
+    fn ty(&self) -> CssRuleType {
+        CssRuleType::FontFace
     }
 
     fn get_css(&self) -> DOMString {

@@ -2,32 +2,33 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::canvas_data::*;
+use std::borrow::ToOwned;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread;
+
 use canvas_traits::canvas::*;
 use canvas_traits::ConstellationCanvasMsg;
 use crossbeam_channel::{select, unbounded, Sender};
 use euclid::default::Size2D;
-use gfx::font_cache_thread::FontCacheThread;
+use fonts::{FontCacheThread, FontContext};
 use ipc_channel::ipc::{self, IpcSender};
 use ipc_channel::router::ROUTER;
-use std::borrow::ToOwned;
-use std::collections::HashMap;
-use std::thread;
-use webrender_api::{ImageData, ImageDescriptor, ImageKey};
+use log::warn;
+use net_traits::ResourceThreads;
+use webrender_api::ImageKey;
+use webrender_traits::ImageUpdate;
+
+use crate::canvas_data::*;
 
 pub enum AntialiasMode {
     Default,
     None,
 }
 
-pub enum ImageUpdate {
-    Add(ImageKey, ImageDescriptor, ImageData),
-    Update(ImageKey, ImageDescriptor, ImageData),
-    Delete(ImageKey),
-}
-
 pub trait WebrenderApi {
-    fn generate_key(&self) -> Result<webrender_api::ImageKey, ()>;
+    /// Attempt to generate an [`ImageKey`], returning `None` in case of failure.
+    fn generate_key(&self) -> Option<ImageKey>;
     fn update_images(&self, updates: Vec<ImageUpdate>);
     fn clone(&self) -> Box<dyn WebrenderApi>;
 }
@@ -36,19 +37,20 @@ pub struct CanvasPaintThread<'a> {
     canvases: HashMap<CanvasId, CanvasData<'a>>,
     next_canvas_id: CanvasId,
     webrender_api: Box<dyn WebrenderApi>,
-    font_cache_thread: FontCacheThread,
+    font_context: Arc<FontContext<FontCacheThread>>,
 }
 
 impl<'a> CanvasPaintThread<'a> {
     fn new(
         webrender_api: Box<dyn WebrenderApi>,
         font_cache_thread: FontCacheThread,
+        resource_threads: ResourceThreads,
     ) -> CanvasPaintThread<'a> {
         CanvasPaintThread {
             canvases: HashMap::new(),
             next_canvas_id: CanvasId(0),
             webrender_api,
-            font_cache_thread,
+            font_context: Arc::new(FontContext::new(font_cache_thread, resource_threads)),
         }
     }
 
@@ -57,14 +59,16 @@ impl<'a> CanvasPaintThread<'a> {
     pub fn start(
         webrender_api: Box<dyn WebrenderApi + Send>,
         font_cache_thread: FontCacheThread,
+        resource_threads: ResourceThreads,
     ) -> (Sender<ConstellationCanvasMsg>, IpcSender<CanvasMsg>) {
         let (ipc_sender, ipc_receiver) = ipc::channel::<CanvasMsg>().unwrap();
         let msg_receiver = ROUTER.route_ipc_receiver_to_new_crossbeam_receiver(ipc_receiver);
         let (create_sender, create_receiver) = unbounded();
         thread::Builder::new()
-            .name("CanvasThread".to_owned())
+            .name("Canvas".to_owned())
             .spawn(move || {
-                let mut canvas_paint_thread = CanvasPaintThread::new(webrender_api, font_cache_thread);
+                let mut canvas_paint_thread = CanvasPaintThread::new(
+                    webrender_api, font_cache_thread, resource_threads);
                 loop {
                     select! {
                         recv(msg_receiver) -> msg => {
@@ -125,18 +129,16 @@ impl<'a> CanvasPaintThread<'a> {
             AntialiasMode::None
         };
 
-        let font_cache_thread = self.font_cache_thread.clone();
-
-        let canvas_id = self.next_canvas_id.clone();
+        let canvas_id = self.next_canvas_id;
         self.next_canvas_id.0 += 1;
 
         let canvas_data = CanvasData::new(
             size,
             self.webrender_api.clone(),
             antialias,
-            font_cache_thread,
+            self.font_context.clone(),
         );
-        self.canvases.insert(canvas_id.clone(), canvas_data);
+        self.canvases.insert(canvas_id, canvas_data);
 
         canvas_id
     }
@@ -172,22 +174,27 @@ impl<'a> CanvasPaintThread<'a> {
                 .canvas(canvas_id)
                 .is_point_in_path(x, y, fill_rule, chan),
             Canvas2dMsg::DrawImage(
-                imagedata,
+                ref image_data,
                 image_size,
                 dest_rect,
                 source_rect,
                 smoothing_enabled,
-            ) => {
-                let data = imagedata.map_or_else(
-                    || vec![0; image_size.width as usize * image_size.height as usize * 4],
-                    |bytes| bytes.into_vec(),
-                );
+            ) => self.canvas(canvas_id).draw_image(
+                image_data,
+                image_size,
+                dest_rect,
+                source_rect,
+                smoothing_enabled,
+                true,
+            ),
+            Canvas2dMsg::DrawEmptyImage(image_size, dest_rect, source_rect) => {
                 self.canvas(canvas_id).draw_image(
-                    data,
+                    &vec![0; image_size.area() as usize * 4],
                     image_size,
                     dest_rect,
                     source_rect,
-                    smoothing_enabled,
+                    false,
+                    false,
                 )
             },
             Canvas2dMsg::DrawImageInOther(
@@ -201,11 +208,12 @@ impl<'a> CanvasPaintThread<'a> {
                     .canvas(canvas_id)
                     .read_pixels(source_rect.to_u64(), image_size.to_u64());
                 self.canvas(other_canvas_id).draw_image(
-                    image_data.into(),
+                    &image_data,
                     source_rect.size,
                     dest_rect,
                     source_rect,
                     smoothing,
+                    false,
                 );
             },
             Canvas2dMsg::MoveTo(ref point) => self.canvas(canvas_id).move_to(point),
@@ -226,6 +234,10 @@ impl<'a> CanvasPaintThread<'a> {
             Canvas2dMsg::Ellipse(ref center, radius_x, radius_y, rotation, start, end, ccw) => self
                 .canvas(canvas_id)
                 .ellipse(center, radius_x, radius_y, rotation, start, end, ccw),
+            Canvas2dMsg::MeasureText(text, sender) => {
+                let metrics = self.canvas(canvas_id).measure_text(text);
+                sender.send(metrics).unwrap();
+            },
             Canvas2dMsg::RestoreContext => self.canvas(canvas_id).restore_context_state(),
             Canvas2dMsg::SaveContext => self.canvas(canvas_id).save_context_state(),
             Canvas2dMsg::SetLineWidth(width) => self.canvas(canvas_id).set_line_width(width),

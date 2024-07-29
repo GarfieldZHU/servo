@@ -2,6 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use webxr_api::{Frame, LayerId, SubImages};
+
 use crate::dom::bindings::codegen::Bindings::XRFrameBinding::XRFrameMethods;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::inheritance::Castable;
@@ -17,17 +22,13 @@ use crate::dom::xrreferencespace::XRReferenceSpace;
 use crate::dom::xrsession::{ApiPose, XRSession};
 use crate::dom::xrspace::XRSpace;
 use crate::dom::xrviewerpose::XRViewerPose;
-use dom_struct::dom_struct;
-use std::cell::Cell;
-use webxr_api::Frame;
-use webxr_api::LayerId;
-use webxr_api::SubImages;
 
 #[dom_struct]
 pub struct XRFrame {
     reflector_: Reflector,
     session: Dom<XRSession>,
     #[ignore_malloc_size_of = "defined in webxr_api"]
+    #[no_trace]
     data: Frame,
     active: Cell<bool>,
     animation_frame: Cell<bool>,
@@ -48,12 +49,12 @@ impl XRFrame {
         reflect_dom_object(Box::new(XRFrame::new_inherited(session, data)), global)
     }
 
-    /// https://immersive-web.github.io/webxr/#xrframe-active
+    /// <https://immersive-web.github.io/webxr/#xrframe-active>
     pub fn set_active(&self, active: bool) {
         self.active.set(active);
     }
 
-    /// https://immersive-web.github.io/webxr/#xrframe-animationframe
+    /// <https://immersive-web.github.io/webxr/#xrframe-animationframe>
     pub fn set_animation_frame(&self, animation_frame: bool) {
         self.animation_frame.set(animation_frame);
     }
@@ -66,18 +67,17 @@ impl XRFrame {
         self.data
             .sub_images
             .iter()
-            .filter(|sub_images| sub_images.layer_id == layer_id)
-            .next()
+            .find(|sub_images| sub_images.layer_id == layer_id)
     }
 }
 
 impl XRFrameMethods for XRFrame {
-    /// https://immersive-web.github.io/webxr/#dom-xrframe-session
+    /// <https://immersive-web.github.io/webxr/#dom-xrframe-session>
     fn Session(&self) -> DomRoot<XRSession> {
         DomRoot::from_ref(&self.session)
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrframe-getviewerpose
+    /// <https://immersive-web.github.io/webxr/#dom-xrframe-getviewerpose>
     fn GetViewerPose(
         &self,
         reference: &XRReferenceSpace,
@@ -108,7 +108,7 @@ impl XRFrameMethods for XRFrame {
         )))
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrframe-getpose
+    /// <https://immersive-web.github.io/webxr/#dom-xrframe-getpose>
     fn GetPose(
         &self,
         space: &XRSpace,
@@ -130,11 +130,11 @@ impl XRFrameMethods for XRFrame {
         } else {
             return Ok(None);
         };
-        let pose = relative_to.inverse().pre_transform(&space);
+        let pose = space.then(&relative_to.inverse());
         Ok(Some(XRPose::new(&self.global(), pose)))
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrframe-getpose
+    /// <https://immersive-web.github.io/webxr/#dom-xrframe-getpose>
     fn GetJointPose(
         &self,
         space: &XRJointSpace,
@@ -158,7 +158,7 @@ impl XRFrameMethods for XRFrame {
         } else {
             return Ok(None);
         };
-        let pose = relative_to.inverse().pre_transform(&joint_frame.pose);
+        let pose = joint_frame.pose.then(&relative_to.inverse());
         Ok(Some(XRJointPose::new(
             &self.global(),
             pose.cast_unit(),
@@ -166,7 +166,7 @@ impl XRFrameMethods for XRFrame {
         )))
     }
 
-    /// https://immersive-web.github.io/hit-test/#dom-xrframe-gethittestresults
+    /// <https://immersive-web.github.io/hit-test/#dom-xrframe-gethittestresults>
     fn GetHitTestResults(&self, source: &XRHitTestSource) -> Vec<DomRoot<XRHitTestResult>> {
         self.data
             .hit_test_results

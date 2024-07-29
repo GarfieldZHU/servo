@@ -2,23 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::task::TaskCanceller;
 use crate::task_source::dom_manipulation::DOMManipulationTaskSource;
 use crate::task_source::file_reading::FileReadingTaskSource;
+use crate::task_source::gamepad::GamepadTaskSource;
 use crate::task_source::history_traversal::HistoryTraversalTaskSource;
 use crate::task_source::media_element::MediaElementTaskSource;
 use crate::task_source::networking::NetworkingTaskSource;
 use crate::task_source::performance_timeline::PerformanceTimelineTaskSource;
 use crate::task_source::port_message::PortMessageQueue;
 use crate::task_source::remote_event::RemoteEventTaskSource;
+use crate::task_source::rendering::RenderingTaskSource;
 use crate::task_source::timer::TimerTaskSource;
 use crate::task_source::user_interaction::UserInteractionTaskSource;
 use crate::task_source::websocket::WebsocketTaskSource;
 use crate::task_source::TaskSourceName;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 macro_rules! task_source_functions {
     ($self:ident,$with_canceller:ident,$task_source:ident,$task_source_type:ident,$task_source_name:ident) => {
@@ -41,6 +44,8 @@ pub struct TaskManager {
     #[ignore_malloc_size_of = "task sources are hard"]
     file_reading_task_source: FileReadingTaskSource,
     #[ignore_malloc_size_of = "task sources are hard"]
+    gamepad_task_source: GamepadTaskSource,
+    #[ignore_malloc_size_of = "task sources are hard"]
     history_traversal_task_source: HistoryTraversalTaskSource,
     #[ignore_malloc_size_of = "task sources are hard"]
     media_element_task_source: MediaElementTaskSource,
@@ -55,15 +60,19 @@ pub struct TaskManager {
     #[ignore_malloc_size_of = "task sources are hard"]
     remote_event_task_source: RemoteEventTaskSource,
     #[ignore_malloc_size_of = "task sources are hard"]
+    rendering_task_source: RenderingTaskSource,
+    #[ignore_malloc_size_of = "task sources are hard"]
     timer_task_source: TimerTaskSource,
     #[ignore_malloc_size_of = "task sources are hard"]
     websocket_task_source: WebsocketTaskSource,
 }
 
 impl TaskManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         dom_manipulation_task_source: DOMManipulationTaskSource,
         file_reading_task_source: FileReadingTaskSource,
+        gamepad_task_source: GamepadTaskSource,
         history_traversal_task_source: HistoryTraversalTaskSource,
         media_element_task_source: MediaElementTaskSource,
         networking_task_source: NetworkingTaskSource,
@@ -71,12 +80,14 @@ impl TaskManager {
         port_message_queue: PortMessageQueue,
         user_interaction_task_source: UserInteractionTaskSource,
         remote_event_task_source: RemoteEventTaskSource,
+        rendering_task_source: RenderingTaskSource,
         timer_task_source: TimerTaskSource,
         websocket_task_source: WebsocketTaskSource,
     ) -> Self {
         TaskManager {
             dom_manipulation_task_source,
             file_reading_task_source,
+            gamepad_task_source,
             history_traversal_task_source,
             media_element_task_source,
             networking_task_source,
@@ -84,6 +95,7 @@ impl TaskManager {
             port_message_queue,
             user_interaction_task_source,
             remote_event_task_source,
+            rendering_task_source,
             timer_task_source,
             websocket_task_source,
             task_cancellers: Default::default(),
@@ -96,6 +108,14 @@ impl TaskManager {
         dom_manipulation_task_source,
         DOMManipulationTaskSource,
         DOMManipulation
+    );
+
+    task_source_functions!(
+        self,
+        gamepad_task_source_with_canceller,
+        gamepad_task_source,
+        GamepadTaskSource,
+        Gamepad
     );
 
     task_source_functions!(
@@ -164,6 +184,14 @@ impl TaskManager {
 
     task_source_functions!(
         self,
+        rendering_task_source_with_canceller,
+        rendering_task_source,
+        RenderingTaskSource,
+        Rendering
+    );
+
+    task_source_functions!(
+        self,
         timer_task_source_with_canceller,
         timer_task_source,
         TimerTaskSource,
@@ -180,7 +208,7 @@ impl TaskManager {
 
     pub fn task_canceller(&self, name: TaskSourceName) -> TaskCanceller {
         let mut flags = self.task_cancellers.borrow_mut();
-        let cancel_flag = flags.entry(name).or_insert(Default::default());
+        let cancel_flag = flags.entry(name).or_default();
         TaskCanceller {
             cancelled: cancel_flag.clone(),
         }

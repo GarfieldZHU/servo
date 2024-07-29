@@ -4,17 +4,19 @@
 
 //! Machinery for [task-queue](https://html.spec.whatwg.org/multipage/#task-queue).
 
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::default::Default;
+
+use base::id::PipelineId;
+use crossbeam_channel::{self, Receiver, Sender};
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::worker::TrustedWorkerAddress;
 use crate::script_runtime::ScriptThreadEventCategory;
 use crate::script_thread::ScriptThread;
 use crate::task::TaskBox;
 use crate::task_source::TaskSourceName;
-use crossbeam_channel::{self, Receiver, Sender};
-use msg::constellation_msg::PipelineId;
-use std::cell::Cell;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::default::Default;
 
 pub type QueuedTask = (
     Option<TrustedWorkerAddress>,
@@ -63,7 +65,7 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
     }
 
     /// Release previously held-back tasks for documents that are now fully-active.
-    /// https://html.spec.whatwg.org/multipage/#event-loop-processing-model:fully-active
+    /// <https://html.spec.whatwg.org/multipage/#event-loop-processing-model:fully-active>
     fn release_tasks_for_fully_active_documents(
         &self,
         fully_active: &HashSet<PipelineId>,
@@ -81,10 +83,10 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
     }
 
     /// Hold back tasks for currently not fully-active documents.
-    /// https://html.spec.whatwg.org/multipage/#event-loop-processing-model:fully-active
+    /// <https://html.spec.whatwg.org/multipage/#event-loop-processing-model:fully-active>
     fn store_task_for_inactive_pipeline(&self, msg: T, pipeline_id: &PipelineId) {
         let mut inactive = self.inactive.borrow_mut();
-        let inactive_queue = inactive.entry(pipeline_id.clone()).or_default();
+        let inactive_queue = inactive.entry(*pipeline_id).or_default();
         inactive_queue.push_back(
             msg.into_queued_task()
                 .expect("Incoming messages should always be convertible into queued tasks"),
@@ -118,25 +120,37 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
         }
 
         // 4. Filter tasks from non-priority task-sources.
-        let to_be_throttled: Vec<T> = incoming
-            .drain_filter(|msg| {
-                let task_source = match msg.task_source_name() {
-                    Some(task_source) => task_source,
-                    None => return false,
-                };
-                match task_source {
-                    TaskSourceName::PerformanceTimeline => return true,
-                    _ => {
-                        // A task that will not be throttled, start counting "business"
-                        self.taken_task_counter
-                            .set(self.taken_task_counter.get() + 1);
-                        return false;
-                    },
-                }
-            })
-            .collect();
+        // TODO: This can use `extract_if` once that is stabilized.
+        let mut to_be_throttled = Vec::new();
+        let mut index = 0;
+        while index != incoming.len() {
+            index += 1; // By default we go to the next index of the vector.
+
+            let task_source = match incoming[index - 1].task_source_name() {
+                Some(task_source) => task_source,
+                None => continue,
+            };
+
+            match task_source {
+                TaskSourceName::PerformanceTimeline => {
+                    to_be_throttled.push(incoming.remove(index - 1));
+                    index -= 1; // We've removed an element, so the next has the same index.
+                },
+                _ => {
+                    // A task that will not be throttled, start counting "business"
+                    self.taken_task_counter
+                        .set(self.taken_task_counter.get() + 1);
+                },
+            }
+        }
 
         for msg in incoming {
+            // Always run "update the rendering" tasks,
+            // TODO: fix "fully active" concept for iframes.
+            if let Some(TaskSourceName::Rendering) = msg.task_source_name() {
+                self.msg_queue.borrow_mut().push_back(msg);
+                continue;
+            }
             if let Some(pipeline_id) = msg.pipeline_id() {
                 if !fully_active.contains(&pipeline_id) {
                     self.store_task_for_inactive_pipeline(msg, &pipeline_id);
@@ -144,7 +158,7 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
                 }
             }
             // Immediately send non-throttled tasks for processing.
-            let _ = self.msg_queue.borrow_mut().push_back(msg);
+            self.msg_queue.borrow_mut().push_back(msg);
         }
 
         for msg in to_be_throttled {
@@ -178,8 +192,9 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
         self.msg_queue.borrow_mut().pop_front().ok_or(())
     }
 
-    /// Same as recv.
-    pub fn try_recv(&self) -> Result<T, ()> {
+    /// Take all tasks again and then run `recv()`.
+    pub fn take_tasks_and_recv(&self) -> Result<T, ()> {
+        self.take_tasks(T::wake_up_msg());
         self.recv()
     }
 
@@ -212,7 +227,7 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
                 (false, false) => {
                     // Cycle through non-priority task sources, taking one throttled task from each.
                     let task_source = task_source_cycler.next().unwrap();
-                    let throttled_queue = match throttled.get_mut(&task_source) {
+                    let throttled_queue = match throttled.get_mut(task_source) {
                         Some(queue) => queue,
                         None => continue,
                     };
@@ -229,16 +244,16 @@ impl<T: QueuedTaskConversion> TaskQueue<T> {
                             // Reduce the length of throttles,
                             // but don't add the task to "msg_queue",
                             // and neither increment "taken_task_counter".
-                            throttled_length = throttled_length - 1;
+                            throttled_length -= 1;
                             continue;
                         }
                     }
 
                     // Make the task available for the event-loop to handle as a message.
-                    let _ = self.msg_queue.borrow_mut().push_back(msg);
+                    self.msg_queue.borrow_mut().push_back(msg);
                     self.taken_task_counter
                         .set(self.taken_task_counter.get() + 1);
-                    throttled_length = throttled_length - 1;
+                    throttled_length -= 1;
                 },
             }
         }

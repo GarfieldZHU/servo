@@ -2,6 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use style::attr::{parse_unsigned_integer, AttrValue, LengthOrPercentageOrAuto};
+use style::color::AbsoluteColor;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::HTMLCollectionBinding::HTMLCollectionMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLTableElementBinding::HTMLTableElementMethods;
@@ -20,21 +28,17 @@ use crate::dom::htmltablerowelement::HTMLTableRowElement;
 use crate::dom::htmltablesectionelement::HTMLTableSectionElement;
 use crate::dom::node::{document_from_node, window_from_node, Node};
 use crate::dom::virtualmethods::VirtualMethods;
-use cssparser::RGBA;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use std::cell::Cell;
-use style::attr::{parse_unsigned_integer, AttrValue, LengthOrPercentageOrAuto};
 
 #[dom_struct]
 pub struct HTMLTableElement {
     htmlelement: HTMLElement,
     border: Cell<Option<u32>>,
+    cellpadding: Cell<Option<u32>>,
     cellspacing: Cell<Option<u32>>,
     tbodies: MutNullableDom<HTMLCollection>,
 }
 
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 #[derive(JSTraceable, MallocSizeOf)]
 struct TableRowFilter {
     sections: Vec<Dom<Node>>,
@@ -46,7 +50,7 @@ impl CollectionFilter for TableRowFilter {
             (root.is_parent_of(elem.upcast()) ||
                 self.sections
                     .iter()
-                    .any(|ref section| section.is_parent_of(elem.upcast())))
+                    .any(|section| section.is_parent_of(elem.upcast())))
     }
 }
 
@@ -59,22 +63,25 @@ impl HTMLTableElement {
         HTMLTableElement {
             htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             border: Cell::new(None),
+            cellpadding: Cell::new(None),
             cellspacing: Cell::new(None),
             tbodies: Default::default(),
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLTableElement> {
-        let n = Node::reflect_node(
+        let n = Node::reflect_node_with_proto(
             Box::new(HTMLTableElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         );
 
         n.upcast::<Node>().set_weird_parser_insertion_mode();
@@ -135,10 +142,11 @@ impl HTMLTableElement {
             return section;
         }
 
-        let section = HTMLTableSectionElement::new(atom.clone(), None, &document_from_node(self));
-        match atom {
-            &local_name!("thead") => self.SetTHead(Some(&section)),
-            &local_name!("tfoot") => self.SetTFoot(Some(&section)),
+        let section =
+            HTMLTableSectionElement::new(atom.clone(), None, &document_from_node(self), None);
+        match *atom {
+            local_name!("thead") => self.SetTHead(Some(&section)),
+            local_name!("tfoot") => self.SetTFoot(Some(&section)),
             _ => unreachable!("unexpected section type"),
         }
         .expect("unexpected section type");
@@ -184,16 +192,17 @@ impl HTMLTableElementMethods for HTMLTableElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-table-caption
-    fn SetCaption(&self, new_caption: Option<&HTMLTableCaptionElement>) {
+    fn SetCaption(&self, new_caption: Option<&HTMLTableCaptionElement>) -> Fallible<()> {
         if let Some(ref caption) = self.GetCaption() {
             caption.upcast::<Node>().remove_self();
         }
 
         if let Some(caption) = new_caption {
             let node = self.upcast::<Node>();
-            node.InsertBefore(caption.upcast(), node.GetFirstChild().as_deref())
-                .expect("Insertion failed");
+            node.InsertBefore(caption.upcast(), node.GetFirstChild().as_deref())?;
         }
+
+        Ok(())
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-table-createcaption
@@ -205,8 +214,10 @@ impl HTMLTableElementMethods for HTMLTableElement {
                     local_name!("caption"),
                     None,
                     &document_from_node(self),
+                    None,
                 );
-                self.SetCaption(Some(&caption));
+                self.SetCaption(Some(&caption))
+                    .expect("Generated caption is invalid");
                 caption
             },
         }
@@ -295,8 +306,12 @@ impl HTMLTableElementMethods for HTMLTableElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-table-createtbody
     fn CreateTBody(&self) -> DomRoot<HTMLTableSectionElement> {
-        let tbody =
-            HTMLTableSectionElement::new(local_name!("tbody"), None, &document_from_node(self));
+        let tbody = HTMLTableSectionElement::new(
+            local_name!("tbody"),
+            None,
+            &document_from_node(self),
+            None,
+        );
         let node = self.upcast::<Node>();
         let last_tbody = node
             .rev_children()
@@ -318,7 +333,8 @@ impl HTMLTableElementMethods for HTMLTableElement {
             return Err(Error::IndexSize);
         }
 
-        let new_row = HTMLTableRowElement::new(local_name!("tr"), None, &document_from_node(self));
+        let new_row =
+            HTMLTableRowElement::new(local_name!("tr"), None, &document_from_node(self), None);
         let node = self.upcast::<Node>();
 
         if number_of_row_elements == 0 {
@@ -379,19 +395,32 @@ impl HTMLTableElementMethods for HTMLTableElement {
         Ok(new_row)
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-table-deleterow
+    /// <https://html.spec.whatwg.org/multipage/#dom-table-deleterow>
     fn DeleteRow(&self, mut index: i32) -> Fallible<()> {
         let rows = self.Rows();
-        // Step 1.
-        if index == -1 {
-            index = rows.Length() as i32 - 1;
-        }
-        // Step 2.
-        if index < 0 || index as u32 >= rows.Length() {
+        let num_rows = rows.Length() as i32;
+
+        // Step 1: If index is less than −1 or greater than or equal to the number of elements
+        // in the rows collection, then throw an "IndexSizeError".
+        if !(-1..num_rows).contains(&index) {
             return Err(Error::IndexSize);
         }
-        // Step 3.
+
+        let num_rows = rows.Length() as i32;
+
+        // Step 2: If index is −1, then remove the last element in the rows collection from its
+        // parent, or do nothing if the rows collection is empty.
+        if index == -1 {
+            index = num_rows - 1;
+        }
+
+        if num_rows == 0 {
+            return Ok(());
+        }
+
+        // Step 3: Otherwise, remove the indexth element in the rows collection from its parent.
         DomRoot::upcast::<Node>(rows.Item(index as u32).unwrap()).remove_self();
+
         Ok(())
     }
 
@@ -409,28 +438,31 @@ impl HTMLTableElementMethods for HTMLTableElement {
 }
 
 pub trait HTMLTableElementLayoutHelpers {
-    fn get_background_color(self) -> Option<RGBA>;
+    fn get_background_color(self) -> Option<AbsoluteColor>;
     fn get_border(self) -> Option<u32>;
+    fn get_cellpadding(self) -> Option<u32>;
     fn get_cellspacing(self) -> Option<u32>;
     fn get_width(self) -> LengthOrPercentageOrAuto;
 }
 
 impl HTMLTableElementLayoutHelpers for LayoutDom<'_, HTMLTableElement> {
-    fn get_background_color(self) -> Option<RGBA> {
+    fn get_background_color(self) -> Option<AbsoluteColor> {
         self.upcast::<Element>()
             .get_attr_for_layout(&ns!(), &local_name!("bgcolor"))
             .and_then(AttrValue::as_color)
             .cloned()
     }
 
-    #[allow(unsafe_code)]
     fn get_border(self) -> Option<u32> {
-        unsafe { (*self.unsafe_get()).border.get() }
+        (self.unsafe_get()).border.get()
     }
 
-    #[allow(unsafe_code)]
+    fn get_cellpadding(self) -> Option<u32> {
+        (self.unsafe_get()).cellpadding.get()
+    }
+
     fn get_cellspacing(self) -> Option<u32> {
-        unsafe { (*self.unsafe_get()).cellspacing.get() }
+        (self.unsafe_get()).cellspacing.get()
     }
 
     fn get_width(self) -> LengthOrPercentageOrAuto {
@@ -456,6 +488,13 @@ impl VirtualMethods for HTMLTableElement {
                     mutation
                         .new_value(attr)
                         .map(|value| parse_unsigned_integer(value.chars()).unwrap_or(1)),
+                );
+            },
+            local_name!("cellpadding") => {
+                self.cellpadding.set(
+                    mutation
+                        .new_value(attr)
+                        .and_then(|value| parse_unsigned_integer(value.chars()).ok()),
                 );
             },
             local_name!("cellspacing") => {

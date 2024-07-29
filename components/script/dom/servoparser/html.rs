@@ -2,12 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#![allow(unrooted_must_root)]
+#![allow(crown::unrooted_must_root)]
+
+use std::io;
+
+use html5ever::buffer_queue::BufferQueue;
+use html5ever::serialize::TraversalScope::IncludeNode;
+use html5ever::serialize::{AttrRef, Serialize, Serializer, TraversalScope};
+use html5ever::tokenizer::{Tokenizer as HtmlTokenizer, TokenizerOpts, TokenizerResult};
+use html5ever::tree_builder::{Tracer as HtmlTracer, TreeBuilder, TreeBuilderOpts};
+use html5ever::QualName;
+use js::jsapi::JSTracer;
+use servo_url::ServoUrl;
 
 use crate::dom::bindings::codegen::Bindings::HTMLTemplateElementBinding::HTMLTemplateElementMethods;
 use crate::dom::bindings::inheritance::{Castable, CharacterDataTypeId, NodeTypeId};
 use crate::dom::bindings::root::{Dom, DomRoot};
-use crate::dom::bindings::trace::JSTraceable;
+use crate::dom::bindings::trace::{CustomTraceable, JSTraceable};
 use crate::dom::characterdata::CharacterData;
 use crate::dom::document::Document;
 use crate::dom::documentfragment::DocumentFragment;
@@ -18,19 +29,9 @@ use crate::dom::htmltemplateelement::HTMLTemplateElement;
 use crate::dom::node::Node;
 use crate::dom::processinginstruction::ProcessingInstruction;
 use crate::dom::servoparser::{ParsingAlgorithm, Sink};
-use html5ever::buffer_queue::BufferQueue;
-use html5ever::serialize::TraversalScope;
-use html5ever::serialize::TraversalScope::IncludeNode;
-use html5ever::serialize::{AttrRef, Serialize, Serializer};
-use html5ever::tokenizer::{Tokenizer as HtmlTokenizer, TokenizerOpts, TokenizerResult};
-use html5ever::tree_builder::{Tracer as HtmlTracer, TreeBuilder, TreeBuilderOpts};
-use html5ever::QualName;
-use js::jsapi::JSTracer;
-use servo_url::ServoUrl;
-use std::io;
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct Tokenizer {
     #[ignore_malloc_size_of = "Defined in html5ever"]
     inner: HtmlTokenizer<TreeBuilder<Dom<Node>, Sink>>,
@@ -48,7 +49,7 @@ impl Tokenizer {
             document: Dom::from_ref(document),
             current_line: 1,
             script: Default::default(),
-            parsing_algorithm: parsing_algorithm,
+            parsing_algorithm,
         };
 
         let options = TreeBuilderOpts {
@@ -60,7 +61,7 @@ impl Tokenizer {
             let tb = TreeBuilder::new_for_fragment(
                 sink,
                 Dom::from_ref(fc.context_elem),
-                fc.form_elem.map(|n| Dom::from_ref(n)),
+                fc.form_elem.map(Dom::from_ref),
                 options,
             );
 
@@ -74,13 +75,15 @@ impl Tokenizer {
             HtmlTokenizer::new(TreeBuilder::new(sink, options), Default::default())
         };
 
-        Tokenizer { inner: inner }
+        Tokenizer { inner }
     }
 
-    pub fn feed(&mut self, input: &mut BufferQueue) -> Result<(), DomRoot<HTMLScriptElement>> {
+    pub fn feed(&mut self, input: &mut BufferQueue) -> TokenizerResult<DomRoot<HTMLScriptElement>> {
         match self.inner.feed(input) {
-            TokenizerResult::Done => Ok(()),
-            TokenizerResult::Script(script) => Err(DomRoot::from_ref(script.downcast().unwrap())),
+            TokenizerResult::Done => TokenizerResult::Done,
+            TokenizerResult::Script(script) => {
+                TokenizerResult::Script(DomRoot::from_ref(script.downcast().unwrap()))
+            },
         }
     }
 
@@ -98,14 +101,14 @@ impl Tokenizer {
 }
 
 #[allow(unsafe_code)]
-unsafe impl JSTraceable for HtmlTokenizer<TreeBuilder<Dom<Node>, Sink>> {
+unsafe impl CustomTraceable for HtmlTokenizer<TreeBuilder<Dom<Node>, Sink>> {
     unsafe fn trace(&self, trc: *mut JSTracer) {
         struct Tracer(*mut JSTracer);
         let tracer = Tracer(trc);
 
         impl HtmlTracer for Tracer {
             type Handle = Dom<Node>;
-            #[allow(unrooted_must_root)]
+            #[allow(crown::unrooted_must_root)]
             fn trace_handle(&self, node: &Dom<Node>) {
                 unsafe {
                     node.trace(self.0);
@@ -130,8 +133,8 @@ fn start_element<S: Serializer>(node: &Element, serializer: &mut S) -> io::Resul
             (qname, value)
         })
         .collect::<Vec<_>>();
-    let attr_refs = attrs.iter().map(|&(ref qname, ref value)| {
-        let ar: AttrRef = (&qname, &**value);
+    let attr_refs = attrs.iter().map(|(qname, value)| {
+        let ar: AttrRef = (qname, &**value);
         ar
     });
     serializer.start_elem(name, attr_refs)?;
@@ -169,7 +172,7 @@ impl SerializationIterator {
         let mut ret = SerializationIterator { stack: vec![] };
         if skip_first || node.is::<DocumentFragment>() || node.is::<Document>() {
             for c in rev_children_iter(node) {
-                ret.push_node(&*c);
+                ret.push_node(&c);
             }
         } else {
             ret.push_node(node);
@@ -198,7 +201,7 @@ impl Iterator for SerializationIterator {
         if let Some(SerializationCommand::OpenElement(ref e)) = res {
             self.stack
                 .push(SerializationCommand::CloseElement(e.clone()));
-            for c in rev_children_iter(&*e.upcast::<Node>()) {
+            for c in rev_children_iter(e.upcast::<Node>()) {
                 self.push_node(&c);
             }
         }
@@ -224,13 +227,13 @@ impl<'a> Serialize for &'a Node {
                 },
 
                 SerializationCommand::CloseElement(n) => {
-                    end_element(&&n, serializer)?;
+                    end_element(&n, serializer)?;
                 },
 
                 SerializationCommand::SerializeNonelement(n) => match n.type_id() {
                     NodeTypeId::DocumentType => {
                         let doctype = n.downcast::<DocumentType>().unwrap();
-                        serializer.write_doctype(&doctype.name())?;
+                        serializer.write_doctype(doctype.name())?;
                     },
 
                     NodeTypeId::CharacterData(CharacterDataTypeId::Text(_)) => {
@@ -246,7 +249,7 @@ impl<'a> Serialize for &'a Node {
                     NodeTypeId::CharacterData(CharacterDataTypeId::ProcessingInstruction) => {
                         let pi = n.downcast::<ProcessingInstruction>().unwrap();
                         let data = pi.upcast::<CharacterData>().data();
-                        serializer.write_processing_instruction(&pi.target(), &data)?;
+                        serializer.write_processing_instruction(pi.target(), &data)?;
                     },
 
                     NodeTypeId::DocumentFragment(_) => {},

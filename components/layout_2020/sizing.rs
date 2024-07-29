@@ -2,61 +2,87 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! https://drafts.csswg.org/css-sizing/
+//! <https://drafts.csswg.org/css-sizing/>
 
-use crate::style_ext::ComputedValuesExt;
+use std::ops::{Add, AddAssign};
+
+use app_units::Au;
+use serde::Serialize;
 use style::logical_geometry::WritingMode;
 use style::properties::longhands::box_sizing::computed_value::T as BoxSizing;
 use style::properties::ComputedValues;
-use style::values::computed::{Length, LengthPercentage, Percentage};
+use style::values::computed::Length;
 use style::Zero;
 
-#[derive(Clone, Debug, Serialize)]
+use crate::style_ext::{Clamp, ComputedValuesExt};
+
+#[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct ContentSizes {
-    pub min_content: Length,
-    pub max_content: Length,
+    pub min_content: Au,
+    pub max_content: Au,
 }
 
-/// https://drafts.csswg.org/css-sizing/#intrinsic-sizes
+/// <https://drafts.csswg.org/css-sizing/#intrinsic-sizes>
 impl ContentSizes {
-    pub fn zero() -> Self {
-        Self {
-            min_content: Length::zero(),
-            max_content: Length::zero(),
-        }
-    }
-
-    pub fn map(&self, f: impl Fn(Length) -> Length) -> Self {
+    pub fn map(&self, f: impl Fn(Au) -> Au) -> Self {
         Self {
             min_content: f(self.min_content),
             max_content: f(self.max_content),
         }
     }
 
-    pub fn max(self, other: Self) -> Self {
+    pub fn max(&self, other: Self) -> Self {
         Self {
             min_content: self.min_content.max(other.min_content),
             max_content: self.max_content.max(other.max_content),
         }
     }
 
-    /// Relevant to outer intrinsic inline sizes, for percentages from padding and margin.
-    pub fn adjust_for_pbm_percentages(&mut self, percentages: Percentage) {
-        // " Note that this may yield an infinite result, but undefined results
-        //   (zero divided by zero) must be treated as zero. "
-        if self.max_content.px() == 0. {
-            // Avoid a potential `NaN`.
-            // Zero is already the result we want regardless of `denominator`.
-        } else {
-            let denominator = (1. - percentages.0).max(0.);
-            self.max_content = Length::new(self.max_content.px() / denominator);
+    pub fn max_assign(&mut self, other: Self) {
+        *self = self.max(other);
+    }
+
+    pub fn union(&self, other: &Self) -> Self {
+        Self {
+            min_content: self.min_content.max(other.min_content),
+            max_content: self.max_content + other.max_content,
         }
     }
 }
 
+impl Zero for ContentSizes {
+    fn zero() -> Self {
+        Self {
+            min_content: Au::zero(),
+            max_content: Au::zero(),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.min_content.is_zero() && self.max_content.is_zero()
+    }
+}
+
+impl Add for ContentSizes {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            min_content: self.min_content + rhs.min_content,
+            max_content: self.max_content + rhs.max_content,
+        }
+    }
+}
+
+impl AddAssign for ContentSizes {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = self.add(rhs)
+    }
+}
+
 impl ContentSizes {
-    /// https://drafts.csswg.org/css2/visudet.html#shrink-to-fit-float
-    pub fn shrink_to_fit(&self, available_size: Length) -> Length {
+    /// <https://drafts.csswg.org/css2/visudet.html#shrink-to-fit-float>
+    pub fn shrink_to_fit(&self, available_size: Au) -> Au {
         available_size.max(self.min_content).min(self.max_content)
     }
 }
@@ -66,34 +92,23 @@ pub(crate) fn outer_inline(
     containing_block_writing_mode: WritingMode,
     get_content_size: impl FnOnce() -> ContentSizes,
 ) -> ContentSizes {
-    let (mut outer, percentages) =
-        outer_inline_and_percentages(style, containing_block_writing_mode, get_content_size);
-    outer.adjust_for_pbm_percentages(percentages);
-    outer
-}
-
-pub(crate) fn outer_inline_and_percentages(
-    style: &ComputedValues,
-    containing_block_writing_mode: WritingMode,
-    get_content_size: impl FnOnce() -> ContentSizes,
-) -> (ContentSizes, Percentage) {
     let padding = style.padding(containing_block_writing_mode);
     let border = style.border_width(containing_block_writing_mode);
     let margin = style.margin(containing_block_writing_mode);
 
-    let mut pbm_percentages = Percentage::zero();
-    let mut decompose = |x: &LengthPercentage| {
-        pbm_percentages += x.to_percentage().unwrap_or_else(Zero::zero);
-        x.to_length().unwrap_or_else(Zero::zero)
-    };
-    let pb_lengths =
-        border.inline_sum() + decompose(padding.inline_start) + decompose(padding.inline_end);
-    let mut m_lengths = Length::zero();
+    // For margins and paddings, a cyclic percentage is resolved against zero
+    // for determining intrinsic size contributions.
+    // https://drafts.csswg.org/css-sizing-3/#min-percentage-contribution
+    let zero = Length::zero();
+    let pb_lengths = border.inline_sum() +
+        padding.inline_start.percentage_relative_to(zero) +
+        padding.inline_end.percentage_relative_to(zero);
+    let mut m_lengths = zero;
     if let Some(m) = margin.inline_start.non_auto() {
-        m_lengths += decompose(m)
+        m_lengths += m.percentage_relative_to(zero)
     }
     if let Some(m) = margin.inline_end.non_auto() {
-        m_lengths += decompose(m)
+        m_lengths += m.percentage_relative_to(zero)
     }
 
     let box_sizing = style.get_position().box_sizing;
@@ -107,7 +122,7 @@ pub(crate) fn outer_inline_and_percentages(
         .min_box_size(containing_block_writing_mode)
         .inline
         // Percentages for 'min-width' are treated as zero
-        .percentage_relative_to(Length::zero())
+        .percentage_relative_to(zero)
         // FIXME: 'auto' is not zero in Flexbox
         .auto_is(Length::zero);
     let max_inline_size = style
@@ -115,13 +130,15 @@ pub(crate) fn outer_inline_and_percentages(
         .inline
         // Percentages for 'max-width' are treated as 'none'
         .and_then(|lp| lp.to_length());
-    let clamp = |l: Length| l.clamp_between_extremums(min_inline_size, max_inline_size);
+    let clamp = |l: Au| {
+        l.clamp_between_extremums(min_inline_size.into(), max_inline_size.map(|t| t.into()))
+    };
 
     let border_box_sizes = match inline_size {
         Some(non_auto) => {
-            let clamped = clamp(non_auto);
+            let clamped = clamp(non_auto.into());
             let border_box_size = match box_sizing {
-                BoxSizing::ContentBox => clamped + pb_lengths,
+                BoxSizing::ContentBox => clamped + pb_lengths.into(),
                 BoxSizing::BorderBox => clamped,
             };
             ContentSizes {
@@ -132,12 +149,11 @@ pub(crate) fn outer_inline_and_percentages(
         None => get_content_size().map(|content_box_size| {
             match box_sizing {
                 // Clamp to 'min-width' and 'max-width', which are sizing the…
-                BoxSizing::ContentBox => clamp(content_box_size) + pb_lengths,
-                BoxSizing::BorderBox => clamp(content_box_size + pb_lengths),
+                BoxSizing::ContentBox => clamp(content_box_size) + pb_lengths.into(),
+                BoxSizing::BorderBox => clamp(content_box_size + pb_lengths.into()),
             }
         }),
     };
 
-    let outer = border_box_sizes.map(|s| s + m_lengths);
-    (outer, pbm_percentages)
+    border_box_sizes.map(|s| s + m_lengths.into())
 }

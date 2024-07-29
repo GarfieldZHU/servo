@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::{local_name, LocalName, Prefix};
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::HTMLTrackElementBinding::{
     HTMLTrackElementConstants, HTMLTrackElementMethods,
 };
@@ -13,8 +17,6 @@ use crate::dom::element::Element;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::node::Node;
 use crate::dom::texttrack::TextTrack;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
 
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 #[repr(u16)]
@@ -43,7 +45,7 @@ impl HTMLTrackElement {
         HTMLTrackElement {
             htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             ready_state: ReadyState::None,
-            track: Dom::from_ref(&track),
+            track: Dom::from_ref(track),
         }
     }
 
@@ -51,9 +53,10 @@ impl HTMLTrackElement {
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLTrackElement> {
         let track = TextTrack::new(
-            &document.window(),
+            document.window(),
             Default::default(),
             Default::default(),
             Default::default(),
@@ -61,11 +64,12 @@ impl HTMLTrackElement {
             Default::default(),
             None,
         );
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLTrackElement::new_inherited(
                 local_name, prefix, document, &track,
             )),
             document,
+            proto,
         )
     }
 }

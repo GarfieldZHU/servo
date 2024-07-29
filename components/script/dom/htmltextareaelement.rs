@@ -2,6 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::default::Default;
+use std::ops::Range;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use script_traits::ScriptToConstellationChan;
+use style::attr::AttrValue;
+use style_dom::ElementState;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
@@ -14,8 +25,7 @@ use crate::dom::bindings::root::{DomRoot, LayoutDom, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::compositionevent::CompositionEvent;
 use crate::dom::document::Document;
-use crate::dom::element::LayoutElementHelpers;
-use crate::dom::element::{AttributeMutation, Element};
+use crate::dom::element::{AttributeMutation, Element, LayoutElementHelpers};
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlelement::HTMLElement;
@@ -23,9 +33,9 @@ use crate::dom::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::htmlformelement::{FormControl, HTMLFormElement};
 use crate::dom::htmlinputelement::HTMLInputElement;
 use crate::dom::keyboardevent::KeyboardEvent;
-use crate::dom::node::window_from_node;
 use crate::dom::node::{
-    BindContext, ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, UnbindContext,
+    window_from_node, BindContext, ChildrenMutation, CloneChildrenFlag, Node, NodeDamage,
+    UnbindContext,
 };
 use crate::dom::nodelist::NodeList;
 use crate::dom::textcontrol::{TextControlElement, TextControlSelection};
@@ -35,19 +45,12 @@ use crate::dom::virtualmethods::VirtualMethods;
 use crate::textinput::{
     Direction, KeyReaction, Lines, SelectionDirection, TextInput, UTF16CodeUnits, UTF8Bytes,
 };
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use script_traits::ScriptToConstellationChan;
-use std::cell::Cell;
-use std::default::Default;
-use std::ops::Range;
-use style::attr::AttrValue;
-use style::element_state::ElementState;
 
 #[dom_struct]
 pub struct HTMLTextAreaElement {
     htmlelement: HTMLElement,
     #[ignore_malloc_size_of = "#7193"]
+    #[no_trace]
     textinput: DomRefCell<TextInput<ScriptToConstellationChan>>,
     placeholder: DomRefCell<DOMString>,
     // https://html.spec.whatwg.org/multipage/#concept-textarea-dirty
@@ -95,10 +98,7 @@ impl LayoutHTMLTextAreaElementHelpers for LayoutDom<'_, HTMLTextAreaElement> {
         if text.is_empty() {
             // FIXME(nox): Would be cool to not allocate a new string if the
             // placeholder is single line, but that's an unimportant detail.
-            self.placeholder()
-                .replace("\r\n", "\n")
-                .replace("\r", "\n")
-                .into()
+            self.placeholder().replace("\r\n", "\n").replace('\r', "\n")
         } else {
             text.into()
         }
@@ -148,7 +148,7 @@ impl HTMLTextAreaElement {
             .clone();
         HTMLTextAreaElement {
             htmlelement: HTMLElement::new_inherited_with_state(
-                ElementState::IN_ENABLED_STATE | ElementState::IN_READ_WRITE_STATE,
+                ElementState::ENABLED | ElementState::READWRITE,
                 local_name,
                 prefix,
                 document,
@@ -169,23 +169,25 @@ impl HTMLTextAreaElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLTextAreaElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLTextAreaElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 
     pub fn auto_directionality(&self) -> String {
         let value: String = self.Value().to_string();
-        return HTMLInputElement::directionality_from_value(&value);
+        HTMLInputElement::directionality_from_value(&value)
     }
 
     fn update_placeholder_shown_state(&self) {
@@ -320,22 +322,26 @@ impl HTMLTextAreaElementMethods for HTMLTextAreaElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-textarea-value
     fn SetValue(&self, value: DOMString) {
-        let mut textinput = self.textinput.borrow_mut();
+        {
+            let mut textinput = self.textinput.borrow_mut();
 
-        // Step 1
-        let old_value = textinput.get_content();
+            // Step 1
+            let old_value = textinput.get_content();
 
-        // Step 2
-        textinput.set_content(value);
+            // Step 2
+            textinput.set_content(value);
 
-        // Step 3
-        self.value_dirty.set(true);
+            // Step 3
+            self.value_dirty.set(true);
 
-        if old_value != textinput.get_content() {
-            // Step 4
-            textinput.clear_selection_to_limit(Direction::Forward);
+            if old_value != textinput.get_content() {
+                // Step 4
+                textinput.clear_selection_to_limit(Direction::Forward);
+            }
         }
 
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
         self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
     }
 
@@ -445,9 +451,9 @@ impl HTMLTextAreaElement {
         self.value_dirty.set(false);
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn selection(&self) -> TextControlSelection<Self> {
-        TextControlSelection::new(&self, &self.textinput)
+        TextControlSelection::new(self, &self.textinput)
     }
 }
 
@@ -530,15 +536,21 @@ impl VirtualMethods for HTMLTextAreaElement {
             },
             _ => {},
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
 
         self.upcast::<Element>()
             .check_ancestors_disabled_state_for_form_control();
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
@@ -571,6 +583,9 @@ impl VirtualMethods for HTMLTextAreaElement {
         } else {
             el.check_disabled_attribute();
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     // The cloning steps for textarea elements must propagate the raw value
@@ -581,17 +596,21 @@ impl VirtualMethods for HTMLTextAreaElement {
         maybe_doc: Option<&Document>,
         clone_children: CloneChildrenFlag,
     ) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.cloning_steps(copy, maybe_doc, clone_children);
         }
         let el = copy.downcast::<HTMLTextAreaElement>().unwrap();
         el.value_dirty.set(self.value_dirty.get());
-        let mut textinput = el.textinput.borrow_mut();
-        textinput.set_content(self.textinput.borrow().get_content());
+        {
+            let mut textinput = el.textinput.borrow_mut();
+            textinput.set_content(self.textinput.borrow().get_content());
+        }
+        el.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     fn children_changed(&self, mutation: &ChildrenMutation) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.children_changed(mutation);
         }
         if !self.value_dirty.get() {
@@ -630,11 +649,11 @@ impl VirtualMethods for HTMLTextAreaElement {
         } else if event.type_() == atom!("keypress") && !event.DefaultPrevented() {
             if event.IsTrusted() {
                 let window = window_from_node(self);
-                let _ = window
+                window
                     .task_manager()
                     .user_interaction_task_source()
                     .queue_event(
-                        &self.upcast(),
+                        self.upcast(),
                         atom!("input"),
                         EventBubbles::Bubbles,
                         EventCancelable::NotCancelable,
@@ -658,6 +677,9 @@ impl VirtualMethods for HTMLTextAreaElement {
                 event.mark_as_handled();
             }
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     fn pop(&self) {
@@ -677,7 +699,7 @@ impl FormControl for HTMLTextAreaElement {
         self.form_owner.set(form);
     }
 
-    fn to_element<'a>(&'a self) -> &'a Element {
+    fn to_element(&self) -> &Element {
         self.upcast::<Element>()
     }
 }
@@ -711,10 +733,12 @@ impl Validatable for HTMLTextAreaElement {
 
         // https://html.spec.whatwg.org/multipage/#suffering-from-being-missing
         // https://html.spec.whatwg.org/multipage/#the-textarea-element%3Asuffering-from-being-missing
-        if validate_flags.contains(ValidationFlags::VALUE_MISSING) {
-            if self.Required() && self.is_mutable() && value_len == 0 {
-                failed_flags.insert(ValidationFlags::VALUE_MISSING);
-            }
+        if validate_flags.contains(ValidationFlags::VALUE_MISSING) &&
+            self.Required() &&
+            self.is_mutable() &&
+            value_len == 0
+        {
+            failed_flags.insert(ValidationFlags::VALUE_MISSING);
         }
 
         if value_dirty && last_edit_by_user && value_len > 0 {

@@ -2,9 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use base::id::ServiceWorkerRegistrationId;
+use devtools_traits::WorkerId;
+use dom_struct::dom_struct;
+use script_traits::{ScopeThings, WorkerScriptLoadOrigin};
+use servo_url::ServoUrl;
+use uuid::Uuid;
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::ServiceWorkerRegistrationBinding::ServiceWorkerRegistrationMethods;
-use crate::dom::bindings::codegen::Bindings::ServiceWorkerRegistrationBinding::ServiceWorkerUpdateViaCache;
+use crate::dom::bindings::codegen::Bindings::ServiceWorkerRegistrationBinding::{
+    ServiceWorkerRegistrationMethods, ServiceWorkerUpdateViaCache,
+};
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{ByteString, USVString};
@@ -13,13 +23,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::navigationpreloadmanager::NavigationPreloadManager;
 use crate::dom::serviceworker::ServiceWorker;
 use crate::dom::workerglobalscope::prepare_workerscope_init;
-use devtools_traits::WorkerId;
-use dom_struct::dom_struct;
-use msg::constellation_msg::ServiceWorkerRegistrationId;
-use script_traits::{ScopeThings, WorkerScriptLoadOrigin};
-use servo_url::ServoUrl;
-use std::cell::Cell;
-use uuid::Uuid;
 
 #[dom_struct]
 pub struct ServiceWorkerRegistration {
@@ -28,11 +31,13 @@ pub struct ServiceWorkerRegistration {
     installing: DomRefCell<Option<Dom<ServiceWorker>>>,
     waiting: DomRefCell<Option<Dom<ServiceWorker>>>,
     navigation_preload: MutNullableDom<NavigationPreloadManager>,
+    #[no_trace]
     scope: ServoUrl,
     navigation_preload_enabled: Cell<bool>,
     navigation_preload_header_value: DomRefCell<Option<ByteString>>,
     update_via_cache: ServiceWorkerUpdateViaCache,
     uninstalling: Cell<bool>,
+    #[no_trace]
     registration_id: ServiceWorkerRegistrationId,
 }
 
@@ -47,7 +52,7 @@ impl ServiceWorkerRegistration {
             installing: DomRefCell::new(None),
             waiting: DomRefCell::new(None),
             navigation_preload: MutNullableDom::new(None),
-            scope: scope,
+            scope,
             navigation_preload_enabled: Cell::new(false),
             navigation_preload_header_value: DomRefCell::new(None),
             update_via_cache: ServiceWorkerUpdateViaCache::Imports,
@@ -56,7 +61,7 @@ impl ServiceWorkerRegistration {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         global: &GlobalScope,
         scope: ServoUrl,
@@ -114,13 +119,13 @@ impl ServiceWorkerRegistration {
 
         let worker_id = WorkerId(Uuid::new_v4());
         let devtools_chan = global.devtools_chan().cloned();
-        let init = prepare_workerscope_init(&global, None, None);
+        let init = prepare_workerscope_init(global, None, None);
         ScopeThings {
-            script_url: script_url,
-            init: init,
-            worker_load_origin: worker_load_origin,
-            devtools_chan: devtools_chan,
-            worker_id: worker_id,
+            script_url,
+            init,
+            worker_load_origin,
+            devtools_chan,
+            worker_id,
         }
     }
 
@@ -192,6 +197,6 @@ impl ServiceWorkerRegistrationMethods for ServiceWorkerRegistration {
     // https://w3c.github.io/ServiceWorker/#service-worker-registration-navigationpreload
     fn NavigationPreload(&self) -> DomRoot<NavigationPreloadManager> {
         self.navigation_preload
-            .or_init(|| NavigationPreloadManager::new(&self.global(), &self))
+            .or_init(|| NavigationPreloadManager::new(&self.global(), self))
     }
 }

@@ -6,22 +6,22 @@
 //!
 //! <https://html.spec.whatwg.org/multipage/#the-end>
 
+use ipc_channel::ipc::IpcSender;
+use net_traits::request::RequestBuilder;
+use net_traits::{CoreResourceMsg, FetchChannels, FetchResponseMsg, IpcSend, ResourceThreads};
+use servo_url::ServoUrl;
+
 use crate::dom::bindings::root::Dom;
 use crate::dom::document::Document;
 use crate::fetch::FetchCanceller;
-use ipc_channel::ipc::IpcSender;
-use net_traits::request::RequestBuilder;
-use net_traits::{CoreResourceMsg, FetchChannels, FetchResponseMsg};
-use net_traits::{IpcSend, ResourceThreads};
-use servo_url::ServoUrl;
 
 #[derive(Clone, Debug, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum LoadType {
-    Image(ServoUrl),
-    Script(ServoUrl),
-    Subframe(ServoUrl),
-    Stylesheet(ServoUrl),
-    PageSource(ServoUrl),
+    Image(#[no_trace] ServoUrl),
+    Script(#[no_trace] ServoUrl),
+    Subframe(#[no_trace] ServoUrl),
+    Stylesheet(#[no_trace] ServoUrl),
+    PageSource(#[no_trace] ServoUrl),
     Media,
 }
 
@@ -29,7 +29,7 @@ pub enum LoadType {
 /// created via DocumentLoader::fetch_async) are always removed by the time
 /// that the owner is destroyed.
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct LoadBlocker {
     /// The document whose load event is blocked by this object existing.
     doc: Dom<Document>,
@@ -66,6 +66,7 @@ impl Drop for LoadBlocker {
 
 #[derive(JSTraceable, MallocSizeOf)]
 pub struct DocumentLoader {
+    #[no_trace]
     resource_threads: ResourceThreads,
     blocking_loads: Vec<LoadType>,
     events_inhibited: bool,
@@ -85,7 +86,7 @@ impl DocumentLoader {
         let initial_loads = initial_load.into_iter().map(LoadType::PageSource).collect();
 
         DocumentLoader {
-            resource_threads: resource_threads,
+            resource_threads,
             blocking_loads: initial_loads,
             events_inhibited: false,
             cancellers: Vec::new(),
@@ -163,10 +164,9 @@ impl DocumentLoader {
     }
 
     pub fn is_only_blocked_by_iframes(&self) -> bool {
-        self.blocking_loads.iter().all(|load| match *load {
-            LoadType::Subframe(_) => true,
-            _ => false,
-        })
+        self.blocking_loads
+            .iter()
+            .all(|load| matches!(*load, LoadType::Subframe(_)))
     }
 
     pub fn inhibit_events(&mut self) {

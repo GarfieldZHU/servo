@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use servo_arc::Arc;
+use style::stylesheets::Stylesheet;
+
 use crate::dom::bindings::codegen::Bindings::StyleSheetListBinding::StyleSheetListMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -11,11 +15,8 @@ use crate::dom::element::Element;
 use crate::dom::shadowroot::ShadowRoot;
 use crate::dom::stylesheet::StyleSheet;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_arc::Arc;
-use style::stylesheets::Stylesheet;
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 pub enum StyleSheetListOwner {
     Document(Dom<Document>),
@@ -72,7 +73,7 @@ pub struct StyleSheetList {
 }
 
 impl StyleSheetList {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(doc_or_sr: StyleSheetListOwner) -> StyleSheetList {
         StyleSheetList {
             reflector_: Reflector::new(),
@@ -80,7 +81,7 @@ impl StyleSheetList {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(window: &Window, doc_or_sr: StyleSheetListOwner) -> DomRoot<StyleSheetList> {
         reflect_dom_object(Box::new(StyleSheetList::new_inherited(doc_or_sr)), window)
     }

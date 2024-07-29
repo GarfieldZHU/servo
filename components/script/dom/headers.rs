@@ -2,26 +2,31 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::str::{self, FromStr};
+
+use data_url::mime::Mime as DataUrlMime;
+use dom_struct::dom_struct;
+use http::header::{HeaderMap as HyperHeaders, HeaderName, HeaderValue};
+use js::rust::HandleObject;
+use net_traits::fetch::headers::get_value_from_header_list;
+use net_traits::request::is_cors_safelisted_request_header;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HeadersBinding::{HeadersInit, HeadersMethods};
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::iterable::Iterable;
-use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::{is_token, ByteString};
 use crate::dom::globalscope::GlobalScope;
-use data_url::mime::Mime as DataUrlMime;
-use dom_struct::dom_struct;
-use http::header::{HeaderMap as HyperHeaders, HeaderName, HeaderValue};
-use net_traits::request::is_cors_safelisted_request_header;
-use std::cell::Cell;
-use std::str::{self, FromStr};
 
 #[dom_struct]
 pub struct Headers {
     reflector_: Reflector,
     guard: Cell<Guard>,
     #[ignore_malloc_size_of = "Defined in hyper"]
+    #[no_trace]
     header_list: DomRefCell<HyperHeaders>,
 }
 
@@ -45,16 +50,21 @@ impl Headers {
     }
 
     pub fn new(global: &GlobalScope) -> DomRoot<Headers> {
-        reflect_dom_object(Box::new(Headers::new_inherited()), global)
+        Self::new_with_proto(global, None)
+    }
+
+    fn new_with_proto(global: &GlobalScope, proto: Option<HandleObject>) -> DomRoot<Headers> {
+        reflect_dom_object_with_proto(Box::new(Headers::new_inherited()), global, proto)
     }
 
     // https://fetch.spec.whatwg.org/#dom-headers
     #[allow(non_snake_case)]
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         init: Option<HeadersInit>,
     ) -> Fallible<DomRoot<Headers>> {
-        let dom_headers_new = Headers::new(global);
+        let dom_headers_new = Headers::new_with_proto(global, proto);
         dom_headers_new.fill(init)?;
         Ok(dom_headers_new)
     }
@@ -65,55 +75,60 @@ impl HeadersMethods for Headers {
     fn Append(&self, name: ByteString, value: ByteString) -> ErrorResult {
         // Step 1
         let value = normalize_value(value);
+
         // Step 2
+        // https://fetch.spec.whatwg.org/#headers-validate
         let (mut valid_name, valid_value) = validate_name_and_value(name, value)?;
         valid_name = valid_name.to_lowercase();
-        // Step 3
+
         if self.guard.get() == Guard::Immutable {
             return Err(Error::Type("Guard is immutable".to_string()));
         }
-        // Step 4
         if self.guard.get() == Guard::Request && is_forbidden_header_name(&valid_name) {
             return Ok(());
         }
-        // Step 5
-        if self.guard.get() == Guard::RequestNoCors &&
-            !is_cors_safelisted_request_header(&valid_name, &valid_value)
-        {
-            return Ok(());
-        }
-        // Step 6
         if self.guard.get() == Guard::Response && is_forbidden_response_header(&valid_name) {
             return Ok(());
         }
-        // Step 7
-        // FIXME: this is NOT what WHATWG says to do when appending
-        // another copy of an existing header. HyperHeaders
-        // might not expose the information we need to do it right.
-        let mut combined_value: Vec<u8> = vec![];
-        if let Some(v) = self
-            .header_list
-            .borrow()
-            .get(HeaderName::from_str(&valid_name).unwrap())
-        {
-            combined_value = v.as_bytes().to_vec();
-            combined_value.extend(b", ");
+
+        // Step 3
+        if self.guard.get() == Guard::RequestNoCors {
+            let tmp_value = if let Some(mut value) =
+                get_value_from_header_list(&valid_name, &self.header_list.borrow())
+            {
+                value.extend(b", ");
+                value.extend(valid_value.clone());
+                value
+            } else {
+                valid_value.clone()
+            };
+
+            if !is_cors_safelisted_request_header(&valid_name, &tmp_value) {
+                return Ok(());
+            }
         }
-        combined_value.extend(valid_value.iter().cloned());
-        match HeaderValue::from_bytes(&combined_value) {
+
+        // Step 4
+        match HeaderValue::from_bytes(&valid_value) {
             Ok(value) => {
                 self.header_list
                     .borrow_mut()
-                    .insert(HeaderName::from_str(&valid_name).unwrap(), value);
+                    .append(HeaderName::from_str(&valid_name).unwrap(), value);
             },
             Err(_) => {
                 // can't add the header, but we don't need to panic the browser over it
                 warn!(
                     "Servo thinks \"{:?}\" is a valid HTTP header value but HeaderValue doesn't.",
-                    combined_value
+                    valid_value
                 );
             },
         };
+
+        // Step 5
+        if self.guard.get() == Guard::RequestNoCors {
+            self.remove_privileged_no_cors_request_headers();
+        }
+
         Ok(())
     }
 
@@ -148,11 +163,20 @@ impl HeadersMethods for Headers {
     fn Get(&self, name: ByteString) -> Fallible<Option<ByteString>> {
         // Step 1
         let valid_name = validate_name(name)?;
-        Ok(self
-            .header_list
+        Ok(
+            get_value_from_header_list(&valid_name, &self.header_list.borrow())
+                .map(ByteString::new),
+        )
+    }
+
+    // https://fetch.spec.whatwg.org/#dom-headers-getsetcookie
+    fn GetSetCookie(&self) -> Vec<ByteString> {
+        self.header_list
             .borrow()
-            .get(HeaderName::from_str(&valid_name).unwrap())
-            .map(|v| ByteString::new(v.as_bytes().to_vec())))
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| ByteString::new(v.as_bytes().to_vec()))
+            .collect()
     }
 
     // https://fetch.spec.whatwg.org/#dom-headers-has
@@ -256,10 +280,6 @@ impl Headers {
         self.guard.get()
     }
 
-    pub fn empty_header_list(&self) {
-        *self.header_list.borrow_mut() = HyperHeaders::new();
-    }
-
     pub fn set_headers(&self, hyper_headers: HyperHeaders) {
         *self.header_list.borrow_mut() = hyper_headers;
     }
@@ -270,21 +290,33 @@ impl Headers {
 
     // https://fetch.spec.whatwg.org/#concept-header-extract-mime-type
     pub fn extract_mime_type(&self) -> Vec<u8> {
-        extract_mime_type(&*self.header_list.borrow()).unwrap_or(vec![])
+        extract_mime_type(&self.header_list.borrow()).unwrap_or_default()
     }
 
-    pub fn sort_header_list(&self) -> Vec<(String, Vec<u8>)> {
+    // https://fetch.spec.whatwg.org/#concept-header-list-sort-and-combine
+    pub fn sort_and_combine(&self) -> Vec<(String, Vec<u8>)> {
         let borrowed_header_list = self.header_list.borrow();
-        let headers_iter = borrowed_header_list.iter();
         let mut header_vec = vec![];
-        for (name, value) in headers_iter {
-            let name = name.as_str().to_owned();
-            let value = value.as_bytes().to_vec();
-            let name_value = (name, value);
-            header_vec.push(name_value);
+
+        for name in borrowed_header_list.keys() {
+            let name = name.as_str();
+            if name == "set-cookie" {
+                for value in borrowed_header_list.get_all(name).iter() {
+                    header_vec.push((name.to_owned(), value.as_bytes().to_vec()));
+                }
+            } else if let Some(value) = get_value_from_header_list(name, &borrowed_header_list) {
+                header_vec.push((name.to_owned(), value));
+            }
         }
-        header_vec.sort();
+
+        header_vec.sort_by(|a, b| a.0.cmp(&b.0));
         header_vec
+    }
+
+    // https://fetch.spec.whatwg.org/#ref-for-privileged-no-cors-request-header-name
+    pub fn remove_privileged_no_cors_request_headers(&self) {
+        // https://fetch.spec.whatwg.org/#privileged-no-cors-request-header-name
+        self.header_list.borrow_mut().remove("range");
     }
 }
 
@@ -293,17 +325,18 @@ impl Iterable for Headers {
     type Value = ByteString;
 
     fn get_iterable_length(&self) -> u32 {
-        self.header_list.borrow().iter().count() as u32
+        let sorted_header_vec = self.sort_and_combine();
+        sorted_header_vec.len() as u32
     }
 
     fn get_value_at_index(&self, n: u32) -> ByteString {
-        let sorted_header_vec = self.sort_header_list();
+        let sorted_header_vec = self.sort_and_combine();
         let value = sorted_header_vec[n as usize].1.clone();
         ByteString::new(value)
     }
 
     fn get_key_at_index(&self, n: u32) -> ByteString {
-        let sorted_header_vec = self.sort_header_list();
+        let sorted_header_vec = self.sort_and_combine();
         let key = sorted_header_vec[n as usize].0.clone();
         ByteString::new(key.into_bytes().to_vec())
     }
@@ -311,10 +344,7 @@ impl Iterable for Headers {
 
 // https://fetch.spec.whatwg.org/#forbidden-response-header-name
 fn is_forbidden_response_header(name: &str) -> bool {
-    match name {
-        "set-cookie" | "set-cookie2" => true,
-        _ => false,
-    }
+    matches!(name, "set-cookie" | "set-cookie2")
 }
 
 // https://fetch.spec.whatwg.org/#forbidden-header-name
@@ -413,7 +443,7 @@ fn index_of_last_non_whitespace(value: &ByteString) -> Option<usize> {
 
 // http://tools.ietf.org/html/rfc7230#section-3.2
 fn is_field_name(name: &ByteString) -> bool {
-    is_token(&*name)
+    is_token(name)
 }
 
 // https://fetch.spec.whatg.org/#concept-header-value
@@ -454,18 +484,12 @@ fn is_legal_header_value(value: &ByteString) -> bool {
 
 // https://tools.ietf.org/html/rfc5234#appendix-B.1
 pub fn is_vchar(x: u8) -> bool {
-    match x {
-        0x21..=0x7E => true,
-        _ => false,
-    }
+    matches!(x, 0x21..=0x7E)
 }
 
 // http://tools.ietf.org/html/rfc7230#section-3.2.6
 pub fn is_obs_text(x: u8) -> bool {
-    match x {
-        0x80..=0xFF => true,
-        _ => false,
-    }
+    matches!(x, 0x80..=0xFF)
 }
 
 // https://fetch.spec.whatwg.org/#concept-header-extract-mime-type
@@ -511,7 +535,7 @@ pub fn extract_mime_type(headers: &HyperHeaders) -> Option<Vec<u8>> {
                 // Step 6.4
                 if temp_essence != essence {
                     charset = temp_charset.map(|c| c.to_string());
-                    essence = temp_essence.to_owned();
+                    temp_essence.clone_into(&mut essence);
                 } else {
                     // Step 6.5
                     if temp_charset.is_none() && charset.is_some() {
@@ -534,5 +558,5 @@ pub fn extract_mime_type(headers: &HyperHeaders) -> Option<Vec<u8>> {
     }
 
     // Step 7, 8
-    return mime_type.map(|m| format!("{}", m).into_bytes());
+    mime_type.map(|m| format!("{}", m).into_bytes())
 }
