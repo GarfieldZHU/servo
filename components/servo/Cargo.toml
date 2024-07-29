@@ -13,7 +13,6 @@ crate-type = ["rlib"]
 
 [features]
 debugmozjs = ["script/debugmozjs"]
-googlevr = ["webxr/googlevr"]
 jitspew = ["script/jitspew"]
 js_backtrace = ["script/js_backtrace"]
 layout_2013 = ["dep:layout_thread_2013"]
@@ -31,7 +30,6 @@ webgl_backtrace = [
     "canvas/webgl_backtrace",
     "canvas_traits/webgl_backtrace",
 ]
-xr-profile = ["canvas/xr-profile", "canvas_traits/xr-profile", "script/xr-profile", "webxr/profile"]
 
 [dependencies]
 background_hang_monitor = { path = "../background_hang_monitor" }

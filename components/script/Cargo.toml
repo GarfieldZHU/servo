@@ -18,7 +18,6 @@ profilemozjs = ['js/profilemozjs']
 webgl_backtrace = ["canvas_traits/webgl_backtrace"]
 js_backtrace = []
 refcell_backtrace = ["accountable-refcell"]
-xr-profile = ["webxr-api/profile"]
 
 [build-dependencies]
 phf_codegen = "0.11"
@@ -102,6 +101,7 @@ servo_url = { path = "../url" }
 smallvec = { workspace = true, features = ["union"] }
 sparkle = { workspace = true }
 style = { workspace = true }
+style_dom = { workspace = true }
 style_traits = { workspace = true }
 swapper = "0.1"
 tempfile = "3"
