@@ -2,6 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::default::Default;
+use std::iter;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, LocalName, Prefix};
+use js::rust::HandleObject;
+use style::attr::AttrValue;
+use style_dom::ElementState;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLCollectionBinding::HTMLCollectionMethods;
@@ -9,8 +18,9 @@ use crate::dom::bindings::codegen::Bindings::HTMLOptionElementBinding::HTMLOptio
 use crate::dom::bindings::codegen::Bindings::HTMLOptionsCollectionBinding::HTMLOptionsCollectionMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLSelectElementBinding::HTMLSelectElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
-use crate::dom::bindings::codegen::UnionTypes::HTMLElementOrLong;
-use crate::dom::bindings::codegen::UnionTypes::HTMLOptionElementOrHTMLOptGroupElement;
+use crate::dom::bindings::codegen::UnionTypes::{
+    HTMLElementOrLong, HTMLOptionElementOrHTMLOptGroupElement,
+};
 use crate::dom::bindings::error::ErrorResult;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
@@ -29,12 +39,6 @@ use crate::dom::nodelist::NodeList;
 use crate::dom::validation::{is_barred_by_datalist_ancestor, Validatable};
 use crate::dom::validitystate::{ValidationFlags, ValidityState};
 use crate::dom::virtualmethods::VirtualMethods;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use std::default::Default;
-use std::iter;
-use style::attr::AttrValue;
-use style::element_state::ElementState;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct OptionsFilter;
@@ -75,7 +79,7 @@ impl HTMLSelectElement {
     ) -> HTMLSelectElement {
         HTMLSelectElement {
             htmlelement: HTMLElement::new_inherited_with_state(
-                ElementState::IN_ENABLED_STATE,
+                ElementState::ENABLED | ElementState::VALID,
                 local_name,
                 prefix,
                 document,
@@ -87,17 +91,19 @@ impl HTMLSelectElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLSelectElement> {
-        let n = Node::reflect_node(
+        let n = Node::reflect_node_with_proto(
             Box::new(HTMLSelectElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         );
 
         n.upcast::<Node>().set_weird_parser_insertion_mode();
@@ -161,11 +167,9 @@ impl HTMLSelectElement {
 
         if let Some(last_selected) = last_selected {
             last_selected.set_selectedness(true);
-        } else {
-            if self.display_size() == 1 {
-                if let Some(first_enabled) = first_enabled {
-                    first_enabled.set_selectedness(true);
-                }
+        } else if self.display_size() == 1 {
+            if let Some(first_enabled) = first_enabled {
+                first_enabled.set_selectedness(true);
             }
         }
     }
@@ -306,7 +310,7 @@ impl HTMLSelectElementMethods for HTMLSelectElement {
     fn NamedItem(&self, name: DOMString) -> Option<DomRoot<HTMLOptionElement>> {
         self.Options()
             .NamedGetter(name)
-            .map_or(None, |e| DomRoot::downcast::<HTMLOptionElement>(e))
+            .and_then(DomRoot::downcast::<HTMLOptionElement>)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-select-remove
@@ -344,13 +348,16 @@ impl HTMLSelectElementMethods for HTMLSelectElement {
         for opt in opt_iter {
             opt.set_selectedness(false);
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::VALUE_MISSING);
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-select-selectedindex
     fn SelectedIndex(&self) -> i32 {
         self.list_of_options()
             .enumerate()
-            .filter(|&(_, ref opt_elem)| opt_elem.Selected())
+            .filter(|(_, opt_elem)| opt_elem.Selected())
             .map(|(i, _)| i as i32)
             .next()
             .unwrap_or(-1)
@@ -410,8 +417,12 @@ impl VirtualMethods for HTMLSelectElement {
 
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
-        match attr.local_name() {
-            &local_name!("disabled") => {
+        match *attr.local_name() {
+            local_name!("required") => {
+                self.validity_state()
+                    .perform_validation_and_update(ValidationFlags::VALUE_MISSING);
+            },
+            local_name!("disabled") => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(_) => {
@@ -424,8 +435,11 @@ impl VirtualMethods for HTMLSelectElement {
                         el.check_ancestors_disabled_state_for_form_control();
                     },
                 }
+
+                self.validity_state()
+                    .perform_validation_and_update(ValidationFlags::VALUE_MISSING);
             },
-            &local_name!("form") => {
+            local_name!("form") => {
                 self.form_attribute_mutated(mutation);
             },
             _ => {},
@@ -433,7 +447,7 @@ impl VirtualMethods for HTMLSelectElement {
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
 
@@ -476,7 +490,7 @@ impl FormControl for HTMLSelectElement {
         self.form_owner.set(form);
     }
 
-    fn to_element<'a>(&'a self) -> &'a Element {
+    fn to_element(&self) -> &Element {
         self.upcast::<Element>()
     }
 }
@@ -504,11 +518,10 @@ impl Validatable for HTMLSelectElement {
         // https://html.spec.whatwg.org/multipage/#the-select-element%3Asuffering-from-being-missing
         if validate_flags.contains(ValidationFlags::VALUE_MISSING) && self.Required() {
             let placeholder = self.get_placeholder_label_option();
-            let selected_option = self
+            let is_value_missing = !self
                 .list_of_options()
-                .filter(|e| e.Selected() && placeholder.as_ref() != Some(e))
-                .next();
-            failed_flags.set(ValidationFlags::VALUE_MISSING, selected_option.is_none());
+                .any(|e| e.Selected() && placeholder != Some(e));
+            failed_flags.set(ValidationFlags::VALUE_MISSING, is_value_missing);
         }
 
         failed_flags

@@ -2,12 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::jsapi::Heap;
+use js::jsval::JSVal;
+use js::rust::{HandleObject, HandleValue};
+use servo_atoms::Atom;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::ExtendableMessageEventBinding;
 use crate::dom::bindings::codegen::Bindings::ExtendableMessageEventBinding::ExtendableMessageEventMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::trace::RootedTraceableBox;
@@ -19,25 +25,20 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::messageport::MessagePort;
 use crate::dom::serviceworkerglobalscope::ServiceWorkerGlobalScope;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsapi::Heap;
-use js::jsval::JSVal;
-use js::rust::HandleValue;
-use servo_atoms::Atom;
 
 #[dom_struct]
 #[allow(non_snake_case)]
 pub struct ExtendableMessageEvent {
-    /// https://w3c.github.io/ServiceWorker/#extendableevent
+    /// <https://w3c.github.io/ServiceWorker/#extendableevent>
     event: ExtendableEvent,
-    /// https://w3c.github.io/ServiceWorker/#dom-extendablemessageevent-data
+    /// <https://w3c.github.io/ServiceWorker/#dom-extendablemessageevent-data>
     #[ignore_malloc_size_of = "mozjs"]
     data: Heap<JSVal>,
     /// <https://w3c.github.io/ServiceWorker/#extendablemessage-event-origin>
     origin: DOMString,
-    /// https://w3c.github.io/ServiceWorker/#dom-extendablemessageevent-lasteventid
+    /// <https://w3c.github.io/ServiceWorker/#dom-extendablemessageevent-lasteventid>
     lastEventId: DOMString,
-    /// https://w3c.github.io/ServiceWorker/#dom-extendablemessageevent-ports
+    /// <https://w3c.github.io/ServiceWorker/#dom-extendablemessageevent-ports>
     ports: Vec<Dom<MessagePort>>,
     #[ignore_malloc_size_of = "mozjs"]
     frozen_ports: DomRefCell<Option<Heap<JSVal>>>,
@@ -53,8 +54,8 @@ impl ExtendableMessageEvent {
         ExtendableMessageEvent {
             event: ExtendableEvent::new_inherited(),
             data: Heap::default(),
-            origin: origin,
-            lastEventId: lastEventId,
+            origin,
+            lastEventId,
             ports: ports
                 .into_iter()
                 .map(|port| Dom::from_ref(&*port))
@@ -63,8 +64,34 @@ impl ExtendableMessageEvent {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         global: &GlobalScope,
+        type_: Atom,
+        bubbles: bool,
+        cancelable: bool,
+        data: HandleValue,
+        origin: DOMString,
+        lastEventId: DOMString,
+        ports: Vec<DomRoot<MessagePort>>,
+    ) -> DomRoot<ExtendableMessageEvent> {
+        Self::new_with_proto(
+            global,
+            None,
+            type_,
+            bubbles,
+            cancelable,
+            data,
+            origin,
+            lastEventId,
+            ports,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
         type_: Atom,
         bubbles: bool,
         cancelable: bool,
@@ -78,7 +105,7 @@ impl ExtendableMessageEvent {
             lastEventId,
             ports,
         ));
-        let ev = reflect_dom_object(ev, global);
+        let ev = reflect_dom_object_with_proto(ev, global, proto);
         {
             let event = ev.upcast::<Event>();
             event.init_event(type_, bubbles, cancelable);
@@ -90,12 +117,14 @@ impl ExtendableMessageEvent {
 
     pub fn Constructor(
         worker: &ServiceWorkerGlobalScope,
+        proto: Option<HandleObject>,
         type_: DOMString,
         init: RootedTraceableBox<ExtendableMessageEventBinding::ExtendableMessageEventInit>,
     ) -> Fallible<DomRoot<ExtendableMessageEvent>> {
         let global = worker.upcast::<GlobalScope>();
-        let ev = ExtendableMessageEvent::new(
+        let ev = ExtendableMessageEvent::new_with_proto(
             global,
+            proto,
             Atom::from(type_),
             init.parent.parent.bubbles,
             init.parent.parent.cancelable,
@@ -166,7 +195,7 @@ impl ExtendableMessageEventMethods for ExtendableMessageEvent {
         self.event.IsTrusted()
     }
 
-    /// https://w3c.github.io/ServiceWorker/#extendablemessage-event-ports
+    /// <https://w3c.github.io/ServiceWorker/#extendablemessage-event-ports>
     fn Ports(&self, cx: JSContext) -> JSVal {
         if let Some(ports) = &*self.frozen_ports.borrow() {
             return ports.get();

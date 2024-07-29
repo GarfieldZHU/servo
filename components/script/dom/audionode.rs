@@ -2,13 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use servo_media::audio::graph::NodeId;
+use servo_media::audio::node::{
+    AudioNodeInit, AudioNodeMessage, ChannelCountMode as ServoMediaChannelCountMode, ChannelInfo,
+    ChannelInterpretation as ServoMediaChannelInterpretation,
+};
+
 use crate::dom::audioparam::AudioParam;
 use crate::dom::baseaudiocontext::BaseAudioContext;
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
-    AudioNodeMethods, AudioNodeOptions,
-};
-use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
-    ChannelCountMode, ChannelInterpretation,
+    AudioNodeMethods, AudioNodeOptions, ChannelCountMode, ChannelInterpretation,
 };
 use crate::dom::bindings::codegen::InheritTypes::{
     AudioNodeTypeId, AudioScheduledSourceNodeTypeId, EventTargetTypeId,
@@ -17,12 +23,6 @@ use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::eventtarget::EventTarget;
-use dom_struct::dom_struct;
-use servo_media::audio::graph::NodeId;
-use servo_media::audio::node::ChannelCountMode as ServoMediaChannelCountMode;
-use servo_media::audio::node::ChannelInterpretation as ServoMediaChannelInterpretation;
-use servo_media::audio::node::{AudioNodeInit, AudioNodeMessage, ChannelInfo};
-use std::cell::Cell;
 
 // 32 is the minimum required by the spec for createBuffer() and the deprecated
 // createScriptProcessor() and matches what is used by Blink and Gecko.
@@ -33,6 +33,7 @@ pub const MAX_CHANNEL_COUNT: u32 = 32;
 pub struct AudioNode {
     eventtarget: EventTarget,
     #[ignore_malloc_size_of = "servo_media"]
+    #[no_trace]
     node_id: NodeId,
     context: Dom<BaseAudioContext>,
     number_of_inputs: u32,
@@ -257,7 +258,7 @@ impl AudioNodeMethods for AudioNode {
             EventTargetTypeId::AudioNode(AudioNodeTypeId::AudioDestinationNode) => {
                 if self.context.is_offline() {
                     return Err(Error::InvalidState);
-                } else if value < 1 || value > MAX_CHANNEL_COUNT {
+                } else if !(1..=MAX_CHANNEL_COUNT).contains(&value) {
                     return Err(Error::IndexSize);
                 }
             },
@@ -353,11 +354,10 @@ impl AudioNodeMethods for AudioNode {
             return Ok(());
         }
 
-        match self.upcast::<EventTarget>().type_id() {
-            EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelSplitterNode) => {
-                return Err(Error::InvalidState);
-            },
-            _ => (),
+        if let EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelSplitterNode) =
+            self.upcast::<EventTarget>().type_id()
+        {
+            return Err(Error::InvalidState);
         };
 
         self.channel_interpretation.set(value);

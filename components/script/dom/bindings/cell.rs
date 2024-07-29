@@ -4,14 +4,16 @@
 
 //! A shareable mutable container for the DOM.
 
-use crate::dom::bindings::root::{assert_in_layout, assert_in_script};
+use std::cell::{BorrowError, BorrowMutError};
+#[cfg(not(feature = "refcell_backtrace"))]
+pub use std::cell::{Ref, RefCell, RefMut};
+
 #[cfg(feature = "refcell_backtrace")]
 pub use accountable_refcell::{ref_filter_map, Ref, RefCell, RefMut};
 #[cfg(not(feature = "refcell_backtrace"))]
 pub use ref_filter_map::ref_filter_map;
-use std::cell::{BorrowError, BorrowMutError};
-#[cfg(not(feature = "refcell_backtrace"))]
-pub use std::cell::{Ref, RefCell, RefMut};
+
+use crate::dom::bindings::root::{assert_in_layout, assert_in_script};
 
 /// A mutable field in the DOM.
 ///
@@ -26,9 +28,13 @@ pub struct DomRefCell<T> {
 // ===================================================
 
 impl<T> DomRefCell<T> {
-    /// Return a reference to the contents.
+    /// Return a reference to the contents.  For use in layout only.
     ///
-    /// For use in the layout thread only.
+    /// # Safety
+    ///
+    /// Unlike RefCell::borrow, this method is unsafe because it does not return a Ref, thus leaving
+    /// the borrow flag untouched. Mutably borrowing the RefCell while the reference returned by
+    /// this method is alive is undefined behaviour.
     #[allow(unsafe_code)]
     pub unsafe fn borrow_for_layout(&self) -> &T {
         assert_in_layout();
@@ -39,7 +45,12 @@ impl<T> DomRefCell<T> {
 
     /// Borrow the contents for the purpose of script deallocation.
     ///
-    #[allow(unsafe_code)]
+    /// # Safety
+    ///
+    /// Unlike RefCell::borrow, this method is unsafe because it does not return a Ref, thus leaving
+    /// the borrow flag untouched. Mutably borrowing the RefCell while the reference returned by
+    /// this method is alive is undefined behaviour.
+    #[allow(unsafe_code, clippy::mut_from_ref)]
     pub unsafe fn borrow_for_script_deallocation(&self) -> &mut T {
         assert_in_script();
         &mut *self.value.as_ptr()
@@ -47,7 +58,13 @@ impl<T> DomRefCell<T> {
 
     /// Mutably borrow a cell for layout. Ideally this would use
     /// `RefCell::try_borrow_mut_unguarded` but that doesn't exist yet.
-    #[allow(unsafe_code)]
+    ///
+    /// # Safety
+    ///
+    /// Unlike RefCell::borrow, this method is unsafe because it does not return a Ref, thus leaving
+    /// the borrow flag untouched. Mutably borrowing the RefCell while the reference returned by
+    /// this method is alive is undefined behaviour.
+    #[allow(unsafe_code, clippy::mut_from_ref)]
     pub unsafe fn borrow_mut_for_layout(&self) -> &mut T {
         assert_in_layout();
         &mut *self.value.as_ptr()

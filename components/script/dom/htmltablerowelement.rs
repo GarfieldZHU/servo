@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use style::attr::AttrValue;
+use style::color::AbsoluteColor;
+
 use crate::dom::bindings::codegen::Bindings::HTMLTableElementBinding::HTMLTableElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLTableRowElementBinding::HTMLTableRowElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLTableSectionElementBinding::HTMLTableSectionElementMethods;
@@ -19,10 +25,6 @@ use crate::dom::htmltableelement::HTMLTableElement;
 use crate::dom::htmltablesectionelement::HTMLTableSectionElement;
 use crate::dom::node::{window_from_node, Node};
 use crate::dom::virtualmethods::VirtualMethods;
-use cssparser::RGBA;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use style::attr::AttrValue;
 
 #[derive(JSTraceable)]
 struct CellsFilter;
@@ -51,17 +53,19 @@ impl HTMLTableRowElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLTableRowElement> {
-        let n = Node::reflect_node(
+        let n = Node::reflect_node_with_proto(
             Box::new(HTMLTableRowElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         );
 
         n.upcast::<Node>().set_weird_parser_insertion_mode();
@@ -100,7 +104,7 @@ impl HTMLTableRowElementMethods for HTMLTableRowElement {
         node.insert_cell_or_row(
             index,
             || self.Cells(),
-            || HTMLTableCellElement::new(local_name!("td"), None, &node.owner_doc()),
+            || HTMLTableCellElement::new(local_name!("td"), None, &node.owner_doc(), None),
         )
     }
 
@@ -149,11 +153,11 @@ impl HTMLTableRowElementMethods for HTMLTableRowElement {
 }
 
 pub trait HTMLTableRowElementLayoutHelpers {
-    fn get_background_color(self) -> Option<RGBA>;
+    fn get_background_color(self) -> Option<AbsoluteColor>;
 }
 
 impl HTMLTableRowElementLayoutHelpers for LayoutDom<'_, HTMLTableRowElement> {
-    fn get_background_color(self) -> Option<RGBA> {
+    fn get_background_color(self) -> Option<AbsoluteColor> {
         self.upcast::<Element>()
             .get_attr_for_layout(&ns!(), &local_name!("bgcolor"))
             .and_then(AttrValue::as_color)

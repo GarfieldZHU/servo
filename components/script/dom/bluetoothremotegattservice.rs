@@ -2,6 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
+use bluetooth_traits::{BluetoothResponse, GATTType};
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTServerBinding::BluetoothRemoteGATTServerMethods;
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTServiceBinding::BluetoothRemoteGATTServiceMethods;
 use crate::dom::bindings::error::Error;
@@ -14,9 +19,6 @@ use crate::dom::bluetoothuuid::{BluetoothCharacteristicUUID, BluetoothServiceUUI
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
-use bluetooth_traits::{BluetoothResponse, GATTType};
-use dom_struct::dom_struct;
-use std::rc::Rc;
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothremotegattservice
 #[dom_struct]
@@ -38,9 +40,9 @@ impl BluetoothRemoteGATTService {
         BluetoothRemoteGATTService {
             eventtarget: EventTarget::new_inherited(),
             device: Dom::from_ref(device),
-            uuid: uuid,
-            is_primary: is_primary,
-            instance_id: instance_id,
+            uuid,
+            is_primary,
+            instance_id,
         }
     }
 
@@ -155,14 +157,14 @@ impl AsyncBluetoothListener for BluetoothRemoteGATTService {
             BluetoothResponse::GetCharacteristics(characteristics_vec, single) => {
                 if single {
                     promise.resolve_native(
-                        &device.get_or_create_characteristic(&characteristics_vec[0], &self),
+                        &device.get_or_create_characteristic(&characteristics_vec[0], self),
                     );
                     return;
                 }
                 let mut characteristics = vec![];
                 for characteristic in characteristics_vec {
                     let bt_characteristic =
-                        device.get_or_create_characteristic(&characteristic, &self);
+                        device.get_or_create_characteristic(&characteristic, self);
                     characteristics.push(bt_characteristic);
                 }
                 promise.resolve_native(&characteristics);

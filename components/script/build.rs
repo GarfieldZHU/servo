@@ -2,15 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use phf_shared::{self, FmtConst};
-use serde_json::{self, Value};
-use std::env;
-use std::fmt;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
+use std::{env, fmt};
+
+use phf_shared::{self, FmtConst};
+use serde_json::{self, Value};
 
 fn main() {
     let start = Instant::now();
@@ -31,16 +31,16 @@ fn main() {
     println!("Binding generation completed in {:?}", start.elapsed());
 
     let json = out_dir.join("InterfaceObjectMapData.json");
-    let json: Value = serde_json::from_reader(File::open(&json).unwrap()).unwrap();
+    let json: Value = serde_json::from_reader(File::open(json).unwrap()).unwrap();
     let mut map = phf_codegen::Map::new();
     for (key, value) in json.as_object().unwrap() {
         map.entry(Bytes(key), value.as_str().unwrap());
     }
     let phf = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("InterfaceObjectMapPhf.rs");
-    let mut phf = File::create(&phf).unwrap();
-    write!(
+    let mut phf = File::create(phf).unwrap();
+    writeln!(
         &mut phf,
-        "pub static MAP: phf::Map<&'static [u8], fn(JSContext, HandleObject)> = {};\n",
+        "pub static MAP: phf::Map<&'static [u8], fn(JSContext, HandleObject)> = {};",
         map.build(),
     )
     .unwrap();
@@ -67,9 +67,9 @@ impl<'a> phf_shared::PhfHash for Bytes<'a> {
 fn find_python() -> String {
     env::var("PYTHON3").ok().unwrap_or_else(|| {
         let candidates = if cfg!(windows) {
-            ["python3.8.exe", "python38.exe", "python.exe"]
+            ["python.exe", "python"]
         } else {
-            ["python3.8", "python3", "python"]
+            ["python3", "python"]
         };
         for &name in &candidates {
             if Command::new(name)

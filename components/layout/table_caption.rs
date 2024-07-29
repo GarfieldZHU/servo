@@ -4,6 +4,15 @@
 
 //! CSS table formatting contexts.
 
+use std::fmt;
+
+use app_units::Au;
+use base::print_tree::PrintTree;
+use euclid::default::Point2D;
+use log::{debug, trace};
+use style::logical_geometry::LogicalSize;
+use style::properties::ComputedValues;
+
 use crate::block::BlockFlow;
 use crate::context::LayoutContext;
 use crate::display_list::{
@@ -11,12 +20,6 @@ use crate::display_list::{
 };
 use crate::flow::{Flow, FlowClass, OpaqueFlow};
 use crate::fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
-use app_units::Au;
-use euclid::default::Point2D;
-use gfx_traits::print_tree::PrintTree;
-use std::fmt;
-use style::logical_geometry::LogicalSize;
-use style::properties::ComputedValues;
 
 #[allow(unsafe_code)]
 unsafe impl crate::flow::HasBaseFlow for TableCaptionFlow {}
@@ -57,12 +60,20 @@ impl Flow for TableCaptionFlow {
             "assign_inline_sizes({}): assigning inline_size for flow",
             "table_caption"
         );
+        trace!("TableCaptionFlow before assigning: {:?}", &self);
+
         self.block_flow.assign_inline_sizes(layout_context);
+
+        trace!("TableCaptionFlow after assigning: {:?}", &self);
     }
 
     fn assign_block_size(&mut self, layout_context: &LayoutContext) {
         debug!("assign_block_size: assigning block_size for table_caption");
+        trace!("TableCaptionFlow before assigning: {:?}", &self);
+
         self.block_flow.assign_block_size(layout_context);
+
+        trace!("TableCaptionFlow after assigning: {:?}", &self);
     }
 
     fn compute_stacking_relative_position(&mut self, layout_context: &LayoutContext) {

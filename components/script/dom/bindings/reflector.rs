@@ -4,15 +4,18 @@
 
 //! The `Reflector` struct.
 
+use std::default::Default;
+
+use js::jsapi::{Heap, JSObject};
+use js::rust::HandleObject;
+
 use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::iterable::{Iterable, IterableIterator};
 use crate::dom::bindings::root::{Dom, DomRoot, Root};
 use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::globalscope::GlobalScope;
+use crate::realms::AlreadyInRealm;
 use crate::script_runtime::JSContext;
-use js::jsapi::{Heap, JSObject};
-use js::rust::HandleObject;
-use std::default::Default;
 
 /// Create the reflector for a new DOM object and yield ownership to the
 /// reflector.
@@ -22,20 +25,33 @@ where
     U: DerivedFrom<GlobalScope>,
 {
     let global_scope = global.upcast();
-    unsafe { T::WRAP(global_scope.get_cx(), global_scope, obj) }
+    unsafe { T::WRAP(GlobalScope::get_cx(), global_scope, None, obj) }
+}
+
+pub fn reflect_dom_object_with_proto<T, U>(
+    obj: Box<T>,
+    global: &U,
+    proto: Option<HandleObject>,
+) -> DomRoot<T>
+where
+    T: DomObject + DomObjectWrap,
+    U: DerivedFrom<GlobalScope>,
+{
+    let global_scope = global.upcast();
+    unsafe { T::WRAP(GlobalScope::get_cx(), global_scope, proto, obj) }
 }
 
 /// A struct to store a reference to the reflector of a DOM object.
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 #[derive(MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 // If you're renaming or moving this field, update the path in plugins::reflector as well
 pub struct Reflector {
     #[ignore_malloc_size_of = "defined and measured in rust-mozjs"]
     object: Heap<*mut JSObject>,
 }
 
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 impl PartialEq for Reflector {
     fn eq(&self, other: &Reflector) -> bool {
         self.object.get() == other.object.get()
@@ -65,6 +81,8 @@ impl Reflector {
     }
 
     /// Create an uninitialized `Reflector`.
+    // These are used by the bindings and do not need `default()` functions.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Reflector {
         Reflector {
             object: Heap::default(),
@@ -82,7 +100,8 @@ pub trait DomObject: JSTraceable + 'static {
     where
         Self: Sized,
     {
-        GlobalScope::from_reflector(self)
+        let realm = AlreadyInRealm::assert_for_cx(GlobalScope::get_cx());
+        GlobalScope::from_reflector(self, &realm)
     }
 }
 
@@ -107,16 +126,22 @@ impl MutDomObject for Reflector {
 /// A trait to provide a function pointer to wrap function for DOM objects.
 pub trait DomObjectWrap: Sized + DomObject {
     /// Function pointer to the general wrap function type
-    const WRAP: unsafe fn(JSContext, &GlobalScope, Box<Self>) -> Root<Dom<Self>>;
+    const WRAP: unsafe fn(
+        JSContext,
+        &GlobalScope,
+        Option<HandleObject>,
+        Box<Self>,
+    ) -> Root<Dom<Self>>;
 }
 
 /// A trait to provide a function pointer to wrap function for
 /// DOM iterator interfaces.
 pub trait DomObjectIteratorWrap: DomObjectWrap + JSTraceable + Iterable {
-    /// Function pointer to the wrap function for IterableIterator<T>
+    /// Function pointer to the wrap function for `IterableIterator<T>`
     const ITER_WRAP: unsafe fn(
         JSContext,
         &GlobalScope,
+        Option<HandleObject>,
         Box<IterableIterator<Self>>,
     ) -> Root<Dom<IterableIterator<Self>>>;
 }

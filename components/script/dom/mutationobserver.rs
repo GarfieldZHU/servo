@@ -2,13 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use html5ever::{namespace_url, ns, LocalName, Namespace};
+use js::rust::HandleObject;
+
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::MutationObserverBinding::MutationCallback;
-use crate::dom::bindings::codegen::Bindings::MutationObserverBinding::MutationObserverBinding::MutationObserverMethods;
-use crate::dom::bindings::codegen::Bindings::MutationObserverBinding::MutationObserverInit;
+use crate::dom::bindings::codegen::Bindings::MutationObserverBinding::MutationObserver_Binding::MutationObserverMethods;
+use crate::dom::bindings::codegen::Bindings::MutationObserverBinding::{
+    MutationCallback, MutationObserverInit,
+};
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::mutationrecord::MutationRecord;
@@ -16,9 +23,6 @@ use crate::dom::node::{Node, ShadowIncluding};
 use crate::dom::window::Window;
 use crate::microtask::Microtask;
 use crate::script_thread::ScriptThread;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Namespace};
-use std::rc::Rc;
 
 #[dom_struct]
 pub struct MutationObserver {
@@ -64,15 +68,19 @@ pub struct ObserverOptions {
 }
 
 impl MutationObserver {
-    fn new(global: &Window, callback: Rc<MutationCallback>) -> DomRoot<MutationObserver> {
+    fn new_with_proto(
+        global: &Window,
+        proto: Option<HandleObject>,
+        callback: Rc<MutationCallback>,
+    ) -> DomRoot<MutationObserver> {
         let boxed_observer = Box::new(MutationObserver::new_inherited(callback));
-        reflect_dom_object(boxed_observer, global)
+        reflect_dom_object_with_proto(boxed_observer, global, proto)
     }
 
     fn new_inherited(callback: Rc<MutationCallback>) -> MutationObserver {
         MutationObserver {
             reflector_: Reflector::new(),
-            callback: callback,
+            callback,
             record_queue: DomRefCell::new(vec![]),
             node_list: DomRefCell::new(vec![]),
         }
@@ -81,11 +89,12 @@ impl MutationObserver {
     #[allow(non_snake_case)]
     pub fn Constructor(
         global: &Window,
+        proto: Option<HandleObject>,
         callback: Rc<MutationCallback>,
     ) -> Fallible<DomRoot<MutationObserver>> {
         global.set_exists_mut_observer();
-        let observer = MutationObserver::new(global, callback);
-        ScriptThread::add_mutation_observer(&*observer);
+        let observer = MutationObserver::new_with_proto(global, proto, callback);
+        ScriptThread::add_mutation_observer(&observer);
         Ok(observer)
     }
 
@@ -116,7 +125,7 @@ impl MutationObserver {
             if !queue.is_empty() {
                 let _ = mo
                     .callback
-                    .Call_(&**mo, queue, &**mo, ExceptionHandling::Report);
+                    .Call_(&**mo, queue, mo, ExceptionHandling::Report);
             }
         }
         // TODO: Step 6 (slot signals)
@@ -160,7 +169,7 @@ impl MutationObserver {
                                 .options
                                 .attribute_filter
                                 .iter()
-                                .any(|s| &**s == &**name)
+                                .any(|s| **s == **name)
                             {
                                 continue;
                             }
@@ -172,9 +181,9 @@ impl MutationObserver {
                             None
                         };
                         // Step 3.1.1
-                        let idx = interested_observers.iter().position(|&(ref o, _)| {
-                            &**o as *const _ == &*registered.observer as *const _
-                        });
+                        let idx = interested_observers
+                            .iter()
+                            .position(|(o, _)| std::ptr::eq(&**o, &*registered.observer));
                         if let Some(idx) = idx {
                             interested_observers[idx].1 = paired_string;
                         } else {
@@ -193,9 +202,9 @@ impl MutationObserver {
                             None
                         };
                         // Step 3.1.1
-                        let idx = interested_observers.iter().position(|&(ref o, _)| {
-                            &**o as *const _ == &*registered.observer as *const _
-                        });
+                        let idx = interested_observers
+                            .iter()
+                            .position(|(o, _)| std::ptr::eq(&**o, &*registered.observer));
                         if let Some(idx) = idx {
                             interested_observers[idx].1 = paired_string;
                         } else {
@@ -251,7 +260,7 @@ impl MutationObserver {
 impl MutationObserverMethods for MutationObserver {
     /// <https://dom.spec.whatwg.org/#dom-mutationobserver-observe>
     fn Observe(&self, target: &Node, options: &MutationObserverInit) -> Fallible<()> {
-        let attribute_filter = options.attributeFilter.clone().unwrap_or(vec![]);
+        let attribute_filter = options.attributeFilter.clone().unwrap_or_default();
         let attribute_old_value = options.attributeOldValue.unwrap_or(false);
         let mut attributes = options.attributes.unwrap_or(false);
         let mut character_data = options.characterData.unwrap_or(false);
@@ -315,7 +324,10 @@ impl MutationObserverMethods for MutationObserver {
                 registered.options.character_data_old_value = character_data_old_value;
                 registered.options.child_list = child_list;
                 registered.options.subtree = subtree;
-                registered.options.attribute_filter = attribute_filter.clone();
+                registered
+                    .options
+                    .attribute_filter
+                    .clone_from(&attribute_filter);
                 replaced = true;
             }
             !replaced
@@ -342,14 +354,14 @@ impl MutationObserverMethods for MutationObserver {
         Ok(())
     }
 
-    /// https://dom.spec.whatwg.org/#dom-mutationobserver-takerecords
+    /// <https://dom.spec.whatwg.org/#dom-mutationobserver-takerecords>
     fn TakeRecords(&self) -> Vec<DomRoot<MutationRecord>> {
         let records: Vec<DomRoot<MutationRecord>> = self.record_queue.borrow().clone();
         self.record_queue.borrow_mut().clear();
         records
     }
 
-    /// https://dom.spec.whatwg.org/#dom-mutationobserver-disconnect
+    /// <https://dom.spec.whatwg.org/#dom-mutationobserver-disconnect>
     fn Disconnect(&self) {
         // Step 1
         let mut nodes = self.node_list.borrow_mut();

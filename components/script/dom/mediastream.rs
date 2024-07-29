@@ -2,19 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_media::streams::registry::MediaStreamId;
+use servo_media::streams::MediaStreamType;
+
 use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::MediaStreamBinding::MediaStreamMethods;
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::mediastreamtrack::MediaStreamTrack;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_media::streams::registry::MediaStreamId;
-use servo_media::streams::MediaStreamType;
 
 #[dom_struct]
 pub struct MediaStream {
@@ -32,7 +34,11 @@ impl MediaStream {
     }
 
     pub fn new(global: &GlobalScope) -> DomRoot<MediaStream> {
-        reflect_dom_object(Box::new(MediaStream::new_inherited()), global)
+        Self::new_with_proto(global, None)
+    }
+
+    fn new_with_proto(global: &GlobalScope, proto: Option<HandleObject>) -> DomRoot<MediaStream> {
+        reflect_dom_object_with_proto(Box::new(MediaStream::new_inherited()), global, proto)
     }
 
     pub fn new_single(
@@ -46,19 +52,27 @@ impl MediaStream {
         this
     }
 
-    pub fn Constructor(global: &Window) -> Fallible<DomRoot<MediaStream>> {
-        Ok(MediaStream::new(&global.global()))
+    pub fn Constructor(
+        global: &Window,
+        proto: Option<HandleObject>,
+    ) -> Fallible<DomRoot<MediaStream>> {
+        Ok(MediaStream::new_with_proto(&global.global(), proto))
     }
 
-    pub fn Constructor_(_: &Window, stream: &MediaStream) -> Fallible<DomRoot<MediaStream>> {
-        Ok(stream.Clone())
+    pub fn Constructor_(
+        _: &Window,
+        proto: Option<HandleObject>,
+        stream: &MediaStream,
+    ) -> Fallible<DomRoot<MediaStream>> {
+        Ok(stream.clone_with_proto(proto))
     }
 
     pub fn Constructor__(
         global: &Window,
+        proto: Option<HandleObject>,
         tracks: Vec<DomRoot<MediaStreamTrack>>,
     ) -> Fallible<DomRoot<MediaStream>> {
-        let new = MediaStream::new(&global.global());
+        let new = MediaStream::new_with_proto(&global.global(), proto);
         for track in tracks {
             // this is quadratic, but shouldn't matter much
             // if this becomes a problem we can use a hash map
@@ -77,7 +91,7 @@ impl MediaStream {
 }
 
 impl MediaStreamMethods for MediaStream {
-    /// https://w3c.github.io/mediacapture-main/#dom-mediastream-gettracks
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-gettracks>
     fn GetTracks(&self) -> Vec<DomRoot<MediaStreamTrack>> {
         self.tracks
             .borrow()
@@ -86,7 +100,7 @@ impl MediaStreamMethods for MediaStream {
             .collect()
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediastream-getaudiotracks
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-getaudiotracks>
     fn GetAudioTracks(&self) -> Vec<DomRoot<MediaStreamTrack>> {
         self.tracks
             .borrow()
@@ -96,7 +110,7 @@ impl MediaStreamMethods for MediaStream {
             .collect()
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediastream-getvideotracks
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-getvideotracks>
     fn GetVideoTracks(&self) -> Vec<DomRoot<MediaStreamTrack>> {
         self.tracks
             .borrow()
@@ -106,18 +120,18 @@ impl MediaStreamMethods for MediaStream {
             .collect()
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediastream-gettrackbyid
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-gettrackbyid>
     fn GetTrackById(&self, id: DOMString) -> Option<DomRoot<MediaStreamTrack>> {
         self.tracks
             .borrow()
             .iter()
-            .find(|x| x.id().id().to_string() == &*id)
+            .find(|x| x.id().id().to_string() == *id)
             .map(|x| DomRoot::from_ref(&**x))
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediastream-addtrack
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-addtrack>
     fn AddTrack(&self, track: &MediaStreamTrack) {
-        let existing = self.tracks.borrow().iter().find(|x| *x == &track).is_some();
+        let existing = self.tracks.borrow().iter().any(|x| x == &track);
 
         if existing {
             return;
@@ -125,16 +139,22 @@ impl MediaStreamMethods for MediaStream {
         self.add_track(track)
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediastream-removetrack
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-removetrack>
     fn RemoveTrack(&self, track: &MediaStreamTrack) {
         self.tracks.borrow_mut().retain(|x| *x != track);
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediastream-clone
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediastream-clone>
     fn Clone(&self) -> DomRoot<MediaStream> {
-        let new = MediaStream::new(&self.global());
+        self.clone_with_proto(None)
+    }
+}
+
+impl MediaStream {
+    fn clone_with_proto(&self, proto: Option<HandleObject>) -> DomRoot<MediaStream> {
+        let new = MediaStream::new_with_proto(&self.global(), proto);
         for track in &*self.tracks.borrow() {
-            new.add_track(&track)
+            new.add_track(track)
         }
         new
     }

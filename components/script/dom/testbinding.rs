@@ -4,43 +4,40 @@
 
 // check-tidy: no specs after this line
 
+use std::borrow::ToOwned;
+use std::ptr::{self, NonNull};
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use js::jsapi::{Heap, JSObject, JS_NewPlainObject};
+use js::jsval::{JSVal, NullValue};
+use js::rust::{CustomAutoRooterGuard, HandleObject, HandleValue};
+use js::typedarray::{self, Uint8ClampedArray};
+use script_traits::serializable::BlobImpl;
+use script_traits::MsDuration;
+use servo_config::prefs;
+
+use crate::dom::bindings::buffer_source::create_buffer_source;
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::codegen::Bindings::EventListenerBinding::EventListener;
 use crate::dom::bindings::codegen::Bindings::FunctionBinding::Function;
-use crate::dom::bindings::codegen::Bindings::TestBindingBinding::SimpleCallback;
-use crate::dom::bindings::codegen::Bindings::TestBindingBinding::TestDictionaryParent;
-use crate::dom::bindings::codegen::Bindings::TestBindingBinding::TestDictionaryWithParent;
 use crate::dom::bindings::codegen::Bindings::TestBindingBinding::{
-    TestBindingMethods, TestDictionary,
-};
-use crate::dom::bindings::codegen::Bindings::TestBindingBinding::{
-    TestDictionaryDefaults, TestEnum, TestURLLike,
+    SimpleCallback, TestBindingMethods, TestDictionary, TestDictionaryDefaults,
+    TestDictionaryParent, TestDictionaryWithParent, TestEnum, TestURLLike,
 };
 use crate::dom::bindings::codegen::UnionTypes;
 use crate::dom::bindings::codegen::UnionTypes::{
-    BlobOrBlobSequence, BlobOrBoolean, LongOrLongSequenceSequence,
-};
-use crate::dom::bindings::codegen::UnionTypes::{BlobOrString, BlobOrUnsignedLong, EventOrString};
-use crate::dom::bindings::codegen::UnionTypes::{
-    ByteStringOrLong, ByteStringSequenceOrLongOrString,
-};
-use crate::dom::bindings::codegen::UnionTypes::{ByteStringSequenceOrLong, DocumentOrTestTypedef};
-use crate::dom::bindings::codegen::UnionTypes::{
-    EventOrUSVString, HTMLElementOrLong, LongSequenceOrTestTypedef,
-};
-use crate::dom::bindings::codegen::UnionTypes::{
-    HTMLElementOrUnsignedLongOrStringOrBoolean, LongSequenceOrBoolean,
-};
-use crate::dom::bindings::codegen::UnionTypes::{StringOrBoolean, UnsignedLongOrBoolean};
-use crate::dom::bindings::codegen::UnionTypes::{StringOrLongSequence, StringOrStringSequence};
-use crate::dom::bindings::codegen::UnionTypes::{
-    StringOrUnsignedLong, StringSequenceOrUnsignedLong,
+    BlobOrBlobSequence, BlobOrBoolean, BlobOrString, BlobOrUnsignedLong, ByteStringOrLong,
+    ByteStringSequenceOrLong, ByteStringSequenceOrLongOrString, EventOrString, EventOrUSVString,
+    HTMLElementOrLong, HTMLElementOrUnsignedLongOrStringOrBoolean, LongOrLongSequenceSequence,
+    LongSequenceOrBoolean, StringOrBoolean, StringOrLongSequence, StringOrStringSequence,
+    StringOrUnsignedLong, StringSequenceOrUnsignedLong, UnsignedLongOrBoolean,
 };
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::record::Record;
 use crate::dom::bindings::refcounted::TrustedPromise;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::{ByteString, DOMString, USVString};
 use crate::dom::bindings::trace::RootedTraceableBox;
@@ -54,20 +51,6 @@ use crate::dom::url::URL;
 use crate::realms::InRealm;
 use crate::script_runtime::JSContext as SafeJSContext;
 use crate::timers::OneshotTimerCallback;
-use dom_struct::dom_struct;
-use js::jsapi::{Heap, JSObject};
-use js::jsapi::{JS_NewPlainObject, JS_NewUint8ClampedArray};
-use js::jsval::{JSVal, NullValue};
-use js::rust::CustomAutoRooterGuard;
-use js::rust::{HandleObject, HandleValue};
-use js::typedarray;
-use script_traits::serializable::BlobImpl;
-use script_traits::MsDuration;
-use servo_config::prefs;
-use std::borrow::ToOwned;
-use std::ptr;
-use std::ptr::NonNull;
-use std::rc::Rc;
 
 #[dom_struct]
 pub struct TestBinding {
@@ -84,22 +67,33 @@ impl TestBinding {
         }
     }
 
-    pub fn new(global: &GlobalScope) -> DomRoot<TestBinding> {
-        reflect_dom_object(Box::new(TestBinding::new_inherited()), global)
+    fn new(global: &GlobalScope, proto: Option<HandleObject>) -> DomRoot<TestBinding> {
+        reflect_dom_object_with_proto(Box::new(TestBinding::new_inherited()), global, proto)
     }
 
-    pub fn Constructor(global: &GlobalScope) -> Fallible<DomRoot<TestBinding>> {
-        Ok(TestBinding::new(global))
+    pub fn Constructor(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+    ) -> Fallible<DomRoot<TestBinding>> {
+        Ok(TestBinding::new(global, proto))
     }
 
     #[allow(unused_variables)]
-    pub fn Constructor_(global: &GlobalScope, nums: Vec<f64>) -> Fallible<DomRoot<TestBinding>> {
-        Ok(TestBinding::new(global))
+    pub fn Constructor_(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        nums: Vec<f64>,
+    ) -> Fallible<DomRoot<TestBinding>> {
+        Ok(TestBinding::new(global, proto))
     }
 
     #[allow(unused_variables)]
-    pub fn Constructor__(global: &GlobalScope, num: f64) -> Fallible<DomRoot<TestBinding>> {
-        Ok(TestBinding::new(global))
+    pub fn Constructor__(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        num: f64,
+    ) -> Fallible<DomRoot<TestBinding>> {
+        Ok(TestBinding::new(global, proto))
     }
 }
 
@@ -215,12 +209,12 @@ impl TestBindingMethods for TestBinding {
         ByteStringOrLong::ByteString(ByteString::new(vec![]))
     }
     fn SetUnion9Attribute(&self, _: ByteStringOrLong) {}
-    #[allow(unsafe_code)]
-    fn ArrayAttribute(&self, cx: SafeJSContext) -> NonNull<JSObject> {
-        unsafe {
-            rooted!(in(*cx) let array = JS_NewUint8ClampedArray(*cx, 16));
-            NonNull::new(array.get()).expect("got a null pointer")
-        }
+    fn ArrayAttribute(&self, cx: SafeJSContext) -> Uint8ClampedArray {
+        let data: [u8; 16] = [0; 16];
+
+        rooted!(in (*cx) let mut array = ptr::null_mut::<JSObject>());
+        create_buffer_source(cx, &data, array.handle_mut())
+            .expect("Creating ClampedU8 array should never fail")
     }
     fn AnyAttribute(&self, _: SafeJSContext) -> JSVal {
         NullValue()
@@ -618,14 +612,18 @@ impl TestBindingMethods for TestBinding {
             unsignedShortValue: None,
             usvstringValue: None,
             nonRequiredNullable: None,
-            nonRequiredNullable2: Some(None), // null
+            nonRequiredNullable2: Some(None),
+            noCallbackImport: None,
+            noCallbackImport2: None,
         })
     }
 
     fn DictMatchesPassedValues(&self, arg: RootedTraceableBox<TestDictionary>) -> bool {
         arg.type_.as_ref().map(|s| s == "success").unwrap_or(false) &&
             arg.nonRequiredNullable.is_none() &&
-            arg.nonRequiredNullable2 == Some(None)
+            arg.nonRequiredNullable2 == Some(None) &&
+            arg.noCallbackImport.is_none() &&
+            arg.noCallbackImport2.is_none()
     }
 
     fn PassBoolean(&self, _: bool) {}
@@ -660,8 +658,8 @@ impl TestBindingMethods for TestBinding {
     fn PassUnion9(&self, _: UnionTypes::TestDictionaryOrLong) {}
     fn PassUnion10(&self, _: SafeJSContext, _: UnionTypes::StringOrObject) {}
     fn PassUnion11(&self, _: UnionTypes::ArrayBufferOrArrayBufferView) {}
-    fn PassUnionWithTypedef(&self, _: DocumentOrTestTypedef) {}
-    fn PassUnionWithTypedef2(&self, _: LongSequenceOrTestTypedef) {}
+    fn PassUnionWithTypedef(&self, _: UnionTypes::DocumentOrStringOrURLOrBlob) {}
+    fn PassUnionWithTypedef2(&self, _: UnionTypes::LongSequenceOrStringOrURLOrBlob) {}
     fn PassAny(&self, _: SafeJSContext, _: HandleValue) {}
     fn PassObject(&self, _: SafeJSContext, _: *mut JSObject) {}
     fn PassCallbackFunction(&self, _: Rc<Function>) {}
@@ -878,8 +876,8 @@ impl TestBindingMethods for TestBinding {
         prefs::pref_map()
             .get(pref_name.as_ref())
             .as_str()
-            .map(|s| DOMString::from(s))
-            .unwrap_or_else(|| DOMString::new())
+            .map(DOMString::from)
+            .unwrap_or_default()
     }
     fn PrefControlledAttributeDisabled(&self) -> bool {
         false
@@ -958,12 +956,12 @@ impl TestBindingMethods for TestBinding {
         Record::new()
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn ReturnResolvedPromise(&self, cx: SafeJSContext, v: HandleValue) -> Fallible<Rc<Promise>> {
         Promise::new_resolved(&self.global(), cx, v)
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn ReturnRejectedPromise(&self, cx: SafeJSContext, v: HandleValue) -> Fallible<Rc<Promise>> {
         Promise::new_rejected(&self.global(), cx, v)
     }
@@ -980,12 +978,12 @@ impl TestBindingMethods for TestBinding {
         p.reject_error(Error::Type(s.0));
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn ResolvePromiseDelayed(&self, p: &Promise, value: DOMString, delay: u64) {
         let promise = p.duplicate();
         let cb = TestBindingCallback {
             promise: TrustedPromise::new(promise),
-            value: value,
+            value,
         };
         let _ = self.global().schedule_callback(
             OneshotTimerCallback::TestBindingCallback(cb),
@@ -1005,7 +1003,7 @@ impl TestBindingMethods for TestBinding {
             resolve.map(SimpleHandler::new),
             reject.map(SimpleHandler::new),
         );
-        let p = Promise::new_in_current_realm(&global, comp.clone());
+        let p = Promise::new_in_current_realm(comp);
         p.append_native_handler(&handler, comp);
         return p;
 
@@ -1028,7 +1026,7 @@ impl TestBindingMethods for TestBinding {
     }
 
     fn PromiseAttribute(&self, comp: InRealm) -> Rc<Promise> {
-        Promise::new_in_current_realm(&self.global(), comp)
+        Promise::new_in_current_realm(comp)
     }
 
     fn AcceptPromise(&self, _promise: &Promise) {}
@@ -1048,11 +1046,7 @@ impl TestBindingMethods for TestBinding {
 
     #[allow(unsafe_code)]
     fn CrashHard(&self) {
-        static READ_ONLY_VALUE: i32 = 0;
-        unsafe {
-            let p: *mut u32 = &READ_ONLY_VALUE as *const _ as *mut _;
-            ptr::write_volatile(p, 0xbaadc0de);
-        }
+        unsafe { std::ptr::null_mut::<i32>().write(42) }
     }
 
     fn AdvanceClock(&self, ms: i32) {
@@ -1134,7 +1128,7 @@ pub struct TestBindingCallback {
 }
 
 impl TestBindingCallback {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn invoke(self) {
         self.promise.root().resolve_native(&self.value);
     }

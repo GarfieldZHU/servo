@@ -2,10 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! https://drafts.csswg.org/css-flexbox/#box-model
+//! <https://drafts.csswg.org/css-flexbox/#box-model>
 
-use crate::geom::flow_relative::{Rect, Sides, Vec2};
 use style::properties::longhands::flex_direction::computed_value::T as FlexDirection;
+
+use crate::geom::{LogicalRect, LogicalSides, LogicalVec2};
 
 #[derive(Clone, Copy)]
 pub(super) struct FlexRelativeVec2<T> {
@@ -76,7 +77,7 @@ pub(super) enum FlexAxis {
 }
 
 /// Which flow-relative sides map to the main-start and cross-start sides, respectively.
-/// See https://drafts.csswg.org/css-flexbox/#box-model
+/// See <https://drafts.csswg.org/css-flexbox/#box-model>
 #[derive(Clone, Copy)]
 pub(super) enum MainStartCrossStart {
     InlineStartBlockStart,
@@ -97,8 +98,8 @@ impl FlexAxis {
         }
     }
 
-    pub fn vec2_to_flex_relative<T>(self, flow_relative: Vec2<T>) -> FlexRelativeVec2<T> {
-        let Vec2 { inline, block } = flow_relative;
+    pub fn vec2_to_flex_relative<T>(self, flow_relative: LogicalVec2<T>) -> FlexRelativeVec2<T> {
+        let LogicalVec2 { inline, block } = flow_relative;
         match self {
             FlexAxis::Row => FlexRelativeVec2 {
                 main: inline,
@@ -111,14 +112,14 @@ impl FlexAxis {
         }
     }
 
-    pub fn vec2_to_flow_relative<T>(self, flex_relative: FlexRelativeVec2<T>) -> Vec2<T> {
+    pub fn vec2_to_flow_relative<T>(self, flex_relative: FlexRelativeVec2<T>) -> LogicalVec2<T> {
         let FlexRelativeVec2 { main, cross } = flex_relative;
         match self {
-            FlexAxis::Row => Vec2 {
+            FlexAxis::Row => LogicalVec2 {
                 inline: main,
                 block: cross,
             },
-            FlexAxis::Column => Vec2 {
+            FlexAxis::Column => LogicalVec2 {
                 block: main,
                 inline: cross,
             },
@@ -134,7 +135,7 @@ macro_rules! sides_mapping_methods {
             },
         )+
     ) => {
-        pub fn sides_to_flex_relative<T>(self, flow_relative: Sides<T>) -> FlexRelativeSides<T> {
+        pub fn sides_to_flex_relative<T>(self, flow_relative: LogicalSides<T>) -> FlexRelativeSides<T> {
             match self {
                 $(
                     $variant => FlexRelativeSides {
@@ -144,10 +145,10 @@ macro_rules! sides_mapping_methods {
             }
         }
 
-        pub fn sides_to_flow_relative<T>(self, flex_relative: FlexRelativeSides<T>) -> Sides<T> {
+        pub fn sides_to_flow_relative<T>(self, flex_relative: FlexRelativeSides<T>) -> LogicalSides<T> {
             match self {
                 $(
-                    $variant => Sides {
+                    $variant => LogicalSides {
                         $( $flow_relative_side: flex_relative.$flex_relative_side, )+
                     },
                 )+
@@ -234,7 +235,7 @@ pub(super) fn rect_to_flow_relative<T>(
     main_start_cross_start_sides_are: MainStartCrossStart,
     base_rect_size: FlexRelativeVec2<T>,
     rect: FlexRelativeRect<T>,
-) -> Rect<T>
+) -> LogicalRect<T>
 where
     T: Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T>,
 {
@@ -257,14 +258,14 @@ where
     let flow_relative_base_rect_size = flex_axis.vec2_to_flow_relative(base_rect_size);
 
     // Finally, convert back to (start corner, size)
-    let start_corner = Vec2 {
+    let start_corner = LogicalVec2 {
         inline: flow_relative_offsets.inline_start,
         block: flow_relative_offsets.block_start,
     };
-    let end_corner_position = Vec2 {
+    let end_corner_position = LogicalVec2 {
         inline: flow_relative_base_rect_size.inline - flow_relative_offsets.inline_end,
         block: flow_relative_base_rect_size.block - flow_relative_offsets.block_end,
     };
-    let size = &end_corner_position - &start_corner;
-    Rect { start_corner, size }
+    let size = end_corner_position - start_corner;
+    LogicalRect { start_corner, size }
 }

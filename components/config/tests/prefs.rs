@@ -2,16 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#[macro_use]
-extern crate serde;
-
-use servo_config::basedir;
-use servo_config::pref_util::Preferences;
-use servo_config::prefs::{read_prefs_map, PrefValue};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::{Read, Write};
+
+use servo_config::basedir;
+use servo_config::pref_util::Preferences;
+use servo_config::prefs::{read_prefs_map, PrefValue};
 
 #[test]
 fn test_create_prefs_map() {
@@ -244,7 +242,7 @@ fn test_set_all_error_on_unknown_field() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "android", feature = "uwp")))]
+#[cfg(not(target_os = "android"))]
 #[test]
 fn test_default_config_dir_create_read_write() {
     let json_str = "{\
@@ -303,6 +301,7 @@ static WITHOUT_DEFAULTS_JSON_STR: &'static str = r#"{
 }"#;
 
 mod gen {
+    use serde::{Deserialize, Serialize};
     use servo_config::pref_util::{Accessor, PrefValue};
     use servo_config_plugins::build_structs;
 

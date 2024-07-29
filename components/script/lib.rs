@@ -2,51 +2,27 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#![feature(const_fn_fn_ptr_basics)]
-#![feature(const_fn_trait_bound)]
-#![feature(core_intrinsics)]
-#![feature(drain_filter)]
-#![feature(plugin)]
 #![feature(register_tool)]
 #![deny(unsafe_code)]
 #![doc = "The script crate contains all matters DOM."]
-#![cfg_attr(not(feature = "unrooted_must_root_lint"), allow(unknown_lints))]
-#![allow(deprecated)] // FIXME: Can we make `allow` only apply to the `plugin` crate attribute?
-#![plugin(script_plugins)]
-#![register_tool(unrooted_must_root_lint)]
+// Register the linter `crown`, which is the Servo-specific linter for the script
+// crate. Issue a warning if `crown` is not being used to compile, but not when
+// building rustdoc or running clippy.
+#![register_tool(crown)]
+#![cfg_attr(any(doc, clippy), allow(unknown_lints))]
+#![deny(crown_is_not_used)]
 
-#[macro_use]
-extern crate bitflags;
-#[macro_use]
-extern crate crossbeam_channel;
-#[macro_use]
-extern crate cssparser;
-#[macro_use]
-extern crate deny_public_fields;
-#[macro_use]
-extern crate domobject_derive;
-#[macro_use]
-extern crate html5ever;
+// These are used a lot so let's keep them for now
 #[macro_use]
 extern crate js;
 #[macro_use]
 extern crate jstraceable_derive;
 #[macro_use]
-extern crate lazy_static;
-#[macro_use]
 extern crate log;
-#[macro_use]
-extern crate malloc_size_of;
 #[macro_use]
 extern crate malloc_size_of_derive;
 #[macro_use]
-extern crate profile_traits;
-#[macro_use]
-extern crate serde;
-#[macro_use]
 extern crate servo_atoms;
-#[macro_use]
-extern crate style;
 
 mod animation_timeline;
 mod animations;
@@ -66,7 +42,6 @@ pub mod document_loader;
 mod dom;
 #[warn(deprecated)]
 mod canvas_state;
-mod euclidext;
 #[warn(deprecated)]
 pub mod fetch;
 #[warn(deprecated)]
@@ -75,6 +50,8 @@ mod image_listener;
 mod init;
 #[warn(deprecated)]
 mod layout_image;
+
+pub mod layout_dom;
 #[warn(deprecated)]
 mod mem;
 #[warn(deprecated)]
@@ -112,26 +89,8 @@ mod timers;
 mod unpremultiplytable;
 #[warn(deprecated)]
 mod webdriver_handlers;
+#[warn(deprecated)]
+mod window_named_properties;
 
 pub use init::init;
 pub use script_runtime::JSEngineSetup;
-
-/// A module with everything layout can use from script.
-///
-/// Try to keep this small!
-///
-/// TODO(emilio): A few of the FooHelpers can go away, presumably...
-pub mod layout_exports {
-    pub use crate::dom::bindings::inheritance::{
-        CharacterDataTypeId, DocumentFragmentTypeId, ElementTypeId,
-    };
-    pub use crate::dom::bindings::inheritance::{HTMLElementTypeId, NodeTypeId, TextTypeId};
-    pub use crate::dom::bindings::root::LayoutDom;
-    pub use crate::dom::characterdata::LayoutCharacterDataHelpers;
-    pub use crate::dom::document::{Document, LayoutDocumentHelpers};
-    pub use crate::dom::element::{Element, LayoutElementHelpers};
-    pub use crate::dom::node::NodeFlags;
-    pub use crate::dom::node::{LayoutNodeHelpers, Node};
-    pub use crate::dom::shadowroot::{LayoutShadowRootHelpers, ShadowRoot};
-    pub use crate::dom::text::Text;
-}

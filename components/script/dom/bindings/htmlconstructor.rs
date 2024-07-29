@@ -2,77 +2,47 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::HTMLAnchorElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLAreaElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLAudioElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLBRElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLBaseElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLBodyElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLButtonElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLCanvasElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLDListElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLDataElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLDataListElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLDetailsElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLDialogElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLDirectoryElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLDivElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLEmbedElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLFieldSetElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLFontElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLFormElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLFrameElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLFrameSetElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLHRElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLHeadElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLHeadingElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLHtmlElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLImageElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLLIElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLLabelElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLLegendElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLLinkElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLMapElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLMenuElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLMetaElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLMeterElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLModElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLOListElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLObjectElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLOptGroupElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLOptionElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLOutputElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLParagraphElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLParamElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLPictureElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLPreElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLProgressElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLQuoteElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLScriptElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLSelectElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLSourceElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLSpanElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLStyleElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTableCaptionElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTableCellElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTableColElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTableElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTableRowElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTableSectionElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTemplateElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTimeElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTitleElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLTrackElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLUListElementBinding;
-use crate::dom::bindings::codegen::Bindings::HTMLVideoElementBinding;
+use std::ptr;
+
+use html5ever::interface::QualName;
+use html5ever::{local_name, namespace_url, ns, LocalName};
+use js::conversions::ToJSValConvertible;
+use js::glue::{UnwrapObjectDynamic, UnwrapObjectStatic};
+use js::jsapi::{CallArgs, CurrentGlobalOrNull, JSAutoRealm, JSObject};
+use js::rust::wrappers::{JS_SetPrototype, JS_WrapObject};
+use js::rust::{HandleObject, MutableHandleObject, MutableHandleValue};
+
+use super::utils::ProtoOrIfaceArray;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
+use crate::dom::bindings::codegen::Bindings::{
+    HTMLAnchorElementBinding, HTMLAreaElementBinding, HTMLAudioElementBinding,
+    HTMLBRElementBinding, HTMLBaseElementBinding, HTMLBodyElementBinding, HTMLButtonElementBinding,
+    HTMLCanvasElementBinding, HTMLDListElementBinding, HTMLDataElementBinding,
+    HTMLDataListElementBinding, HTMLDetailsElementBinding, HTMLDialogElementBinding,
+    HTMLDirectoryElementBinding, HTMLDivElementBinding, HTMLElementBinding,
+    HTMLEmbedElementBinding, HTMLFieldSetElementBinding, HTMLFontElementBinding,
+    HTMLFormElementBinding, HTMLFrameElementBinding, HTMLFrameSetElementBinding,
+    HTMLHRElementBinding, HTMLHeadElementBinding, HTMLHeadingElementBinding,
+    HTMLHtmlElementBinding, HTMLIFrameElementBinding, HTMLImageElementBinding,
+    HTMLInputElementBinding, HTMLLIElementBinding, HTMLLabelElementBinding,
+    HTMLLegendElementBinding, HTMLLinkElementBinding, HTMLMapElementBinding,
+    HTMLMenuElementBinding, HTMLMetaElementBinding, HTMLMeterElementBinding, HTMLModElementBinding,
+    HTMLOListElementBinding, HTMLObjectElementBinding, HTMLOptGroupElementBinding,
+    HTMLOptionElementBinding, HTMLOutputElementBinding, HTMLParagraphElementBinding,
+    HTMLParamElementBinding, HTMLPictureElementBinding, HTMLPreElementBinding,
+    HTMLProgressElementBinding, HTMLQuoteElementBinding, HTMLScriptElementBinding,
+    HTMLSelectElementBinding, HTMLSourceElementBinding, HTMLSpanElementBinding,
+    HTMLStyleElementBinding, HTMLTableCaptionElementBinding, HTMLTableCellElementBinding,
+    HTMLTableColElementBinding, HTMLTableElementBinding, HTMLTableRowElementBinding,
+    HTMLTableSectionElementBinding, HTMLTemplateElementBinding, HTMLTextAreaElementBinding,
+    HTMLTimeElementBinding, HTMLTitleElementBinding, HTMLTrackElementBinding,
+    HTMLUListElementBinding, HTMLVideoElementBinding,
+};
+use crate::dom::bindings::codegen::PrototypeList;
 use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::error::{throw_dom_exception, Error};
 use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::interface::get_desired_proto;
 use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::create::create_native_html_element;
@@ -81,18 +51,8 @@ use crate::dom::element::{Element, ElementCreator};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::window::Window;
-use crate::script_runtime::JSContext;
+use crate::script_runtime::{JSContext, JSContext as SafeJSContext};
 use crate::script_thread::ScriptThread;
-use html5ever::interface::QualName;
-use html5ever::LocalName;
-use js::conversions::ToJSValConvertible;
-use js::glue::{UnwrapObjectDynamic, UnwrapObjectStatic};
-use js::jsapi::{CallArgs, CurrentGlobalOrNull};
-use js::jsapi::{JSAutoRealm, JSObject};
-use js::jsval::UndefinedValue;
-use js::rust::wrappers::{JS_GetProperty, JS_SetPrototype, JS_WrapObject};
-use js::rust::{HandleObject, MutableHandleObject, MutableHandleValue};
-use std::ptr;
 
 // https://html.spec.whatwg.org/multipage/#htmlconstructor
 unsafe fn html_constructor(
@@ -100,7 +60,8 @@ unsafe fn html_constructor(
     window: &Window,
     call_args: &CallArgs,
     check_type: fn(&Element) -> bool,
-    get_proto_object: fn(JSContext, HandleObject, MutableHandleObject),
+    proto_id: PrototypeList::ID,
+    creator: unsafe fn(SafeJSContext, HandleObject, *mut ProtoOrIfaceArray),
 ) -> Result<(), ()> {
     let document = window.Document();
     let global = window.upcast::<GlobalScope>();
@@ -113,7 +74,7 @@ unsafe fn html_constructor(
 
     // The new_target might be a cross-compartment wrapper. Get the underlying object
     // so we can do the spec's object-identity checks.
-    rooted!(in(*cx) let new_target_unwrapped = UnwrapObjectDynamic(call_args.new_target().to_object(), *cx, 1));
+    rooted!(in(*cx) let new_target_unwrapped = UnwrapObjectDynamic(call_args.new_target().to_object(), *cx, true));
     if new_target_unwrapped.is_null() {
         throw_dom_exception(cx, global, Error::Type("new.target is null".to_owned()));
         return Err(());
@@ -184,40 +145,7 @@ unsafe fn html_constructor(
 
     // Step 6
     rooted!(in(*cx) let mut prototype = ptr::null_mut::<JSObject>());
-    {
-        rooted!(in(*cx) let mut proto_val = UndefinedValue());
-        let _ac = JSAutoRealm::new(*cx, new_target_unwrapped.get());
-        if !JS_GetProperty(
-            *cx,
-            new_target_unwrapped.handle(),
-            b"prototype\0".as_ptr() as *const _,
-            proto_val.handle_mut(),
-        ) {
-            return Err(());
-        }
-
-        if !proto_val.is_object() {
-            // Step 7 of https://html.spec.whatwg.org/multipage/#htmlconstructor.
-            // This fallback behavior is designed to match analogous behavior for the
-            // JavaScript built-ins. So we enter the realm of our underlying
-            // newTarget object and fall back to the prototype object from that global.
-            // XXX The spec says to use GetFunctionRealm(), which is not actually
-            // the same thing as what we have here (e.g. in the case of scripted callable proxies
-            // whose target is not same-realm with the proxy, or bound functions, etc).
-            // https://bugzilla.mozilla.org/show_bug.cgi?id=1317658
-
-            rooted!(in(*cx) let global_object = CurrentGlobalOrNull(*cx));
-            get_proto_object(cx, global_object.handle(), prototype.handle_mut());
-        } else {
-            // Step 6
-            prototype.set(proto_val.to_object());
-        }
-    }
-
-    // Wrap prototype in this context since it is from the newTarget realm
-    if !JS_WrapObject(*cx, prototype.handle_mut()) {
-        return Err(());
-    }
+    get_desired_proto(cx, call_args, proto_id, creator, prototype.handle_mut())?;
 
     let entry = definition.construction_stack.borrow().last().cloned();
     let result = match entry {
@@ -225,10 +153,18 @@ unsafe fn html_constructor(
         None => {
             // Step 8.1
             let name = QualName::new(None, ns!(html), definition.local_name.clone());
+            // Any prototype used to create these elements will be overwritten before returning
+            // from this function, so we don't bother overwriting the defaults here.
             let element = if definition.is_autonomous() {
-                DomRoot::upcast(HTMLElement::new(name.local, None, &*document))
+                DomRoot::upcast(HTMLElement::new(name.local, None, &document, None))
             } else {
-                create_native_html_element(name, None, &*document, ElementCreator::ScriptCreated)
+                create_native_html_element(
+                    name,
+                    None,
+                    &document,
+                    ElementCreator::ScriptCreated,
+                    None,
+                )
             };
 
             // Step 8.2 is performed in the generated caller code.
@@ -240,7 +176,7 @@ unsafe fn html_constructor(
             element.set_custom_element_definition(definition.clone());
 
             // Step 8.5
-            if !check_type(&*element) {
+            if !check_type(&element) {
                 throw_dom_exception(cx, global, Error::InvalidState);
                 return Err(());
             } else {
@@ -257,7 +193,7 @@ unsafe fn html_constructor(
             construction_stack.push(ConstructionStackEntry::AlreadyConstructedMarker);
 
             // Step 13
-            if !check_type(&*element) {
+            if !check_type(&element) {
                 throw_dom_exception(cx, global, Error::InvalidState);
                 return Err(());
             } else {
@@ -285,8 +221,10 @@ unsafe fn html_constructor(
     Ok(())
 }
 
-/// Returns the constructor object for the element associated with the given local name.
-/// This list should only include elements marked with the [HTMLConstructor] extended attribute.
+/// Returns the constructor object for the element associated with the
+/// given local name. This list should only include elements marked with the
+/// [HTMLConstructor](https://html.spec.whatwg.org/multipage/#htmlconstructor)
+/// extended attribute.
 pub fn get_constructor_object_from_local_name(
     name: LocalName,
     cx: JSContext,
@@ -443,7 +381,8 @@ pub(crate) unsafe fn call_html_constructor<T: DerivedFrom<Element> + DomObject>(
     cx: JSContext,
     args: &CallArgs,
     global: &Window,
-    get_proto_object: fn(JSContext, HandleObject, MutableHandleObject),
+    proto_id: PrototypeList::ID,
+    creator: unsafe fn(SafeJSContext, HandleObject, *mut ProtoOrIfaceArray),
 ) -> bool {
     fn element_derives_interface<T: DerivedFrom<Element>>(element: &Element) -> bool {
         element.is::<T>()
@@ -454,7 +393,8 @@ pub(crate) unsafe fn call_html_constructor<T: DerivedFrom<Element> + DomObject>(
         global,
         args,
         element_derives_interface::<T>,
-        get_proto_object,
+        proto_id,
+        creator,
     )
     .is_ok()
 }

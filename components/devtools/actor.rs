@@ -2,16 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-/// General actor system infrastructure.
-use crate::StreamId;
-use devtools_traits::PreciseTime;
-use serde_json::{Map, Value};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::mem::replace;
+use std::mem;
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
+
+use devtools_traits::PreciseTime;
+use log::{debug, warn};
+use serde_json::{Map, Value};
+
+/// General actor system infrastructure.
+use crate::StreamId;
 
 #[derive(PartialEq)]
 pub enum ActorMessageStatus {
@@ -102,7 +105,7 @@ impl ActorRegistry {
 
     /// Get start stamp when registry was started
     pub fn start_stamp(&self) -> PreciseTime {
-        self.start_stamp.clone()
+        self.start_stamp
     }
 
     pub fn register_script_actor(&self, script_id: String, actor: String) {
@@ -191,12 +194,12 @@ impl ActorRegistry {
                 }
             },
         }
-        let new_actors = replace(&mut *self.new_actors.borrow_mut(), vec![]);
+        let new_actors = mem::take(&mut *self.new_actors.borrow_mut());
         for actor in new_actors.into_iter() {
             self.actors.insert(actor.name().to_owned(), actor);
         }
 
-        let old_actors = replace(&mut *self.old_actors.borrow_mut(), vec![]);
+        let old_actors = mem::take(&mut *self.old_actors.borrow_mut());
         for name in old_actors {
             self.drop_actor(name);
         }

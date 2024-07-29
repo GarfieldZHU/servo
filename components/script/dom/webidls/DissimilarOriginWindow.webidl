@@ -13,21 +13,21 @@
 // way to enforce security policy.
 
 // https://html.spec.whatwg.org/multipage/#window
-[Global, Exposed=(Window,DissimilarOriginWindow), NoInterfaceObject]
+[Global=DissimilarOriginWindow, Exposed=(Window,DissimilarOriginWindow), LegacyNoInterfaceObject]
 interface DissimilarOriginWindow : GlobalScope {
-  [Unforgeable] readonly attribute WindowProxy window;
+  [LegacyUnforgeable] readonly attribute WindowProxy window;
   [BinaryName="Self_", Replaceable] readonly attribute WindowProxy self;
-  [Unforgeable] readonly attribute WindowProxy? parent;
-  [Unforgeable] readonly attribute WindowProxy? top;
+  [LegacyUnforgeable] readonly attribute WindowProxy? parent;
+  [LegacyUnforgeable] readonly attribute WindowProxy? top;
   [Replaceable] readonly attribute WindowProxy frames;
   [Replaceable] readonly attribute unsigned long length;
-  [Unforgeable] readonly attribute DissimilarOriginLocation location;
+  [LegacyUnforgeable] readonly attribute DissimilarOriginLocation location;
 
-  void close();
+  undefined close();
   readonly attribute boolean closed;
-  [Throws] void postMessage(any message, USVString targetOrigin, optional sequence<object> transfer = []);
-  [Throws] void postMessage(any message, optional WindowPostMessageOptions options = {});
+  [Throws] undefined postMessage(any message, USVString targetOrigin, optional sequence<object> transfer = []);
+  [Throws] undefined postMessage(any message, optional WindowPostMessageOptions options = {});
   attribute any opener;
-  void blur();
-  void focus();
+  undefined blur();
+  undefined focus();
 };

@@ -2,13 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventBinding::EventMethods;
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+
+use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::XRInputSourceEventBinding::{
     self, XRInputSourceEventMethods,
 };
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::Event;
@@ -16,8 +20,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
 use crate::dom::xrframe::XRFrame;
 use crate::dom::xrinputsource::XRInputSource;
-use dom_struct::dom_struct;
-use servo_atoms::Atom;
 
 #[dom_struct]
 pub struct XRInputSourceEvent {
@@ -27,7 +29,7 @@ pub struct XRInputSourceEvent {
 }
 
 impl XRInputSourceEvent {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(frame: &XRFrame, source: &XRInputSource) -> XRInputSourceEvent {
         XRInputSourceEvent {
             event: Event::new_inherited(),
@@ -44,9 +46,22 @@ impl XRInputSourceEvent {
         frame: &XRFrame,
         source: &XRInputSource,
     ) -> DomRoot<XRInputSourceEvent> {
-        let trackevent = reflect_dom_object(
+        Self::new_with_proto(global, None, type_, bubbles, cancelable, frame, source)
+    }
+
+    fn new_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        type_: Atom,
+        bubbles: bool,
+        cancelable: bool,
+        frame: &XRFrame,
+        source: &XRInputSource,
+    ) -> DomRoot<XRInputSourceEvent> {
+        let trackevent = reflect_dom_object_with_proto(
             Box::new(XRInputSourceEvent::new_inherited(frame, source)),
             global,
+            proto,
         );
         {
             let event = trackevent.upcast::<Event>();
@@ -58,11 +73,13 @@ impl XRInputSourceEvent {
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         type_: DOMString,
         init: &XRInputSourceEventBinding::XRInputSourceEventInit,
     ) -> Fallible<DomRoot<XRInputSourceEvent>> {
-        Ok(XRInputSourceEvent::new(
+        Ok(XRInputSourceEvent::new_with_proto(
             &window.global(),
+            proto,
             Atom::from(type_),
             init.parent.bubbles,
             init.parent.cancelable,

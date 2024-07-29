@@ -2,22 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
+use base::id::PipelineId;
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_media::audio::context::{LatencyCategory, ProcessingState, RealTimeAudioContextOptions};
+
 use crate::dom::baseaudiocontext::{BaseAudioContext, BaseAudioContextOptions};
 use crate::dom::bindings::codegen::Bindings::AudioContextBinding::{
-    AudioContextLatencyCategory, AudioContextMethods,
-};
-use crate::dom::bindings::codegen::Bindings::AudioContextBinding::{
-    AudioContextOptions, AudioTimestamp,
+    AudioContextLatencyCategory, AudioContextMethods, AudioContextOptions, AudioTimestamp,
 };
 use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::AudioNodeOptions;
 use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::AudioContextState;
-use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContextBinding::BaseAudioContextMethods;
+use crate::dom::bindings::codegen::Bindings::BaseAudioContextBinding::BaseAudioContext_Binding::BaseAudioContextMethods;
 use crate::dom::bindings::codegen::UnionTypes::AudioContextLatencyCategoryOrDouble;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::htmlmediaelement::HTMLMediaElement;
 use crate::dom::mediaelementaudiosourcenode::MediaElementAudioSourceNode;
@@ -30,23 +34,19 @@ use crate::dom::promise::Promise;
 use crate::dom::window::Window;
 use crate::realms::InRealm;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use msg::constellation_msg::PipelineId;
-use servo_media::audio::context::{LatencyCategory, ProcessingState, RealTimeAudioContextOptions};
-use std::rc::Rc;
 
 #[dom_struct]
 pub struct AudioContext {
     context: BaseAudioContext,
     latency_hint: AudioContextLatencyCategory,
-    /// https://webaudio.github.io/web-audio-api/#dom-audiocontext-baselatency
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-baselatency>
     base_latency: f64,
-    /// https://webaudio.github.io/web-audio-api/#dom-audiocontext-outputlatency
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-outputlatency>
     output_latency: f64,
 }
 
 impl AudioContext {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     // https://webaudio.github.io/web-audio-api/#AudioContext-constructors
     fn new_inherited(options: &AudioContextOptions, pipeline_id: PipelineId) -> AudioContext {
         // Steps 1-3.
@@ -78,11 +78,15 @@ impl AudioContext {
         }
     }
 
-    #[allow(unrooted_must_root)]
-    pub fn new(window: &Window, options: &AudioContextOptions) -> DomRoot<AudioContext> {
+    #[allow(crown::unrooted_must_root)]
+    fn new(
+        window: &Window,
+        proto: Option<HandleObject>,
+        options: &AudioContextOptions,
+    ) -> DomRoot<AudioContext> {
         let pipeline_id = window.pipeline_id();
         let context = AudioContext::new_inherited(options, pipeline_id);
-        let context = reflect_dom_object(Box::new(context), window);
+        let context = reflect_dom_object_with_proto(Box::new(context), window, proto);
         context.resume();
         context
     }
@@ -91,9 +95,10 @@ impl AudioContext {
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         options: &AudioContextOptions,
     ) -> Fallible<DomRoot<AudioContext>> {
-        Ok(AudioContext::new(window, options))
+        Ok(AudioContext::new(window, proto, options))
     }
 
     fn resume(&self) {
@@ -132,7 +137,7 @@ impl AudioContextMethods for AudioContext {
     // https://webaudio.github.io/web-audio-api/#dom-audiocontext-suspend
     fn Suspend(&self, comp: InRealm) -> Rc<Promise> {
         // Step 1.
-        let promise = Promise::new_in_current_realm(&self.global(), comp);
+        let promise = Promise::new_in_current_realm(comp);
 
         // Step 2.
         if self.context.control_thread_state() == ProcessingState::Closed {
@@ -193,7 +198,7 @@ impl AudioContextMethods for AudioContext {
     // https://webaudio.github.io/web-audio-api/#dom-audiocontext-close
     fn Close(&self, comp: InRealm) -> Rc<Promise> {
         // Step 1.
-        let promise = Promise::new_in_current_realm(&self.global(), comp);
+        let promise = Promise::new_in_current_realm(comp);
 
         // Step 2.
         if self.context.control_thread_state() == ProcessingState::Closed {
@@ -251,7 +256,7 @@ impl AudioContextMethods for AudioContext {
         promise
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-audiocontext-createmediaelementsource
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-createmediaelementsource>
     fn CreateMediaElementSource(
         &self,
         media_element: &HTMLMediaElement,
@@ -261,7 +266,7 @@ impl AudioContextMethods for AudioContext {
         MediaElementAudioSourceNode::new(window, self, media_element)
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-audiocontext-createmediastreamsource
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-createmediastreamsource>
     fn CreateMediaStreamSource(
         &self,
         stream: &MediaStream,
@@ -271,7 +276,7 @@ impl AudioContextMethods for AudioContext {
         MediaStreamAudioSourceNode::new(window, self, stream)
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-audiocontext-createmediastreamtracksource
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-createmediastreamtracksource>
     fn CreateMediaStreamTrackSource(
         &self,
         track: &MediaStreamTrack,
@@ -281,7 +286,7 @@ impl AudioContextMethods for AudioContext {
         MediaStreamTrackAudioSourceNode::new(window, self, track)
     }
 
-    /// https://webaudio.github.io/web-audio-api/#dom-audiocontext-createmediastreamdestination
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiocontext-createmediastreamdestination>
     fn CreateMediaStreamDestination(&self) -> Fallible<DomRoot<MediaStreamAudioDestinationNode>> {
         let global = self.global();
         let window = global.as_window();

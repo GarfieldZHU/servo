@@ -2,18 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use canvas_traits::canvas::{Canvas2dMsg, CanvasId, CanvasMsg};
+use dom_struct::dom_struct;
+use euclid::default::Size2D;
+use ipc_channel::ipc::IpcSender;
+
 use crate::canvas_state::CanvasState;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasDirection;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasFillRule;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasImageSource;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineCap;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineJoin;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasTextAlign;
-use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasTextBaseline;
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::{
+    CanvasDirection, CanvasFillRule, CanvasImageSource, CanvasLineCap, CanvasLineJoin,
+    CanvasTextAlign, CanvasTextBaseline,
+};
 use crate::dom::bindings::codegen::Bindings::OffscreenCanvasRenderingContext2DBinding::OffscreenCanvasRenderingContext2DMethods;
 use crate::dom::bindings::codegen::UnionTypes::StringOrCanvasGradientOrCanvasPattern;
-use crate::dom::bindings::error::ErrorResult;
-use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::error::{ErrorResult, Fallible};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -26,10 +27,6 @@ use crate::dom::htmlcanvaselement::HTMLCanvasElement;
 use crate::dom::imagedata::ImageData;
 use crate::dom::offscreencanvas::OffscreenCanvas;
 use crate::dom::textmetrics::TextMetrics;
-use canvas_traits::canvas::{Canvas2dMsg, CanvasId, CanvasMsg};
-use dom_struct::dom_struct;
-use euclid::default::Size2D;
-use ipc_channel::ipc::IpcSender;
 
 #[dom_struct]
 pub struct OffscreenCanvasRenderingContext2D {
@@ -143,7 +140,8 @@ impl OffscreenCanvasRenderingContext2DMethods for OffscreenCanvasRenderingContex
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-shadowcolor
     fn SetShadowColor(&self, value: DOMString) {
-        self.canvas_state.set_shadow_color(value)
+        self.canvas_state
+            .set_shadow_color(self.htmlcanvas.as_deref(), value)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-strokestyle
@@ -154,7 +152,7 @@ impl OffscreenCanvasRenderingContext2DMethods for OffscreenCanvasRenderingContex
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-strokestyle
     fn SetStrokeStyle(&self, value: StringOrCanvasGradientOrCanvasPattern) {
         self.canvas_state
-            .set_stroke_style(self.htmlcanvas.as_ref().map(|c| &**c), value)
+            .set_stroke_style(self.htmlcanvas.as_deref(), value)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-strokestyle
@@ -165,7 +163,7 @@ impl OffscreenCanvasRenderingContext2DMethods for OffscreenCanvasRenderingContex
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-strokestyle
     fn SetFillStyle(&self, value: StringOrCanvasGradientOrCanvasPattern) {
         self.canvas_state
-            .set_fill_style(self.htmlcanvas.as_ref().map(|c| &**c), value)
+            .set_fill_style(self.htmlcanvas.as_deref(), value)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-createlineargradient
@@ -209,10 +207,15 @@ impl OffscreenCanvasRenderingContext2DMethods for OffscreenCanvasRenderingContex
         self.canvas_state.save()
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-restore
     fn Restore(&self) {
         self.canvas_state.restore()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-reset>
+    fn Reset(&self) {
+        self.canvas_state.reset()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-globalalpha
@@ -247,18 +250,14 @@ impl OffscreenCanvasRenderingContext2DMethods for OffscreenCanvasRenderingContex
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-filltext
     fn FillText(&self, text: DOMString, x: f64, y: f64, max_width: Option<f64>) {
-        self.canvas_state.fill_text(
-            self.htmlcanvas.as_ref().map(|c| &**c),
-            text,
-            x,
-            y,
-            max_width,
-        )
+        self.canvas_state
+            .fill_text(self.htmlcanvas.as_deref(), text, x, y, max_width)
     }
 
     // https://html.spec.whatwg.org/multipage/#textmetrics
     fn MeasureText(&self, text: DOMString) -> DomRoot<TextMetrics> {
-        self.canvas_state.measure_text(&self.global(), text)
+        self.canvas_state
+            .measure_text(&self.global(), self.htmlcanvas.as_deref(), text)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-font
@@ -269,7 +268,7 @@ impl OffscreenCanvasRenderingContext2DMethods for OffscreenCanvasRenderingContex
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-font
     fn SetFont(&self, value: DOMString) {
         self.canvas_state
-            .set_font(self.htmlcanvas.as_ref().map(|c| &**c), value)
+            .set_font(self.htmlcanvas.as_deref(), value)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-textalign
@@ -392,7 +391,7 @@ impl OffscreenCanvasRenderingContext2DMethods for OffscreenCanvasRenderingContex
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage
     fn DrawImage(&self, image: CanvasImageSource, dx: f64, dy: f64) -> ErrorResult {
         self.canvas_state
-            .draw_image(self.htmlcanvas.as_ref().map(|c| &**c), image, dx, dy)
+            .draw_image(self.htmlcanvas.as_deref(), image, dx, dy)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage
@@ -404,14 +403,8 @@ impl OffscreenCanvasRenderingContext2DMethods for OffscreenCanvasRenderingContex
         dw: f64,
         dh: f64,
     ) -> ErrorResult {
-        self.canvas_state.draw_image_(
-            self.htmlcanvas.as_ref().map(|c| &**c),
-            image,
-            dx,
-            dy,
-            dw,
-            dh,
-        )
+        self.canvas_state
+            .draw_image_(self.htmlcanvas.as_deref(), image, dx, dy, dw, dh)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage
@@ -428,7 +421,7 @@ impl OffscreenCanvasRenderingContext2DMethods for OffscreenCanvasRenderingContex
         dh: f64,
     ) -> ErrorResult {
         self.canvas_state.draw_image__(
-            self.htmlcanvas.as_ref().map(|c| &**c),
+            self.htmlcanvas.as_deref(),
             image,
             sx,
             sy,

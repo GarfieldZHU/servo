@@ -2,14 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use base64;
-use net_traits::response::{Response, ResponseBody, ResponseType};
-use openssl::hash::{hash, MessageDigest};
 use std::iter::Filter;
 use std::str::Split;
 use std::sync::MutexGuard;
 
-const SUPPORTED_ALGORITHM: &'static [&'static str] = &["sha256", "sha384", "sha512"];
+use base64::Engine;
+use generic_array::ArrayLength;
+use net_traits::response::{Response, ResponseBody, ResponseType};
+use sha2::{Digest, Sha256, Sha384, Sha512};
+
+const SUPPORTED_ALGORITHM: &[&str] = &["sha256", "sha384", "sha512"];
 pub type StaticCharVec = &'static [char];
 /// A "space character" according to:
 ///
@@ -31,7 +33,7 @@ impl SriEntry {
         SriEntry {
             alg: alg.to_owned(),
             val: val.to_owned(),
-            opt: opt,
+            opt,
         }
     }
 }
@@ -44,7 +46,7 @@ pub fn parsed_metadata(integrity_metadata: &str) -> Vec<SriEntry> {
     // Step 3
     let tokens = split_html_space_chars(integrity_metadata);
     for token in tokens {
-        let parsed_data: Vec<&str> = token.split("-").collect();
+        let parsed_data: Vec<&str> = token.split('-').collect();
 
         if parsed_data.len() > 1 {
             let alg = parsed_data[0];
@@ -53,7 +55,7 @@ pub fn parsed_metadata(integrity_metadata: &str) -> Vec<SriEntry> {
                 continue;
             }
 
-            let data: Vec<&str> = parsed_data[1].split("?").collect();
+            let data: Vec<&str> = parsed_data[1].split('?').collect();
             let digest = data[0];
 
             let opt = if data.len() > 1 {
@@ -66,7 +68,7 @@ pub fn parsed_metadata(integrity_metadata: &str) -> Vec<SriEntry> {
         }
     }
 
-    return result;
+    result
 }
 
 /// <https://w3c.github.io/webappsec-subresource-integrity/#getprioritizedhashfunction>
@@ -76,11 +78,11 @@ pub fn get_prioritized_hash_function(
 ) -> Option<String> {
     let left_priority = SUPPORTED_ALGORITHM
         .iter()
-        .position(|s| s.to_owned() == hash_func_left)
+        .position(|s| *s == hash_func_left)
         .unwrap();
     let right_priority = SUPPORTED_ALGORITHM
         .iter()
-        .position(|s| s.to_owned() == hash_func_right)
+        .position(|s| *s == hash_func_right)
         .unwrap();
 
     if left_priority == right_priority {
@@ -100,7 +102,7 @@ pub fn get_strongest_metadata(integrity_metadata_list: Vec<SriEntry>) -> Vec<Sri
 
     for integrity_metadata in &integrity_metadata_list[1..] {
         let prioritized_hash =
-            get_prioritized_hash_function(&integrity_metadata.alg, &*current_algorithm);
+            get_prioritized_hash_function(&integrity_metadata.alg, &current_algorithm);
         if prioritized_hash.is_none() {
             result.push(integrity_metadata.clone());
         } else if let Some(algorithm) = prioritized_hash {
@@ -115,13 +117,14 @@ pub fn get_strongest_metadata(integrity_metadata_list: Vec<SriEntry>) -> Vec<Sri
 }
 
 /// <https://w3c.github.io/webappsec-subresource-integrity/#apply-algorithm-to-response>
-fn apply_algorithm_to_response(
+fn apply_algorithm_to_response<S: ArrayLength<u8>, D: Digest<OutputSize = S>>(
     body: MutexGuard<ResponseBody>,
-    message_digest: MessageDigest,
+    mut hasher: D,
 ) -> String {
     if let ResponseBody::Done(ref vec) = *body {
-        let response_digest = hash(message_digest, vec).unwrap(); //Now hash
-        base64::encode(&response_digest)
+        hasher.update(vec);
+        let response_digest = hasher.finalize(); //Now hash
+        base64::engine::general_purpose::STANDARD.encode(&response_digest)
     } else {
         unreachable!("Tried to calculate digest of incomplete response body")
     }
@@ -129,10 +132,10 @@ fn apply_algorithm_to_response(
 
 /// <https://w3c.github.io/webappsec-subresource-integrity/#is-response-eligible>
 fn is_eligible_for_integrity_validation(response: &Response) -> bool {
-    match response.response_type {
-        ResponseType::Basic | ResponseType::Default | ResponseType::Cors => true,
-        _ => false,
-    }
+    matches!(
+        response.response_type,
+        ResponseType::Basic | ResponseType::Default | ResponseType::Cors
+    )
 }
 
 /// <https://w3c.github.io/webappsec-subresource-integrity/#does-response-match-metadatalist>
@@ -156,14 +159,14 @@ pub fn is_response_integrity_valid(integrity_metadata: &str, response: &Response
         let algorithm = item.alg;
         let digest = item.val;
 
-        let message_digest = match &*algorithm {
-            "sha256" => MessageDigest::sha256(),
-            "sha384" => MessageDigest::sha384(),
-            "sha512" => MessageDigest::sha512(),
+        let hashed = match &*algorithm {
+            "sha256" => apply_algorithm_to_response(body, Sha256::new()),
+            "sha384" => apply_algorithm_to_response(body, Sha384::new()),
+            "sha512" => apply_algorithm_to_response(body, Sha512::new()),
             _ => continue,
         };
 
-        if apply_algorithm_to_response(body, message_digest) == digest {
+        if hashed == digest {
             return true;
         }
     }
@@ -171,9 +174,7 @@ pub fn is_response_integrity_valid(integrity_metadata: &str, response: &Response
     false
 }
 
-pub fn split_html_space_chars<'a>(
-    s: &'a str,
-) -> Filter<Split<'a, StaticCharVec>, fn(&&str) -> bool> {
+pub fn split_html_space_chars(s: &str) -> Filter<Split<'_, StaticCharVec>, fn(&&str) -> bool> {
     fn not_empty(&split: &&str) -> bool {
         !split.is_empty()
     }

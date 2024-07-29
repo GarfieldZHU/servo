@@ -2,9 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::ToOwned;
+use std::cell::Cell;
+use std::default::Default;
+
+use cssparser::{Parser as CssParser, ParserInput};
+use dom_struct::dom_struct;
+use embedder_traits::EmbedderMsg;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use net_traits::ReferrerPolicy;
+use servo_arc::Arc;
+use servo_atoms::Atom;
+use style::attr::AttrValue;
+use style::media_queries::MediaList;
+use style::parser::ParserContext as CssParserContext;
+use style::str::HTML_SPACE_CHARACTERS;
+use style::stylesheets::{CssRuleType, Origin, Stylesheet, UrlExtraData};
+use style_traits::ParsingMode;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::DOMTokenListBinding::DOMTokenListBinding::DOMTokenListMethods;
+use crate::dom::bindings::codegen::Bindings::DOMTokenListBinding::DOMTokenList_Binding::DOMTokenListMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLLinkElementBinding::HTMLLinkElementMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
@@ -14,9 +33,8 @@ use crate::dom::document::Document;
 use crate::dom::domtokenlist::DOMTokenList;
 use crate::dom::element::{
     cors_setting_for_element, reflect_cross_origin_attribute, reflect_referrer_policy_attribute,
-    set_cross_origin_attribute,
+    set_cross_origin_attribute, AttributeMutation, Element, ElementCreator,
 };
-use crate::dom::element::{AttributeMutation, Element, ElementCreator};
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::node::{
     document_from_node, stylesheets_owner_from_node, window_from_node, BindContext, Node,
@@ -25,22 +43,6 @@ use crate::dom::node::{
 use crate::dom::stylesheet::StyleSheet as DOMStyleSheet;
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::stylesheet_loader::{StylesheetContextSource, StylesheetLoader, StylesheetOwner};
-use cssparser::{Parser as CssParser, ParserInput};
-use dom_struct::dom_struct;
-use embedder_traits::EmbedderMsg;
-use html5ever::{LocalName, Prefix};
-use net_traits::ReferrerPolicy;
-use servo_arc::Arc;
-use servo_atoms::Atom;
-use std::borrow::ToOwned;
-use std::cell::Cell;
-use std::default::Default;
-use style::attr::AttrValue;
-use style::media_queries::MediaList;
-use style::parser::ParserContext as CssParserContext;
-use style::str::HTML_SPACE_CHARACTERS;
-use style::stylesheets::{CssRuleType, Origin, Stylesheet};
-use style_traits::ParsingMode;
 
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub struct RequestGenerationId(u32);
@@ -56,6 +58,7 @@ pub struct HTMLLinkElement {
     htmlelement: HTMLElement,
     rel_list: MutNullableDom<DOMTokenList>,
     #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
     stylesheet: DomRefCell<Option<Arc<Stylesheet>>>,
     cssom_stylesheet: MutNullableDom<CSSStyleSheet>,
 
@@ -89,18 +92,20 @@ impl HTMLLinkElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
         creator: ElementCreator,
     ) -> DomRoot<HTMLLinkElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLLinkElement::new_inherited(
                 local_name, prefix, document, creator,
             )),
             document,
+            proto,
         )
     }
 
@@ -110,7 +115,7 @@ impl HTMLLinkElement {
 
     // FIXME(emilio): These methods are duplicated with
     // HTMLStyleElement::set_stylesheet.
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn set_stylesheet(&self, s: Arc<Stylesheet>) {
         let stylesheets_owner = stylesheets_owner_from_node(self);
         if let Some(ref s) = *self.stylesheet.borrow() {
@@ -199,8 +204,8 @@ impl VirtualMethods for HTMLLinkElement {
         }
 
         let rel = get_attr(self.upcast(), &local_name!("rel"));
-        match attr.local_name() {
-            &local_name!("href") => {
+        match *attr.local_name() {
+            local_name!("href") => {
                 if string_is_stylesheet(&rel) {
                     self.handle_stylesheet_url(&attr.value());
                 } else if is_favicon(&rel) {
@@ -208,7 +213,7 @@ impl VirtualMethods for HTMLLinkElement {
                     self.handle_favicon_url(rel.as_ref().unwrap(), &attr.value(), &sizes);
                 }
             },
-            &local_name!("sizes") => {
+            local_name!("sizes") => {
                 if is_favicon(&rel) {
                     if let Some(ref href) = get_attr(self.upcast(), &local_name!("href")) {
                         self.handle_favicon_url(
@@ -234,7 +239,7 @@ impl VirtualMethods for HTMLLinkElement {
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
 
@@ -258,7 +263,7 @@ impl VirtualMethods for HTMLLinkElement {
     }
 
     fn unbind_from_tree(&self, context: &UnbindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.unbind_from_tree(context);
         }
 
@@ -303,19 +308,20 @@ impl HTMLLinkElement {
             None => "",
         };
 
-        let mut input = ParserInput::new(&mq_str);
+        let mut input = ParserInput::new(mq_str);
         let mut css_parser = CssParser::new(&mut input);
-        let doc_url = document.url();
+        let document_url_data = &UrlExtraData(document.url().get_arc());
         let window = document.window();
         // FIXME(emilio): This looks somewhat fishy, since we use the context
         // only to parse the media query list, CssRuleType::Media doesn't make
         // much sense.
         let context = CssParserContext::new(
             Origin::Author,
-            &doc_url,
+            document_url_data,
             Some(CssRuleType::Media),
             ParsingMode::DEFAULT,
             document.quirks_mode(),
+            /* namespaces = */ Default::default(),
             window.css_error_reporter(),
             None,
         );

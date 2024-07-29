@@ -2,34 +2,35 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::fetch::methods::{CancellationListener, Data, RangeRequestBounds};
-use crate::resource_thread::CoreResourceThreadPool;
-use crossbeam_channel::Sender;
-use embedder_traits::{EmbedderMsg, EmbedderProxy, FilterPattern};
-use headers::{ContentLength, ContentType, HeaderMap, HeaderMapExt};
-use http::header::{self, HeaderValue};
-use ipc_channel::ipc::{self, IpcSender};
-use mime::{self, Mime};
-use net_traits::blob_url_store::{BlobBuf, BlobURLStoreError};
-use net_traits::filemanager_thread::{
-    FileManagerResult, FileManagerThreadMsg, FileOrigin, FileTokenCheck,
-};
-use net_traits::filemanager_thread::{
-    FileManagerThreadError, ReadFileProgress, RelativePos, SelectedFile,
-};
-use net_traits::http_percent_encode;
-use net_traits::response::{Response, ResponseBody};
-use servo_arc::Arc as ServoArc;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::mem;
 use std::ops::Index;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
+
+use embedder_traits::{EmbedderMsg, EmbedderProxy, FilterPattern};
+use headers::{ContentLength, ContentType, HeaderMap, HeaderMapExt};
+use http::header::{self, HeaderValue};
+use ipc_channel::ipc::{self, IpcSender};
+use log::warn;
+use mime::{self, Mime};
+use net_traits::blob_url_store::{BlobBuf, BlobURLStoreError};
+use net_traits::filemanager_thread::{
+    FileManagerResult, FileManagerThreadError, FileManagerThreadMsg, FileOrigin, FileTokenCheck,
+    ReadFileProgress, RelativePos, SelectedFile,
+};
+use net_traits::http_percent_encode;
+use net_traits::response::{Response, ResponseBody};
+use servo_arc::Arc as ServoArc;
+use servo_config::pref;
+use tokio::sync::mpsc::UnboundedSender as TokioSender;
 use url::Url;
 use uuid::Uuid;
+
+use crate::fetch::methods::{CancellationListener, Data, RangeRequestBounds};
+use crate::resource_thread::CoreResourceThreadPool;
 
 pub const FILE_CHUNK_SIZE: usize = 32768; //32 KB
 
@@ -57,7 +58,7 @@ struct FileStoreEntry {
 struct FileMetaData {
     path: PathBuf,
     /// Modified time in UNIX Epoch format
-    modified: u64,
+    _modified: u64,
     size: u64,
 }
 
@@ -101,13 +102,12 @@ impl FileManager {
         let store = self.store.clone();
         self.thread_pool
             .upgrade()
-            .and_then(|pool| {
+            .map(|pool| {
                 pool.spawn(move || {
                     if let Err(e) = store.try_read_file(&sender, id, origin) {
                         let _ = sender.send(Err(FileManagerThreadError::BlobURLStoreError(e)));
                     }
                 });
-                Some(())
             })
             .unwrap_or_else(|| {
                 warn!("FileManager tried to read a file after CoreResourceManager has exited.");
@@ -122,12 +122,13 @@ impl FileManager {
         self.store.invalidate_token(token, file_id);
     }
 
-    // Read a file for the Fetch implementation.
-    // It gets the required headers synchronously and reads the actual content
-    // in a separate thread.
+    /// Read a file for the Fetch implementation.
+    /// It gets the required headers synchronously and reads the actual content
+    /// in a separate thread.
+    #[allow(clippy::too_many_arguments)]
     pub fn fetch_file(
         &self,
-        done_sender: &Sender<Data>,
+        done_sender: &mut TokioSender<Data>,
         cancellation_listener: Arc<Mutex<CancellationListener>>,
         id: Uuid,
         file_token: &FileTokenCheck,
@@ -158,11 +159,10 @@ impl FileManager {
                 let embedder = self.embedder_proxy.clone();
                 self.thread_pool
                     .upgrade()
-                    .and_then(|pool| {
+                    .map(|pool| {
                         pool.spawn(move || {
                             store.select_file(filter, sender, origin, opt_test_path, embedder);
                         });
-                        Some(())
                     })
                     .unwrap_or_else(|| {
                         warn!(
@@ -175,11 +175,10 @@ impl FileManager {
                 let embedder = self.embedder_proxy.clone();
                 self.thread_pool
                     .upgrade()
-                    .and_then(|pool| {
+                    .map(|pool| {
                         pool.spawn(move || {
                             store.select_files(filter, sender, origin, opt_test_paths, embedder);
                         });
-                        Some(())
                     })
                     .unwrap_or_else(|| {
                         warn!(
@@ -210,15 +209,16 @@ impl FileManager {
 
     pub fn fetch_file_in_chunks(
         &self,
-        done_sender: Sender<Data>,
+        done_sender: &mut TokioSender<Data>,
         mut reader: BufReader<File>,
         res_body: ServoArc<Mutex<ResponseBody>>,
         cancellation_listener: Arc<Mutex<CancellationListener>>,
         range: RelativePos,
     ) {
+        let done_sender = done_sender.clone();
         self.thread_pool
             .upgrade()
-            .and_then(|pool| {
+            .map(|pool| {
                 pool.spawn(move || {
                     loop {
                         if cancellation_listener.lock().unwrap().cancelled() {
@@ -263,7 +263,7 @@ impl FileManager {
                         if length == 0 {
                             let mut body = res_body.lock().unwrap();
                             let completed_body = match *body {
-                                ResponseBody::Receiving(ref mut body) => mem::replace(body, vec![]),
+                                ResponseBody::Receiving(ref mut body) => std::mem::take(body),
                                 _ => vec![],
                             };
                             *body = ResponseBody::Done(completed_body);
@@ -273,16 +273,16 @@ impl FileManager {
                         reader.consume(length);
                     }
                 });
-                Some(())
             })
             .unwrap_or_else(|| {
                 warn!("FileManager tried to fetch a file in chunks after CoreResourceManager has exited.");
             });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fetch_blob_buf(
         &self,
-        done_sender: &Sender<Data>,
+        done_sender: &mut TokioSender<Data>,
         cancellation_listener: Arc<Mutex<CancellationListener>>,
         id: &Uuid,
         file_token: &FileTokenCheck,
@@ -293,12 +293,9 @@ impl FileManager {
         let file_impl = self.store.get_impl(id, file_token, origin_in)?;
         match file_impl {
             FileImpl::Memory(buf) => {
-                let range = match range.get_final(Some(buf.size)) {
-                    Ok(range) => range,
-                    Err(_) => {
-                        return Err(BlobURLStoreError::InvalidRange);
-                    },
-                };
+                let range = range
+                    .get_final(Some(buf.size))
+                    .map_err(|_| BlobURLStoreError::InvalidRange)?;
 
                 let range = range.to_abs_range(buf.size as usize);
                 let len = range.len() as u64;
@@ -328,12 +325,9 @@ impl FileManager {
                 let file = File::open(&metadata.path)
                     .map_err(|e| BlobURLStoreError::External(e.to_string()))?;
 
-                let range = match range.get_final(Some(metadata.size)) {
-                    Ok(range) => range,
-                    Err(_) => {
-                        return Err(BlobURLStoreError::InvalidRange);
-                    },
-                };
+                let range = range
+                    .get_final(Some(metadata.size))
+                    .map_err(|_| BlobURLStoreError::InvalidRange)?;
 
                 let mut reader = BufReader::with_capacity(FILE_CHUNK_SIZE, file);
                 if reader.seek(SeekFrom::Start(range.start as u64)).is_err() {
@@ -358,7 +352,7 @@ impl FileManager {
                 );
 
                 self.fetch_file_in_chunks(
-                    done_sender.clone(),
+                    &mut done_sender.clone(),
                     reader,
                     response.body.clone(),
                     cancellation_listener,
@@ -370,7 +364,7 @@ impl FileManager {
             FileImpl::Sliced(parent_id, inner_rel_pos) => {
                 // Next time we don't need to check validity since
                 // we have already done that for requesting URL if necessary.
-                return self.fetch_blob_buf(
+                self.fetch_blob_buf(
                     done_sender,
                     cancellation_listener,
                     &parent_id,
@@ -380,7 +374,7 @@ impl FileManager {
                         RelativePos::full_range().slice_inner(&inner_rel_pos),
                     ),
                     response,
-                );
+                )
             },
         }
     }
@@ -408,7 +402,7 @@ impl FileManagerStore {
         origin_in: &FileOrigin,
     ) -> Result<FileImpl, BlobURLStoreError> {
         match self.entries.read().unwrap().get(id) {
-            Some(ref entry) => {
+            Some(entry) => {
                 if *origin_in != *entry.origin {
                     Err(BlobURLStoreError::InvalidOrigin)
                 } else {
@@ -438,7 +432,7 @@ impl FileManagerStore {
                 let zero_refs = entry.refs.load(Ordering::Acquire) == 0;
 
                 // Check if no other fetch has acquired a token for this file.
-                let no_outstanding_tokens = entry.outstanding_tokens.len() == 0;
+                let no_outstanding_tokens = entry.outstanding_tokens.is_empty();
 
                 // Check if there is still a blob URL outstanding.
                 let valid = entry.is_valid_url.load(Ordering::Acquire);
@@ -447,7 +441,7 @@ impl FileManagerStore {
                 let do_remove = zero_refs && no_outstanding_tokens && !valid;
 
                 if do_remove {
-                    entries.remove(&file_id);
+                    entries.remove(file_id);
                 }
             }
         }
@@ -458,7 +452,7 @@ impl FileManagerStore {
         let parent_id = match entries.get(file_id) {
             Some(entry) => {
                 if let FileImpl::Sliced(ref parent_id, _) = entry.file_impl {
-                    Some(parent_id.clone())
+                    Some(*parent_id)
                 } else {
                     None
                 }
@@ -474,7 +468,7 @@ impl FileManagerStore {
                 return FileTokenCheck::ShouldFail;
             }
             let token = Uuid::new_v4();
-            entry.outstanding_tokens.insert(token.clone());
+            entry.outstanding_tokens.insert(token);
             return FileTokenCheck::Required(token);
         }
         FileTokenCheck::ShouldFail
@@ -582,7 +576,6 @@ impl FileManagerStore {
             },
             None => {
                 let _ = sender.send(Err(FileManagerThreadError::UserCancelled));
-                return;
             },
         }
     }
@@ -628,7 +621,6 @@ impl FileManagerStore {
             },
             None => {
                 let _ = sender.send(Err(FileManagerThreadError::UserCancelled));
-                return;
             },
         }
     }
@@ -659,7 +651,7 @@ impl FileManagerStore {
 
         let file_impl = FileImpl::MetaDataOnly(FileMetaData {
             path: file_path.to_path_buf(),
-            modified: modified_epoch,
+            _modified: modified_epoch,
             size: file_size,
         });
 
@@ -669,7 +661,7 @@ impl FileManagerStore {
             id,
             FileStoreEntry {
                 origin: origin.to_string(),
-                file_impl: file_impl,
+                file_impl,
                 refs: AtomicUsize::new(1),
                 // Invalid here since create_entry is called by file selection
                 is_valid_url: AtomicBool::new(false),
@@ -684,11 +676,11 @@ impl FileManagerStore {
         };
 
         Ok(SelectedFile {
-            id: id,
+            id,
             filename: filename_path.to_path_buf(),
             modified: modified_epoch,
             size: file_size,
-            type_string: type_string,
+            type_string,
         })
     }
 
@@ -795,13 +787,13 @@ impl FileManagerStore {
                         let is_valid = entry.is_valid_url.load(Ordering::Acquire);
 
                         // Check if no fetch has acquired a token for this file.
-                        let no_outstanding_tokens = entry.outstanding_tokens.len() == 0;
+                        let no_outstanding_tokens = entry.outstanding_tokens.is_empty();
 
                         // Can we remove this file?
                         let do_remove = !is_valid && no_outstanding_tokens;
 
                         if let FileImpl::Sliced(ref parent_id, _) = entry.file_impl {
-                            (do_remove, Some(parent_id.clone()))
+                            (do_remove, Some(*parent_id))
                         } else {
                             (do_remove, None)
                         }
@@ -828,22 +820,20 @@ impl FileManagerStore {
     }
 
     fn promote_memory(&self, id: Uuid, blob_buf: BlobBuf, set_valid: bool, origin: FileOrigin) {
-        match Url::parse(&origin) {
-            // parse to check sanity
-            Ok(_) => {
-                self.insert(
-                    id,
-                    FileStoreEntry {
-                        origin,
-                        file_impl: FileImpl::Memory(blob_buf),
-                        refs: AtomicUsize::new(1),
-                        is_valid_url: AtomicBool::new(set_valid),
-                        outstanding_tokens: Default::default(),
-                    },
-                );
-            },
-            Err(_) => {},
+        // parse to check sanity
+        if Url::parse(&origin).is_err() {
+            return;
         }
+        self.insert(
+            id,
+            FileStoreEntry {
+                origin,
+                file_impl: FileImpl::Memory(blob_buf),
+                refs: AtomicUsize::new(1),
+                is_valid_url: AtomicBool::new(set_valid),
+                outstanding_tokens: Default::default(),
+            },
+        );
     }
 
     fn set_blob_url_validity(
@@ -864,13 +854,13 @@ impl FileManagerStore {
                         let zero_refs = entry.refs.load(Ordering::Acquire) == 0;
 
                         // Check if no fetch has acquired a token for this file.
-                        let no_outstanding_tokens = entry.outstanding_tokens.len() == 0;
+                        let no_outstanding_tokens = entry.outstanding_tokens.is_empty();
 
                         // Can we remove this file?
                         let do_remove = zero_refs && no_outstanding_tokens;
 
                         if let FileImpl::Sliced(ref parent_id, _) = entry.file_impl {
-                            (do_remove, Some(parent_id.clone()), Ok(()))
+                            (do_remove, Some(*parent_id), Ok(()))
                         } else {
                             (do_remove, None, Ok(()))
                         }
@@ -910,7 +900,7 @@ fn read_file_in_chunks(
             buf.truncate(n);
             let blob_buf = BlobBuf {
                 filename: opt_filename,
-                type_string: type_string,
+                type_string,
                 size: size as u64,
                 bytes: buf,
             };

@@ -2,19 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::callback::ExceptionHandling::Rethrow;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
-use crate::dom::bindings::codegen::Bindings::NodeFilterBinding::NodeFilter;
-use crate::dom::bindings::codegen::Bindings::NodeFilterBinding::NodeFilterConstants;
+use crate::dom::bindings::codegen::Bindings::NodeFilterBinding::{NodeFilter, NodeFilterConstants};
 use crate::dom::bindings::codegen::Bindings::TreeWalkerBinding::TreeWalkerMethods;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot, MutDom};
 use crate::dom::document::Document;
 use crate::dom::node::Node;
-use dom_struct::dom_struct;
-use std::cell::Cell;
-use std::rc::Rc;
 
 // https://dom.spec.whatwg.org/#interface-treewalker
 #[dom_struct]
@@ -34,8 +35,8 @@ impl TreeWalker {
             reflector_: Reflector::new(),
             root_node: Dom::from_ref(root_node),
             current_node: MutDom::new(root_node),
-            what_to_show: what_to_show,
-            filter: filter,
+            what_to_show,
+            filter,
             active: Cell::new(false),
         }
     }
@@ -187,7 +188,7 @@ impl TreeWalkerMethods for TreeWalker {
                 // outside of the tree rooted at the original root.
                 {
                     return Ok(None);
-                }
+                },
                 Some(n) => node = n,
             }
             // "5. Filter node and if the return value is FILTER_ACCEPT, then
@@ -316,10 +317,10 @@ impl TreeWalker {
                             //     return null."
                             None => return Ok(None),
                             Some(ref parent)
-                                if self.is_root_node(&parent) || self.is_current_node(&parent) =>
+                                if self.is_root_node(parent) || self.is_current_node(parent) =>
                             {
                                 return Ok(None);
-                            }
+                            },
                             // "5. Otherwise, set node to parent."
                             Some(parent) => node = parent,
                         }
@@ -381,7 +382,7 @@ impl TreeWalker {
             match node.GetParentNode() {
                 // "4. If node is null or is root, return null."
                 None => return Ok(None),
-                Some(ref n) if self.is_root_node(&n) => return Ok(None),
+                Some(ref n) if self.is_root_node(n) => return Ok(None),
                 // "5. Filter node and if the return value is FILTER_ACCEPT, then return null."
                 Some(n) => {
                     node = n;
@@ -467,7 +468,7 @@ impl<'a> Iterator for &'a TreeWalker {
             // which cannot produce an Err result.
             {
                 unreachable!()
-            }
+            },
         }
     }
 }

@@ -2,6 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use servo_arc::Arc;
+use style::shared_lock::{Locked, SharedRwLock};
+use style::stylesheets::{CssRuleType, CssRuleTypes, CssRules as StyleCssRules};
+
 use crate::dom::bindings::codegen::Bindings::CSSGroupingRuleBinding::CSSGroupingRuleMethods;
 use crate::dom::bindings::error::{ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -11,15 +16,12 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::cssrule::CSSRule;
 use crate::dom::cssrulelist::{CSSRuleList, RulesSource};
 use crate::dom::cssstylesheet::CSSStyleSheet;
-use dom_struct::dom_struct;
-use servo_arc::Arc;
-use style::shared_lock::{Locked, SharedRwLock};
-use style::stylesheets::CssRules as StyleCssRules;
 
 #[dom_struct]
 pub struct CSSGroupingRule {
     cssrule: CSSRule,
     #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
     rules: Arc<Locked<StyleCssRules>>,
     rulelist: MutNullableDom<CSSRuleList>,
 }
@@ -31,7 +33,7 @@ impl CSSGroupingRule {
     ) -> CSSGroupingRule {
         CSSGroupingRule {
             cssrule: CSSRule::new_inherited(parent_stylesheet),
-            rules: rules,
+            rules,
             rulelist: MutNullableDom::new(None),
         }
     }
@@ -65,7 +67,19 @@ impl CSSGroupingRuleMethods for CSSGroupingRule {
 
     // https://drafts.csswg.org/cssom/#dom-cssgroupingrule-insertrule
     fn InsertRule(&self, rule: DOMString, index: u32) -> Fallible<u32> {
-        self.rulelist().insert_rule(&rule, index, /* nested */ true)
+        // TODO: this should accumulate the rule types of all ancestors.
+        let rule_type = self.cssrule.as_specific().ty();
+        let containing_rule_types = CssRuleTypes::from(rule_type);
+        let parse_relative_rule_type = match rule_type {
+            CssRuleType::Style | CssRuleType::Scope => Some(rule_type),
+            _ => None,
+        };
+        self.rulelist().insert_rule(
+            &rule,
+            index,
+            containing_rule_types,
+            parse_relative_rule_type,
+        )
     }
 
     // https://drafts.csswg.org/cssom/#dom-cssgroupingrule-deleterule

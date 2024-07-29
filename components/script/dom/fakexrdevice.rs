@@ -2,6 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use euclid::{Point2D, Point3D, Rect, RigidTransform3D, Rotation3D, Size2D, Transform3D, Vector3D};
+use ipc_channel::ipc::IpcSender;
+use ipc_channel::router::ROUTER;
+use profile_traits::ipc;
+use webxr_api::{
+    EntityType, Handedness, InputId, InputSource, MockDeviceMsg, MockInputInit, MockRegion,
+    MockViewInit, MockViewsInit, MockWorld, TargetRayMode, Triangle, Visibility,
+};
+
 use crate::dom::bindings::codegen::Bindings::DOMPointBinding::DOMPointInit;
 use crate::dom::bindings::codegen::Bindings::FakeXRDeviceBinding::{
     FakeXRDeviceMethods, FakeXRRegionType, FakeXRRigidTransformInit, FakeXRViewInit,
@@ -21,25 +34,15 @@ use crate::dom::fakexrinputcontroller::FakeXRInputController;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use euclid::{Point2D, Rect, Size2D};
-use euclid::{Point3D, RigidTransform3D, Rotation3D, Transform3D, Vector3D};
-use ipc_channel::ipc::IpcSender;
-use ipc_channel::router::ROUTER;
-use profile_traits::ipc;
-use std::cell::Cell;
-use std::rc::Rc;
-use webxr_api::{
-    EntityType, Handedness, InputId, InputSource, MockDeviceMsg, MockInputInit, MockRegion,
-    MockViewInit, MockViewsInit, MockWorld, TargetRayMode, Triangle, Visibility,
-};
 
 #[dom_struct]
 pub struct FakeXRDevice {
     reflector: Reflector,
     #[ignore_malloc_size_of = "defined in ipc-channel"]
+    #[no_trace]
     sender: IpcSender<MockDeviceMsg>,
     #[ignore_malloc_size_of = "defined in webxr-api"]
+    #[no_trace]
     next_input_id: Cell<InputId>,
 }
 
@@ -81,16 +84,14 @@ pub fn view<Eye>(view: &FakeXRViewInit) -> Fallible<MockViewInit<Eye>> {
     };
     let viewport = Rect::new(origin, size);
 
-    let fov = if let Some(ref fov) = view.fieldOfView {
-        Some((
+    let fov = view.fieldOfView.as_ref().map(|fov| {
+        (
             fov.leftDegrees.to_radians(),
             fov.rightDegrees.to_radians(),
             fov.upDegrees.to_radians(),
             fov.downDegrees.to_radians(),
-        ))
-    } else {
-        None
-    };
+        )
+    });
 
     Ok(MockViewInit {
         projection,
@@ -181,7 +182,7 @@ impl From<FakeXRRegionType> for EntityType {
 }
 
 impl FakeXRDeviceMethods for FakeXRDevice {
-    /// https://github.com/immersive-web/webxr-test-api/blob/master/explainer.md
+    /// <https://github.com/immersive-web/webxr-test-api/blob/master/explainer.md>
     fn SetViews(&self, views: Vec<FakeXRViewInit>) -> Fallible<()> {
         let _ = self
             .sender
@@ -189,7 +190,7 @@ impl FakeXRDeviceMethods for FakeXRDevice {
         Ok(())
     }
 
-    /// https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-setviewerorigin
+    /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-setviewerorigin>
     fn SetViewerOrigin(
         &self,
         origin: &FakeXRRigidTransformInit,
@@ -201,17 +202,17 @@ impl FakeXRDeviceMethods for FakeXRDevice {
         Ok(())
     }
 
-    /// https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-clearviewerorigin
+    /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-clearviewerorigin>
     fn ClearViewerOrigin(&self) {
         let _ = self.sender.send(MockDeviceMsg::SetViewerOrigin(None));
     }
 
-    /// https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-clearfloororigin
+    /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-clearfloororigin>
     fn ClearFloorOrigin(&self) {
         let _ = self.sender.send(MockDeviceMsg::SetFloorOrigin(None));
     }
 
-    /// https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-setfloororigin
+    /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-setfloororigin>
     fn SetFloorOrigin(&self, origin: &FakeXRRigidTransformInit) -> Fallible<()> {
         let _ = self
             .sender
@@ -219,18 +220,18 @@ impl FakeXRDeviceMethods for FakeXRDevice {
         Ok(())
     }
 
-    /// https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-clearworld
+    /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-clearworld>
     fn ClearWorld(&self) {
         let _ = self.sender.send(MockDeviceMsg::ClearWorld);
     }
 
-    /// https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-setworld
+    /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-setworld>
     fn SetWorld(&self, world: &FakeXRWorldInit) -> Fallible<()> {
         let _ = self.sender.send(MockDeviceMsg::SetWorld(get_world(world)?));
         Ok(())
     }
 
-    /// https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-simulatevisibilitychange
+    /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-simulatevisibilitychange>
     fn SimulateVisibilityChange(&self, v: XRVisibilityState) {
         let v = match v {
             XRVisibilityState::Visible => Visibility::Visible,
@@ -240,7 +241,7 @@ impl FakeXRDeviceMethods for FakeXRDevice {
         let _ = self.sender.send(MockDeviceMsg::VisibilityChange(v));
     }
 
-    /// https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-simulateinputsourceconnection
+    /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-simulateinputsourceconnection>
     fn SimulateInputSourceConnection(
         &self,
         init: &FakeXRInputSourceInit,
@@ -286,7 +287,7 @@ impl FakeXRDeviceMethods for FakeXRDevice {
         Ok(controller)
     }
 
-    /// https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-disconnect
+    /// <https://immersive-web.github.io/webxr-test-api/#dom-fakexrdevice-disconnect>
     fn Disconnect(&self) -> Rc<Promise> {
         let global = self.global();
         let p = Promise::new(&global);

@@ -8,18 +8,20 @@
 
 #![allow(unsafe_code)]
 
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::{mem, ptr};
+
+use profile_traits::time::{self, profile, TimerMetadata};
+use servo_config::opts;
+use smallvec::SmallVec;
+
 use crate::block::BlockFlow;
 use crate::context::LayoutContext;
 use crate::flow::{Flow, GetBaseFlow};
 use crate::flow_ref::FlowRef;
-use crate::traversal::{AssignBSizes, AssignISizes, BubbleISizes};
-use crate::traversal::{PostorderFlowTraversal, PreorderFlowTraversal};
-use profile_traits::time::{self, profile, TimerMetadata};
-use servo_config::opts;
-use smallvec::SmallVec;
-use std::mem;
-use std::ptr;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use crate::traversal::{
+    AssignBSizes, AssignISizes, BubbleISizes, PostorderFlowTraversal, PreorderFlowTraversal,
+};
 
 /// Traversal chunk size.
 const CHUNK_SIZE: usize = 16;
@@ -27,16 +29,24 @@ const CHUNK_SIZE: usize = 16;
 pub type FlowList = SmallVec<[UnsafeFlow; CHUNK_SIZE]>;
 
 /// Vtable + pointer representation of a Flow trait object.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq)]
 pub struct UnsafeFlow(*const dyn Flow);
 
 unsafe impl Sync for UnsafeFlow {}
 unsafe impl Send for UnsafeFlow {}
+impl PartialEq for UnsafeFlow {
+    #[allow(clippy::ptr_eq)]
+    fn eq(&self, other: &Self) -> bool {
+        // Compare the pointers explicitly to avoid a clippy error
+        self.0 as *const u8 == other.0 as *const u8
+    }
+}
 
 fn null_unsafe_flow() -> UnsafeFlow {
     UnsafeFlow(ptr::null::<BlockFlow>())
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)] // It has an unsafe block inside
 pub fn mut_owned_flow_to_unsafe_flow(flow: *mut FlowRef) -> UnsafeFlow {
     unsafe { UnsafeFlow(&**flow) }
 }
@@ -55,6 +65,12 @@ impl FlowParallelInfo {
             children_count: AtomicIsize::new(0),
             parent: null_unsafe_flow(),
         }
+    }
+}
+
+impl Default for FlowParallelInfo {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -143,7 +159,7 @@ fn top_down_flow<'scope>(
 
         // If there were no more children, start assigning block-sizes.
         if !had_children {
-            bottom_up_flow(*unsafe_flow, &assign_bsize_traversal)
+            bottom_up_flow(*unsafe_flow, assign_bsize_traversal)
         }
     }
 
@@ -157,8 +173,8 @@ fn top_down_flow<'scope>(
             &discovered_child_flows,
             pool,
             scope,
-            &assign_isize_traversal,
-            &assign_bsize_traversal,
+            assign_isize_traversal,
+            assign_bsize_traversal,
         );
     } else {
         // Spawn a new work unit for each chunk after the first.
@@ -171,8 +187,8 @@ fn top_down_flow<'scope>(
                     &nodes,
                     pool,
                     scope,
-                    &assign_isize_traversal,
-                    &assign_bsize_traversal,
+                    assign_isize_traversal,
+                    assign_bsize_traversal,
                 );
             });
         }
@@ -181,8 +197,8 @@ fn top_down_flow<'scope>(
                 chunk,
                 pool,
                 scope,
-                &assign_isize_traversal,
-                &assign_bsize_traversal,
+                assign_isize_traversal,
+                assign_bsize_traversal,
             );
         }
     }
@@ -196,18 +212,18 @@ pub fn reflow(
     context: &LayoutContext,
     queue: &rayon::ThreadPool,
 ) {
-    if opts::get().bubble_inline_sizes_separately {
+    if opts::get().debug.bubble_inline_sizes_separately {
         let bubble_inline_sizes = BubbleISizes {
-            layout_context: &context,
+            layout_context: context,
         };
         bubble_inline_sizes.traverse(root);
     }
 
     let assign_isize_traversal = &AssignISizes {
-        layout_context: &context,
+        layout_context: context,
     };
     let assign_bsize_traversal = &AssignBSizes {
-        layout_context: &context,
+        layout_context: context,
     };
     let nodes = [UnsafeFlow(root)];
 

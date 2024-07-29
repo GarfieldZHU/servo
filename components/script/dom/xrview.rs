@@ -2,20 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use euclid::RigidTransform3D;
+use js::typedarray::{Float32, Float32Array};
+use webxr_api::{ApiSpace, View};
+
+use super::bindings::buffer_source::HeapBufferSource;
 use crate::dom::bindings::codegen::Bindings::XRViewBinding::{XREye, XRViewMethods};
-use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
-use crate::dom::bindings::utils::create_typed_array;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::xrrigidtransform::XRRigidTransform;
 use crate::dom::xrsession::{cast_transform, BaseSpace, BaseTransform, XRSession};
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use euclid::RigidTransform3D;
-use js::jsapi::{Heap, JSObject};
-use std::ptr::NonNull;
-use webxr_api::{ApiSpace, View};
 
 #[dom_struct]
 pub struct XRView {
@@ -24,8 +23,9 @@ pub struct XRView {
     eye: XREye,
     viewport_index: usize,
     #[ignore_malloc_size_of = "mozjs"]
-    proj: Heap<*mut JSObject>,
+    proj: HeapBufferSource<Float32>,
     #[ignore_malloc_size_of = "defined in rust-webxr"]
+    #[no_trace]
     view: View<ApiSpace>,
     transform: Dom<XRRigidTransform>,
 }
@@ -43,7 +43,7 @@ impl XRView {
             session: Dom::from_ref(session),
             eye,
             viewport_index,
-            proj: Heap::default(),
+            proj: HeapBufferSource::default(),
             view,
             transform: Dom::from_ref(transform),
         }
@@ -57,7 +57,7 @@ impl XRView {
         viewport_index: usize,
         to_base: &BaseTransform,
     ) -> DomRoot<XRView> {
-        let transform: RigidTransform3D<f32, V, BaseSpace> = to_base.pre_transform(&view.transform);
+        let transform: RigidTransform3D<f32, V, BaseSpace> = view.transform.then(to_base);
         let transform = XRRigidTransform::new(global, cast_transform(transform));
 
         reflect_dom_object(
@@ -82,23 +82,27 @@ impl XRView {
 }
 
 impl XRViewMethods for XRView {
-    /// https://immersive-web.github.io/webxr/#dom-xrview-eye
+    /// <https://immersive-web.github.io/webxr/#dom-xrview-eye>
     fn Eye(&self) -> XREye {
         self.eye
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrview-projectionmatrix
-    fn ProjectionMatrix(&self, _cx: JSContext) -> NonNull<JSObject> {
-        if self.proj.get().is_null() {
-            let cx = self.global().get_cx();
+    /// <https://immersive-web.github.io/webxr/#dom-xrview-projectionmatrix>
+    fn ProjectionMatrix(&self, _cx: JSContext) -> Float32Array {
+        if !self.proj.is_initialized() {
+            let cx = GlobalScope::get_cx();
             // row_major since euclid uses row vectors
-            let proj = self.view.projection.to_row_major_array();
-            create_typed_array(cx, &proj, &self.proj);
+            let proj = self.view.projection.to_array();
+            self.proj
+                .set_data(cx, &proj)
+                .expect("Failed to set projection matrix.")
         }
-        NonNull::new(self.proj.get()).unwrap()
+        self.proj
+            .get_buffer()
+            .expect("Failed to get projection matrix.")
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrview-transform
+    /// <https://immersive-web.github.io/webxr/#dom-xrview-transform>
     fn Transform(&self) -> DomRoot<XRRigidTransform> {
         DomRoot::from_ref(&self.transform)
     }

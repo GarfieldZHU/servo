@@ -2,6 +2,30 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::mem;
+use std::str::{Chars, FromStr};
+use std::sync::{Arc, Mutex};
+
+use dom_struct::dom_struct;
+use euclid::Length;
+use headers::ContentType;
+use http::header::{self, HeaderName, HeaderValue};
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use js::conversions::ToJSValConvertible;
+use js::jsval::UndefinedValue;
+use js::rust::HandleObject;
+use mime::{self, Mime};
+use net_traits::request::{CacheMode, CorsSettings, Destination, RequestBuilder};
+use net_traits::{
+    CoreResourceMsg, FetchChannels, FetchMetadata, FetchResponseListener, FetchResponseMsg,
+    FilteredMetadata, NetworkError, ResourceFetchTiming, ResourceTimingType,
+};
+use servo_atoms::Atom;
+use servo_url::ServoUrl;
+use utf8;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::EventSourceBinding::{
     EventSourceInit, EventSourceMethods,
@@ -9,7 +33,7 @@ use crate::dom::bindings::codegen::Bindings::EventSourceBinding::{
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::Event;
@@ -22,26 +46,6 @@ use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingLi
 use crate::realms::enter_realm;
 use crate::task_source::{TaskSource, TaskSourceName};
 use crate::timers::OneshotTimerCallback;
-use dom_struct::dom_struct;
-use euclid::Length;
-use headers::ContentType;
-use http::header::{self, HeaderName, HeaderValue};
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use js::conversions::ToJSValConvertible;
-use js::jsval::UndefinedValue;
-use mime::{self, Mime};
-use net_traits::request::{CacheMode, CorsSettings, Destination, RequestBuilder};
-use net_traits::{CoreResourceMsg, FetchChannels, FetchMetadata, FilteredMetadata};
-use net_traits::{FetchResponseListener, FetchResponseMsg, NetworkError};
-use net_traits::{ResourceFetchTiming, ResourceTimingType};
-use servo_atoms::Atom;
-use servo_url::ServoUrl;
-use std::cell::Cell;
-use std::mem;
-use std::str::{Chars, FromStr};
-use std::sync::{Arc, Mutex};
-use utf8;
 
 const DEFAULT_RECONNECTION_TIME: u64 = 5000;
 
@@ -59,7 +63,9 @@ enum ReadyState {
 #[dom_struct]
 pub struct EventSource {
     eventtarget: EventTarget,
+    #[no_trace]
     url: ServoUrl,
+    #[no_trace]
     request: DomRefCell<Option<RequestBuilder>>,
     last_event_id: DomRefCell<DOMString>,
     reconnection_time: Cell<u64>,
@@ -222,13 +228,13 @@ impl EventSourceContext {
         // Steps 4-5
         let event = {
             let _ac = enter_realm(&*event_source);
-            rooted!(in(*event_source.global().get_cx()) let mut data = UndefinedValue());
+            rooted!(in(*GlobalScope::get_cx()) let mut data = UndefinedValue());
             unsafe {
                 self.data
-                    .to_jsval(*event_source.global().get_cx(), data.handle_mut())
+                    .to_jsval(*GlobalScope::get_cx(), data.handle_mut())
             };
             MessageEvent::new(
-                &*event_source.global(),
+                &event_source.global(),
                 type_,
                 false,
                 false,
@@ -252,7 +258,7 @@ impl EventSourceContext {
             task!(dispatch_the_event_source_event: move || {
                 let event_source = event_source.root();
                 if event_source.ready_state.get() != ReadyState::Closed {
-                    event.root().upcast::<Event>().fire(&event_source.upcast());
+                    event.root().upcast::<Event>().fire(event_source.upcast());
                 }
             }),
             &global,
@@ -381,7 +387,7 @@ impl FetchResponseListener for EventSourceContext {
         }
 
         while !input.is_empty() {
-            match utf8::decode(&input) {
+            match utf8::decode(input) {
                 Ok(s) => {
                     self.parse(s.chars());
                     return;
@@ -408,7 +414,7 @@ impl FetchResponseListener for EventSourceContext {
     }
 
     fn process_response_eof(&mut self, _response: Result<ResourceFetchTiming, NetworkError>) {
-        if let Some(_) = self.incomplete_utf8.take() {
+        if self.incomplete_utf8.take().is_some() {
             self.parse("\u{FFFD}".chars());
         }
         self.reestablish_the_connection();
@@ -447,22 +453,28 @@ impl EventSource {
     fn new_inherited(url: ServoUrl, with_credentials: bool) -> EventSource {
         EventSource {
             eventtarget: EventTarget::new_inherited(),
-            url: url,
+            url,
             request: DomRefCell::new(None),
             last_event_id: DomRefCell::new(DOMString::from("")),
             reconnection_time: Cell::new(DEFAULT_RECONNECTION_TIME),
             generation_id: Cell::new(GenerationId(0)),
 
             ready_state: Cell::new(ReadyState::Connecting),
-            with_credentials: with_credentials,
+            with_credentials,
             canceller: DomRefCell::new(Default::default()),
         }
     }
 
-    fn new(global: &GlobalScope, url: ServoUrl, with_credentials: bool) -> DomRoot<EventSource> {
-        reflect_dom_object(
+    fn new(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        url: ServoUrl,
+        with_credentials: bool,
+    ) -> DomRoot<EventSource> {
+        reflect_dom_object_with_proto(
             Box::new(EventSource::new_inherited(url, with_credentials)),
             global,
+            proto,
         )
     }
 
@@ -501,13 +513,14 @@ impl EventSource {
     #[allow(non_snake_case)]
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         url: DOMString,
         event_source_init: &EventSourceInit,
     ) -> Fallible<DomRoot<EventSource>> {
         // TODO: Step 2 relevant settings object
         // Step 3
         let base_url = global.api_base_url();
-        let url_record = match base_url.join(&*url) {
+        let url_record = match base_url.join(&url) {
             Ok(u) => u,
             //  Step 4
             Err(_) => return Err(Error::Syntax),
@@ -515,6 +528,7 @@ impl EventSource {
         // Step 1, 5
         let ev = EventSource::new(
             global,
+            proto,
             url_record.clone(),
             event_source_init.withCredentials,
         );
@@ -638,6 +652,7 @@ pub struct EventSourceTimeoutCallback {
     #[ignore_malloc_size_of = "Because it is non-owning"]
     event_source: Trusted<EventSource>,
     #[ignore_malloc_size_of = "Because it is non-owning"]
+    #[no_trace]
     action_sender: ipc::IpcSender<FetchResponseMsg>,
 }
 

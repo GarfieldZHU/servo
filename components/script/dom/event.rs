@@ -2,17 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::default::Default;
+
+use devtools_traits::{TimelineMarker, TimelineMarkerType};
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use metrics::ToMs;
+use servo_atoms::Atom;
+
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::EventBinding;
 use crate::dom::bindings::codegen::Bindings::EventBinding::{EventConstants, EventMethods};
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
-use crate::dom::bindings::codegen::Bindings::PerformanceBinding::PerformanceBinding::PerformanceMethods;
+use crate::dom::bindings::codegen::Bindings::PerformanceBinding::Performance_Binding::PerformanceMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject, Reflector};
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
@@ -26,18 +35,13 @@ use crate::dom::performance::reduce_timing_resolution;
 use crate::dom::virtualmethods::vtable_for;
 use crate::dom::window::Window;
 use crate::task::TaskOnce;
-use devtools_traits::{TimelineMarker, TimelineMarkerType};
-use dom_struct::dom_struct;
-use metrics::ToMs;
-use servo_atoms::Atom;
-use std::cell::Cell;
-use std::default::Default;
 
 #[dom_struct]
 pub struct Event {
     reflector_: Reflector,
     current_target: MutNullableDom<EventTarget>,
     target: MutNullableDom<EventTarget>,
+    #[no_trace]
     type_: DomRefCell<Atom>,
     phase: Cell<EventPhase>,
     canceled: Cell<EventDefault>,
@@ -72,7 +76,14 @@ impl Event {
     }
 
     pub fn new_uninitialized(global: &GlobalScope) -> DomRoot<Event> {
-        reflect_dom_object(Box::new(Event::new_inherited()), global)
+        Self::new_uninitialized_with_proto(global, None)
+    }
+
+    pub fn new_uninitialized_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+    ) -> DomRoot<Event> {
+        reflect_dom_object_with_proto(Box::new(Event::new_inherited()), global, proto)
     }
 
     pub fn new(
@@ -81,7 +92,17 @@ impl Event {
         bubbles: EventBubbles,
         cancelable: EventCancelable,
     ) -> DomRoot<Event> {
-        let event = Event::new_uninitialized(global);
+        Self::new_with_proto(global, None, type_, bubbles, cancelable)
+    }
+
+    fn new_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        type_: Atom,
+        bubbles: EventBubbles,
+        cancelable: EventCancelable,
+    ) -> DomRoot<Event> {
+        let event = Event::new_uninitialized_with_proto(global, proto);
         event.init_event(type_, bool::from(bubbles), bool::from(cancelable));
         event
     }
@@ -89,12 +110,19 @@ impl Event {
     #[allow(non_snake_case)]
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         type_: DOMString,
         init: &EventBinding::EventInit,
     ) -> Fallible<DomRoot<Event>> {
         let bubbles = EventBubbles::from(init.bubbles);
         let cancelable = EventCancelable::from(init.cancelable);
-        Ok(Event::new(global, Atom::from(type_), bubbles, cancelable))
+        Ok(Event::new_with_proto(
+            global,
+            proto,
+            Atom::from(type_),
+            bubbles,
+            cancelable,
+        ))
     }
 
     pub fn init_event(&self, type_: Atom, bubbles: bool, cancelable: bool) {
@@ -113,19 +141,7 @@ impl Event {
         self.cancelable.set(cancelable);
     }
 
-    // Determine if there are any listeners for a given target and type.
-    // See https://github.com/whatwg/dom/issues/453
-    pub fn has_listeners_for(&self, target: &EventTarget, type_: &Atom) -> bool {
-        // TODO: take 'removed' into account? Not implemented in Servo yet.
-        // https://dom.spec.whatwg.org/#event-listener-removed
-        let mut event_path = self.construct_event_path(&target);
-        event_path.push(DomRoot::from_ref(target));
-        event_path
-            .iter()
-            .any(|target| target.has_listeners_for(type_))
-    }
-
-    // https://dom.spec.whatwg.org/#event-path
+    /// <https://dom.spec.whatwg.org/#event-path>
     // TODO: shadow roots put special flags in the path,
     // and it will stop just being a list of bare EventTargets
     fn construct_event_path(&self, target: &EventTarget) -> Vec<DomRoot<EventTarget>> {
@@ -162,7 +178,7 @@ impl Event {
         event_path
     }
 
-    // https://dom.spec.whatwg.org/#concept-event-dispatch
+    /// <https://dom.spec.whatwg.org/#concept-event-dispatch>
     pub fn dispatch(
         &self,
         target: &EventTarget,
@@ -198,7 +214,7 @@ impl Event {
         // related to shadow DOM requirements that aren't otherwise
         // implemented right now. The path also needs to contain
         // various flags instead of just bare event targets.
-        let path = self.construct_event_path(&target);
+        let path = self.construct_event_path(target);
         rooted_vec!(let event_path <- path.into_iter());
 
         // Step 5.4
@@ -248,20 +264,12 @@ impl Event {
             }
         }
 
-        let timeline_window = match DomRoot::downcast::<Window>(target.global()) {
-            Some(window) => {
-                if window.need_emit_timeline_marker(TimelineMarkerType::DOMEvent) {
-                    Some(window)
-                } else {
-                    None
-                }
-            },
-            _ => None,
-        };
+        let timeline_window = DomRoot::downcast::<Window>(target.global())
+            .filter(|window| window.need_emit_timeline_marker(TimelineMarkerType::DOMEvent));
 
         // Step 5.13
         for object in event_path.iter().rev() {
-            if &**object == &*target {
+            if &**object == target {
                 self.phase.set(EventPhase::AtTarget);
             } else {
                 self.phase.set(EventPhase::Capturing);
@@ -282,7 +290,7 @@ impl Event {
 
         // Step 5.14
         for object in event_path.iter() {
-            let at_target = &**object == &*target;
+            let at_target = &**object == target;
             if at_target || self.bubbles.get() {
                 self.phase.set(if at_target {
                     EventPhase::AtTarget
@@ -317,7 +325,7 @@ impl Event {
         if !self.DefaultPrevented() {
             if let Some(target) = self.GetTarget() {
                 if let Some(node) = target.downcast::<Node>() {
-                    let vtable = vtable_for(&node);
+                    let vtable = vtable_for(node);
                     vtable.handle_event(self);
                 }
             }
@@ -344,7 +352,7 @@ impl Event {
             }
         }
 
-        return self.status();
+        self.status()
     }
 
     pub fn status(&self) -> EventStatus {
@@ -384,7 +392,7 @@ impl Event {
         self.trusted.set(trusted);
     }
 
-    // https://html.spec.whatwg.org/multipage/#fire-a-simple-event
+    /// <https://html.spec.whatwg.org/multipage/#fire-a-simple-event>
     pub fn fire(&self, target: &EventTarget) -> EventStatus {
         self.set_trusted(true);
         target.dispatch_event(self)
@@ -392,89 +400,98 @@ impl Event {
 }
 
 impl EventMethods for Event {
-    // https://dom.spec.whatwg.org/#dom-event-eventphase
+    /// <https://dom.spec.whatwg.org/#dom-event-eventphase>
     fn EventPhase(&self) -> u16 {
         self.phase.get() as u16
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-type
+    /// <https://dom.spec.whatwg.org/#dom-event-type>
     fn Type(&self) -> DOMString {
         DOMString::from(&*self.type_()) // FIXME(ajeffrey): Directly convert from Atom to DOMString
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-target
+    /// <https://dom.spec.whatwg.org/#dom-event-target>
     fn GetTarget(&self) -> Option<DomRoot<EventTarget>> {
         self.target.get()
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-srcelement
+    /// <https://dom.spec.whatwg.org/#dom-event-srcelement>
     fn GetSrcElement(&self) -> Option<DomRoot<EventTarget>> {
         self.target.get()
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-currenttarget
+    /// <https://dom.spec.whatwg.org/#dom-event-currenttarget>
     fn GetCurrentTarget(&self) -> Option<DomRoot<EventTarget>> {
         self.current_target.get()
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-defaultprevented
+    /// <https://dom.spec.whatwg.org/#dom-event-composedpath>
+    fn ComposedPath(&self) -> Vec<DomRoot<EventTarget>> {
+        if let Some(target) = self.target.get() {
+            self.construct_event_path(&target)
+        } else {
+            vec![]
+        }
+    }
+
+    /// <https://dom.spec.whatwg.org/#dom-event-defaultprevented>
     fn DefaultPrevented(&self) -> bool {
         self.canceled.get() == EventDefault::Prevented
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-preventdefault
+    /// <https://dom.spec.whatwg.org/#dom-event-preventdefault>
     fn PreventDefault(&self) {
         if self.cancelable.get() {
             self.canceled.set(EventDefault::Prevented)
         }
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-stoppropagation
+    /// <https://dom.spec.whatwg.org/#dom-event-stoppropagation>
     fn StopPropagation(&self) {
         self.stop_propagation.set(true);
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-stopimmediatepropagation
+    /// <https://dom.spec.whatwg.org/#dom-event-stopimmediatepropagation>
     fn StopImmediatePropagation(&self) {
         self.stop_immediate.set(true);
         self.stop_propagation.set(true);
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-bubbles
+    /// <https://dom.spec.whatwg.org/#dom-event-bubbles>
     fn Bubbles(&self) -> bool {
         self.bubbles.get()
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-cancelable
+    /// <https://dom.spec.whatwg.org/#dom-event-cancelable>
     fn Cancelable(&self) -> bool {
         self.cancelable.get()
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-returnvalue
+    /// <https://dom.spec.whatwg.org/#dom-event-returnvalue>
     fn ReturnValue(&self) -> bool {
         self.canceled.get() == EventDefault::Allowed
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-returnvalue
+    /// <https://dom.spec.whatwg.org/#dom-event-returnvalue>
     fn SetReturnValue(&self, val: bool) {
         if !val {
             self.PreventDefault();
         }
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-cancelbubble
+    /// <https://dom.spec.whatwg.org/#dom-event-cancelbubble>
     fn CancelBubble(&self) -> bool {
         self.stop_propagation.get()
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-cancelbubble
+    /// <https://dom.spec.whatwg.org/#dom-event-cancelbubble>
     fn SetCancelBubble(&self, value: bool) {
         if value {
             self.stop_propagation.set(true)
         }
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-timestamp
+    /// <https://dom.spec.whatwg.org/#dom-event-timestamp>
     fn TimeStamp(&self) -> DOMHighResTimeStamp {
         reduce_timing_resolution(
             (self.precise_time_ns - (*self.global().performance().TimeOrigin()).round() as u64)
@@ -482,12 +499,12 @@ impl EventMethods for Event {
         )
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-initevent
+    /// <https://dom.spec.whatwg.org/#dom-event-initevent>
     fn InitEvent(&self, type_: DOMString, bubbles: bool, cancelable: bool) {
         self.init_event(Atom::from(type_), bubbles, cancelable)
     }
 
-    // https://dom.spec.whatwg.org/#dom-event-istrusted
+    /// <https://dom.spec.whatwg.org/#dom-event-istrusted>
     fn IsTrusted(&self) -> bool {
         self.trusted.get()
     }
@@ -581,7 +598,7 @@ pub enum EventStatus {
     NotCanceled,
 }
 
-// https://dom.spec.whatwg.org/#concept-event-fire
+/// <https://dom.spec.whatwg.org/#concept-event-fire>
 pub struct EventTask {
     pub target: Trusted<EventTarget>,
     pub name: Atom,
@@ -598,7 +615,7 @@ impl TaskOnce for EventTask {
     }
 }
 
-// https://html.spec.whatwg.org/multipage/#fire-a-simple-event
+/// <https://html.spec.whatwg.org/multipage/#fire-a-simple-event>
 pub struct SimpleEventTask {
     pub target: Trusted<EventTarget>,
     pub name: Atom,
@@ -611,7 +628,7 @@ impl TaskOnce for SimpleEventTask {
     }
 }
 
-// https://dom.spec.whatwg.org/#concept-event-listener-invoke
+/// <https://dom.spec.whatwg.org/#concept-event-listener-invoke>
 fn invoke(
     timeline_window: Option<&Window>,
     object: &EventTarget,
@@ -658,7 +675,7 @@ fn invoke(
     }
 }
 
-// https://dom.spec.whatwg.org/#concept-event-listener-inner-invoke
+/// <https://dom.spec.whatwg.org/#concept-event-listener-inner-invoke>
 fn inner_invoke(
     timeline_window: Option<&Window>,
     object: &EventTarget,
@@ -687,7 +704,7 @@ fn inner_invoke(
 
         // Step 2.5.
         if let CompiledEventListener::Listener(event_listener) = listener {
-            object.remove_listener_if_once(&event.type_(), &event_listener);
+            object.remove_listener_if_once(&event.type_(), event_listener);
         }
 
         // Step 2.6
@@ -716,7 +733,7 @@ fn inner_invoke(
 
         // Step 2.12
         if let Some(window) = global.downcast::<Window>() {
-            window.set_current_event(current_event.as_ref().map(|e| &**e));
+            window.set_current_event(current_event.as_deref());
         }
 
         // Step 2.13: short-circuit instead of going to next listener
@@ -730,10 +747,7 @@ fn inner_invoke(
 }
 
 impl Default for EventBinding::EventInit {
-    fn default() -> EventBinding::EventInit {
-        EventBinding::EventInit {
-            bubbles: false,
-            cancelable: false,
-        }
+    fn default() -> Self {
+        Self::empty()
     }
 }

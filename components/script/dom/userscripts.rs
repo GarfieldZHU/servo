@@ -2,6 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::fs::{read_dir, File};
+use std::io::Read;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use js::jsval::UndefinedValue;
+
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::str::DOMString;
@@ -10,11 +17,6 @@ use crate::dom::htmlheadelement::HTMLHeadElement;
 use crate::dom::htmlscriptelement::SourceCode;
 use crate::dom::node::document_from_node;
 use crate::script_module::ScriptFetchOptions;
-use js::jsval::UndefinedValue;
-use std::fs::{read_dir, File};
-use std::io::Read;
-use std::path::PathBuf;
-use std::rc::Rc;
 
 pub fn load_script(head: &HTMLHeadElement) {
     let doc = document_from_node(head);
@@ -29,7 +31,7 @@ pub fn load_script(head: &HTMLHeadElement) {
         rooted!(in(*cx) let mut rval = UndefinedValue());
 
         let path = PathBuf::from(&path_str);
-        let mut files = read_dir(&path)
+        let mut files = read_dir(path)
             .expect("Bad path passed to --userscripts")
             .filter_map(|e| e.ok())
             .map(|e| e.path())
@@ -50,7 +52,7 @@ pub fn load_script(head: &HTMLHeadElement) {
                 &file.to_string_lossy(),
                 rval.handle_mut(),
                 1,
-                ScriptFetchOptions::default_classic_script(&global),
+                ScriptFetchOptions::default_classic_script(global),
                 global.api_base_url(),
             );
         }

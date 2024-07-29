@@ -2,18 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::actor::{Actor, ActorMessageStatus, ActorRegistry};
-use crate::protocol::JsonPacketStream;
-use crate::StreamId;
-use devtools_traits::DevtoolScriptControlMsg::WantsLiveNotifications;
-use devtools_traits::{DevtoolScriptControlMsg, WorkerId};
-use ipc_channel::ipc::IpcSender;
-use msg::constellation_msg::TEST_PIPELINE_ID;
-use serde_json::{Map, Value};
-use servo_url::ServoUrl;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::TcpStream;
+
+use base::id::TEST_PIPELINE_ID;
+use devtools_traits::DevtoolScriptControlMsg::WantsLiveNotifications;
+use devtools_traits::{DevtoolScriptControlMsg, WorkerId};
+use ipc_channel::ipc::IpcSender;
+use serde::Serialize;
+use serde_json::{Map, Value};
+use servo_url::ServoUrl;
+
+use crate::actor::{Actor, ActorMessageStatus, ActorRegistry};
+use crate::protocol::JsonPacketStream;
+use crate::StreamId;
 
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -38,12 +41,12 @@ impl WorkerActor {
     pub(crate) fn encodable(&self) -> WorkerMsg {
         WorkerMsg {
             actor: self.name.clone(),
-            consoleActor: self.console.clone(),
-            threadActor: self.thread.clone(),
+            console_actor: self.console.clone(),
+            thread_actor: self.thread.clone(),
             id: self.id.0.to_string(),
             url: self.url.to_string(),
             traits: WorkerTraits {
-                isParentInterceptEnabled: false,
+                is_parent_intercept_enabled: false,
             },
             type_: self.type_ as u32,
         }
@@ -86,8 +89,8 @@ impl Actor for WorkerActor {
                 let msg = ConnectReply {
                     from: self.name(),
                     type_: "connected".to_owned(),
-                    threadActor: self.thread.clone(),
-                    consoleActor: self.console.clone(),
+                    thread_actor: self.thread.clone(),
+                    console_actor: self.console.clone(),
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
@@ -133,24 +136,27 @@ struct AttachedReply {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConnectReply {
     from: String,
     #[serde(rename = "type")]
     type_: String,
-    threadActor: String,
-    consoleActor: String,
+    thread_actor: String,
+    console_actor: String,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkerTraits {
-    isParentInterceptEnabled: bool,
+    is_parent_intercept_enabled: bool,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct WorkerMsg {
     actor: String,
-    consoleActor: String,
-    threadActor: String,
+    console_actor: String,
+    thread_actor: String,
     id: String,
     url: String,
     traits: WorkerTraits,

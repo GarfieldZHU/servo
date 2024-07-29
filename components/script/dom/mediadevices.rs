@@ -2,13 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::MediaDevicesBinding::MediaDevicesMethods;
-use crate::dom::bindings::codegen::Bindings::MediaDevicesBinding::MediaStreamConstraints;
-use crate::dom::bindings::codegen::UnionTypes::BooleanOrMediaTrackConstraints;
-use crate::dom::bindings::codegen::UnionTypes::ClampedUnsignedLongOrConstrainULongRange as ConstrainULong;
-use crate::dom::bindings::codegen::UnionTypes::DoubleOrConstrainDoubleRange as ConstrainDouble;
-use crate::dom::bindings::reflector::reflect_dom_object;
-use crate::dom::bindings::reflector::DomObject;
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use servo_media::streams::capture::{Constrain, ConstrainRange, MediaTrackConstraintSet};
+use servo_media::streams::MediaStreamType;
+use servo_media::ServoMedia;
+
+use crate::dom::bindings::codegen::Bindings::MediaDevicesBinding::{
+    MediaDevicesMethods, MediaStreamConstraints,
+};
+use crate::dom::bindings::codegen::UnionTypes::{
+    BooleanOrMediaTrackConstraints, ClampedUnsignedLongOrConstrainULongRange as ConstrainULong,
+    DoubleOrConstrainDoubleRange as ConstrainDouble,
+};
+use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
@@ -17,11 +25,6 @@ use crate::dom::mediastream::MediaStream;
 use crate::dom::mediastreamtrack::MediaStreamTrack;
 use crate::dom::promise::Promise;
 use crate::realms::{AlreadyInRealm, InRealm};
-use dom_struct::dom_struct;
-use servo_media::streams::capture::{Constrain, ConstrainRange, MediaTrackConstraintSet};
-use servo_media::streams::MediaStreamType;
-use servo_media::ServoMedia;
-use std::rc::Rc;
 
 #[dom_struct]
 pub struct MediaDevices {
@@ -41,10 +44,10 @@ impl MediaDevices {
 }
 
 impl MediaDevicesMethods for MediaDevices {
-    /// https://w3c.github.io/mediacapture-main/#dom-mediadevices-getusermedia
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediadevices-getusermedia>
     #[allow(unsafe_code)]
     fn GetUserMedia(&self, constraints: &MediaStreamConstraints, comp: InRealm) -> Rc<Promise> {
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
         let media = ServoMedia::get().unwrap();
         let stream = MediaStream::new(&self.global());
         if let Some(constraints) = convert_constraints(&constraints.audio) {
@@ -64,12 +67,11 @@ impl MediaDevicesMethods for MediaDevices {
         p
     }
 
-    /// https://w3c.github.io/mediacapture-main/#dom-mediadevices-enumeratedevices
+    /// <https://w3c.github.io/mediacapture-main/#dom-mediadevices-enumeratedevices>
     fn EnumerateDevices(&self) -> Rc<Promise> {
         // Step 1.
-        let global = self.global();
-        let in_realm_proof = AlreadyInRealm::assert(&global);
-        let p = Promise::new_in_current_realm(&global, InRealm::Already(&in_realm_proof));
+        let in_realm_proof = AlreadyInRealm::assert();
+        let p = Promise::new_in_current_realm(InRealm::Already(&in_realm_proof));
 
         // Step 2.
         // XXX These steps should be run in parallel.
@@ -128,11 +130,8 @@ fn convert_culong(js: &ConstrainULong) -> Option<Constrain<u32>> {
                     max: range.parent.max,
                     ideal: range.ideal,
                 }))
-            } else if let Some(exact) = range.exact {
-                Some(Constrain::Value(exact))
             } else {
-                // the unspecified case is treated as all three being none
-                None
+                range.exact.map(Constrain::Value)
             }
         },
     }
@@ -148,11 +147,8 @@ fn convert_cdouble(js: &ConstrainDouble) -> Option<Constrain<f64>> {
                     max: range.parent.max.map(|x| *x),
                     ideal: range.ideal.map(|x| *x),
                 }))
-            } else if let Some(exact) = range.exact {
-                Some(Constrain::Value(*exact))
             } else {
-                // the unspecified case is treated as all three being none
-                None
+                range.exact.map(|exact| Constrain::Value(*exact))
             }
         },
     }

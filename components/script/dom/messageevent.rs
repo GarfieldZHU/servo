@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::jsapi::Heap;
+use js::jsval::JSVal;
+use js::rust::{HandleObject, HandleValue};
+use servo_atoms::Atom;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::MessageEventBinding;
@@ -9,7 +15,7 @@ use crate::dom::bindings::codegen::Bindings::MessageEventBinding::MessageEventMe
 use crate::dom::bindings::codegen::UnionTypes::WindowProxyOrMessagePortOrServiceWorker;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::trace::RootedTraceableBox;
@@ -21,13 +27,8 @@ use crate::dom::messageport::MessagePort;
 use crate::dom::serviceworker::ServiceWorker;
 use crate::dom::windowproxy::WindowProxy;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsapi::Heap;
-use js::jsval::JSVal;
-use js::rust::HandleValue;
-use servo_atoms::Atom;
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(JSTraceable, MallocSizeOf)]
 enum SrcObject {
     WindowProxy(Dom<WindowProxy>),
@@ -36,17 +37,17 @@ enum SrcObject {
 }
 
 impl From<&WindowProxyOrMessagePortOrServiceWorker> for SrcObject {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn from(src_object: &WindowProxyOrMessagePortOrServiceWorker) -> SrcObject {
         match src_object {
             WindowProxyOrMessagePortOrServiceWorker::WindowProxy(blob) => {
-                SrcObject::WindowProxy(Dom::from_ref(&*blob))
+                SrcObject::WindowProxy(Dom::from_ref(blob))
             },
             WindowProxyOrMessagePortOrServiceWorker::MessagePort(stream) => {
-                SrcObject::MessagePort(Dom::from_ref(&*stream))
+                SrcObject::MessagePort(Dom::from_ref(stream))
             },
             WindowProxyOrMessagePortOrServiceWorker::ServiceWorker(stream) => {
-                SrcObject::ServiceWorker(Dom::from_ref(&*stream))
+                SrcObject::ServiceWorker(Dom::from_ref(stream))
             },
         }
     }
@@ -91,8 +92,16 @@ impl MessageEvent {
     }
 
     pub fn new_uninitialized(global: &GlobalScope) -> DomRoot<MessageEvent> {
+        Self::new_uninitialized_with_proto(global, None)
+    }
+
+    fn new_uninitialized_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+    ) -> DomRoot<MessageEvent> {
         MessageEvent::new_initialized(
             global,
+            proto,
             HandleValue::undefined(),
             DOMString::new(),
             None,
@@ -101,8 +110,9 @@ impl MessageEvent {
         )
     }
 
-    pub fn new_initialized(
+    fn new_initialized(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         data: HandleValue,
         origin: DOMString,
         source: Option<&WindowProxyOrMessagePortOrServiceWorker>,
@@ -115,12 +125,13 @@ impl MessageEvent {
             lastEventId,
             ports,
         ));
-        let ev = reflect_dom_object(ev, global);
+        let ev = reflect_dom_object_with_proto(ev, global, proto);
         ev.data.set(data.get());
 
         ev
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         global: &GlobalScope,
         type_: Atom,
@@ -132,7 +143,35 @@ impl MessageEvent {
         lastEventId: DOMString,
         ports: Vec<DomRoot<MessagePort>>,
     ) -> DomRoot<MessageEvent> {
-        let ev = MessageEvent::new_initialized(global, data, origin, source, lastEventId, ports);
+        Self::new_with_proto(
+            global,
+            None,
+            type_,
+            bubbles,
+            cancelable,
+            data,
+            origin,
+            source,
+            lastEventId,
+            ports,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        type_: Atom,
+        bubbles: bool,
+        cancelable: bool,
+        data: HandleValue,
+        origin: DOMString,
+        source: Option<&WindowProxyOrMessagePortOrServiceWorker>,
+        lastEventId: DOMString,
+        ports: Vec<DomRoot<MessagePort>>,
+    ) -> DomRoot<MessageEvent> {
+        let ev =
+            MessageEvent::new_initialized(global, proto, data, origin, source, lastEventId, ports);
         {
             let event = ev.upcast::<Event>();
             event.init_event(type_, bubbles, cancelable);
@@ -142,11 +181,13 @@ impl MessageEvent {
 
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         type_: DOMString,
         init: RootedTraceableBox<MessageEventBinding::MessageEventInit>,
     ) -> Fallible<DomRoot<MessageEvent>> {
-        let ev = MessageEvent::new(
+        let ev = MessageEvent::new_with_proto(
             global,
+            proto,
             Atom::from(type_),
             init.parent.bubbles,
             init.parent.cancelable,
@@ -219,13 +260,13 @@ impl MessageEventMethods for MessageEvent {
     fn GetSource(&self) -> Option<WindowProxyOrMessagePortOrServiceWorker> {
         match &*self.source.borrow() {
             Some(SrcObject::WindowProxy(i)) => Some(
-                WindowProxyOrMessagePortOrServiceWorker::WindowProxy(DomRoot::from_ref(&*i)),
+                WindowProxyOrMessagePortOrServiceWorker::WindowProxy(DomRoot::from_ref(i)),
             ),
             Some(SrcObject::MessagePort(i)) => Some(
-                WindowProxyOrMessagePortOrServiceWorker::MessagePort(DomRoot::from_ref(&*i)),
+                WindowProxyOrMessagePortOrServiceWorker::MessagePort(DomRoot::from_ref(i)),
             ),
             Some(SrcObject::ServiceWorker(i)) => Some(
-                WindowProxyOrMessagePortOrServiceWorker::ServiceWorker(DomRoot::from_ref(&*i)),
+                WindowProxyOrMessagePortOrServiceWorker::ServiceWorker(DomRoot::from_ref(i)),
             ),
             None => None,
         }

@@ -2,6 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use base::id::PipelineId;
+use dom_struct::dom_struct;
+use js::jsapi::{Heap, JSObject};
+use js::jsval::{JSVal, UndefinedValue};
+use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
+use script_traits::{ScriptMsg, StructuredSerializedData};
+use servo_url::ServoUrl;
+
 use crate::dom::bindings::codegen::Bindings::DissimilarOriginWindowBinding;
 use crate::dom::bindings::codegen::Bindings::DissimilarOriginWindowBinding::DissimilarOriginWindowMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowPostMessageOptions;
@@ -14,13 +22,6 @@ use crate::dom::dissimilaroriginlocation::DissimilarOriginLocation;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::windowproxy::WindowProxy;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsapi::{Heap, JSObject};
-use js::jsval::{JSVal, UndefinedValue};
-use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
-use msg::constellation_msg::PipelineId;
-use script_traits::{ScriptMsg, StructuredSerializedData};
-use servo_url::ServoUrl;
 
 /// Represents a dissimilar-origin `Window` that exists in another script thread.
 ///
@@ -46,7 +47,7 @@ pub struct DissimilarOriginWindow {
 impl DissimilarOriginWindow {
     #[allow(unsafe_code)]
     pub fn new(global_to_clone_from: &GlobalScope, window_proxy: &WindowProxy) -> DomRoot<Self> {
-        let cx = global_to_clone_from.get_cx();
+        let cx = GlobalScope::get_cx();
         let win = Box::new(Self {
             globalscope: GlobalScope::new_inherited(
                 PipelineId::new(),
@@ -134,7 +135,7 @@ impl DissimilarOriginWindowMethods for DissimilarOriginWindow {
         false
     }
 
-    /// https://html.spec.whatwg.org/multipage/#dom-window-postmessage
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-postmessage>
     fn PostMessage(
         &self,
         cx: JSContext,
@@ -145,7 +146,7 @@ impl DissimilarOriginWindowMethods for DissimilarOriginWindow {
         self.post_message_impl(&target_origin, cx, message, transfer)
     }
 
-    /// https://html.spec.whatwg.org/multipage/#dom-window-postmessage-options
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-postmessage-options>
     fn PostMessage_(
         &self,
         cx: JSContext,
@@ -194,7 +195,7 @@ impl DissimilarOriginWindowMethods for DissimilarOriginWindow {
 }
 
 impl DissimilarOriginWindow {
-    /// https://html.spec.whatwg.org/multipage/#window-post-message-steps
+    /// <https://html.spec.whatwg.org/multipage/#window-post-message-steps>
     fn post_message_impl(
         &self,
         target_origin: &USVString,
@@ -208,7 +209,7 @@ impl DissimilarOriginWindow {
         self.post_message(target_origin, data)
     }
 
-    /// https://html.spec.whatwg.org/multipage/#window-post-message-steps
+    /// <https://html.spec.whatwg.org/multipage/#window-post-message-steps>
     pub fn post_message(
         &self,
         target_origin: &USVString,
@@ -228,7 +229,7 @@ impl DissimilarOriginWindow {
         let target_origin = match target_origin.0[..].as_ref() {
             "*" => None,
             "/" => Some(source_origin.clone()),
-            url => match ServoUrl::parse(&url) {
+            url => match ServoUrl::parse(url) {
                 Ok(url) => Some(url.origin().clone()),
                 Err(_) => return Err(Error::Syntax),
             },
@@ -238,7 +239,7 @@ impl DissimilarOriginWindow {
             source: incumbent.pipeline_id(),
             source_origin,
             target_origin,
-            data: data,
+            data,
         };
         // Step 8
         let _ = incumbent.script_to_constellation_chan().send(msg);

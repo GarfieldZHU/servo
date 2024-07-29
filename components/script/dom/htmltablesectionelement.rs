@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use style::attr::AttrValue;
+use style::color::AbsoluteColor;
+
 use crate::dom::bindings::codegen::Bindings::HTMLTableSectionElementBinding::HTMLTableSectionElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::error::{ErrorResult, Fallible};
@@ -15,10 +21,6 @@ use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmltablerowelement::HTMLTableRowElement;
 use crate::dom::node::{window_from_node, Node};
 use crate::dom::virtualmethods::VirtualMethods;
-use cssparser::RGBA;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use style::attr::AttrValue;
 
 #[dom_struct]
 pub struct HTMLTableSectionElement {
@@ -36,17 +38,19 @@ impl HTMLTableSectionElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLTableSectionElement> {
-        let n = Node::reflect_node(
+        let n = Node::reflect_node_with_proto(
             Box::new(HTMLTableSectionElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         );
 
         n.upcast::<Node>().set_weird_parser_insertion_mode();
@@ -75,7 +79,7 @@ impl HTMLTableSectionElementMethods for HTMLTableSectionElement {
         node.insert_cell_or_row(
             index,
             || self.Rows(),
-            || HTMLTableRowElement::new(local_name!("tr"), None, &node.owner_doc()),
+            || HTMLTableRowElement::new(local_name!("tr"), None, &node.owner_doc(), None),
         )
     }
 
@@ -87,11 +91,11 @@ impl HTMLTableSectionElementMethods for HTMLTableSectionElement {
 }
 
 pub trait HTMLTableSectionElementLayoutHelpers {
-    fn get_background_color(self) -> Option<RGBA>;
+    fn get_background_color(self) -> Option<AbsoluteColor>;
 }
 
 impl HTMLTableSectionElementLayoutHelpers for LayoutDom<'_, HTMLTableSectionElement> {
-    fn get_background_color(self) -> Option<RGBA> {
+    fn get_background_color(self) -> Option<AbsoluteColor> {
         self.upcast::<Element>()
             .get_attr_for_layout(&ns!(), &local_name!("bgcolor"))
             .and_then(AttrValue::as_color)

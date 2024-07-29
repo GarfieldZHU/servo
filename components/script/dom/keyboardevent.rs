@@ -2,32 +2,34 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use keyboard_types::{Key, Modifiers};
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::KeyboardEventBinding;
 use crate::dom::bindings::codegen::Bindings::KeyboardEventBinding::KeyboardEventMethods;
 use crate::dom::bindings::codegen::Bindings::UIEventBinding::UIEventMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::Event;
 use crate::dom::uievent::UIEvent;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use keyboard_types::{Key, Modifiers};
-use std::cell::Cell;
-
-unsafe_no_jsmanaged_fields!(Key);
-unsafe_no_jsmanaged_fields!(Modifiers);
 
 #[dom_struct]
 pub struct KeyboardEvent {
     uievent: UIEvent,
     key: DomRefCell<DOMString>,
+    #[no_trace]
     typed_key: DomRefCell<Key>,
     code: DomRefCell<DOMString>,
     location: Cell<u32>,
+    #[no_trace]
     modifiers: Cell<Modifiers>,
     repeat: Cell<bool>,
     is_composing: Cell<bool>,
@@ -52,11 +54,56 @@ impl KeyboardEvent {
     }
 
     pub fn new_uninitialized(window: &Window) -> DomRoot<KeyboardEvent> {
-        reflect_dom_object(Box::new(KeyboardEvent::new_inherited()), window)
+        Self::new_uninitialized_with_proto(window, None)
     }
 
+    fn new_uninitialized_with_proto(
+        window: &Window,
+        proto: Option<HandleObject>,
+    ) -> DomRoot<KeyboardEvent> {
+        reflect_dom_object_with_proto(Box::new(KeyboardEvent::new_inherited()), window, proto)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         window: &Window,
+        type_: DOMString,
+        can_bubble: bool,
+        cancelable: bool,
+        view: Option<&Window>,
+        detail: i32,
+        key: Key,
+        code: DOMString,
+        location: u32,
+        repeat: bool,
+        is_composing: bool,
+        modifiers: Modifiers,
+        char_code: u32,
+        key_code: u32,
+    ) -> DomRoot<KeyboardEvent> {
+        Self::new_with_proto(
+            window,
+            None,
+            type_,
+            can_bubble,
+            cancelable,
+            view,
+            detail,
+            key,
+            code,
+            location,
+            repeat,
+            is_composing,
+            modifiers,
+            char_code,
+            key_code,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_proto(
+        window: &Window,
+        proto: Option<HandleObject>,
         type_: DOMString,
         can_bubble: bool,
         cancelable: bool,
@@ -71,7 +118,7 @@ impl KeyboardEvent {
         char_code: u32,
         key_code: u32,
     ) -> DomRoot<KeyboardEvent> {
-        let ev = KeyboardEvent::new_uninitialized(window);
+        let ev = KeyboardEvent::new_uninitialized_with_proto(window, proto);
         ev.InitKeyboardEvent(
             type_,
             can_bubble,
@@ -95,6 +142,7 @@ impl KeyboardEvent {
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         type_: DOMString,
         init: &KeyboardEventBinding::KeyboardEventInit,
     ) -> Fallible<DomRoot<KeyboardEvent>> {
@@ -103,8 +151,9 @@ impl KeyboardEvent {
         modifiers.set(Modifiers::ALT, init.parent.altKey);
         modifiers.set(Modifiers::SHIFT, init.parent.shiftKey);
         modifiers.set(Modifiers::META, init.parent.metaKey);
-        let event = KeyboardEvent::new(
+        let event = KeyboardEvent::new_with_proto(
             window,
+            proto,
             type_,
             init.parent.parent.parent.bubbles,
             init.parent.parent.parent.cancelable,

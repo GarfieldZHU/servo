@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use style::shared_lock::SharedRwLock;
+use style::stylesheets::{CssRule as StyleCssRule, CssRuleType};
+
 use crate::dom::bindings::codegen::Bindings::CSSRuleBinding::CSSRuleMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::Reflector;
@@ -11,17 +17,14 @@ use crate::dom::cssfontfacerule::CSSFontFaceRule;
 use crate::dom::cssimportrule::CSSImportRule;
 use crate::dom::csskeyframerule::CSSKeyframeRule;
 use crate::dom::csskeyframesrule::CSSKeyframesRule;
+use crate::dom::csslayerblockrule::CSSLayerBlockRule;
+use crate::dom::csslayerstatementrule::CSSLayerStatementRule;
 use crate::dom::cssmediarule::CSSMediaRule;
 use crate::dom::cssnamespacerule::CSSNamespaceRule;
 use crate::dom::cssstylerule::CSSStyleRule;
 use crate::dom::cssstylesheet::CSSStyleSheet;
 use crate::dom::csssupportsrule::CSSSupportsRule;
-use crate::dom::cssviewportrule::CSSViewportRule;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use std::cell::Cell;
-use style::shared_lock::SharedRwLock;
-use style::stylesheets::CssRule as StyleCssRule;
 
 #[dom_struct]
 pub struct CSSRule {
@@ -35,7 +38,7 @@ pub struct CSSRule {
 }
 
 impl CSSRule {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(parent_stylesheet: &CSSStyleSheet) -> CSSRule {
         CSSRule {
             reflector_: Reflector::new(),
@@ -55,13 +58,15 @@ impl CSSRule {
             rule as &dyn SpecificCSSRule
         } else if let Some(rule) = self.downcast::<CSSNamespaceRule>() {
             rule as &dyn SpecificCSSRule
-        } else if let Some(rule) = self.downcast::<CSSViewportRule>() {
-            rule as &dyn SpecificCSSRule
         } else if let Some(rule) = self.downcast::<CSSKeyframeRule>() {
             rule as &dyn SpecificCSSRule
         } else if let Some(rule) = self.downcast::<CSSImportRule>() {
             rule as &dyn SpecificCSSRule
         } else if let Some(rule) = self.downcast::<CSSSupportsRule>() {
+            rule as &dyn SpecificCSSRule
+        } else if let Some(rule) = self.downcast::<CSSLayerBlockRule>() {
+            rule as &dyn SpecificCSSRule
+        } else if let Some(rule) = self.downcast::<CSSLayerStatementRule>() {
             rule as &dyn SpecificCSSRule
         } else {
             unreachable!()
@@ -97,14 +102,23 @@ impl CSSRule {
             StyleCssRule::Namespace(s) => {
                 DomRoot::upcast(CSSNamespaceRule::new(window, parent_stylesheet, s))
             },
-            StyleCssRule::Viewport(s) => {
-                DomRoot::upcast(CSSViewportRule::new(window, parent_stylesheet, s))
-            },
             StyleCssRule::Supports(s) => {
                 DomRoot::upcast(CSSSupportsRule::new(window, parent_stylesheet, s))
             },
             StyleCssRule::Page(_) => unreachable!(),
-            StyleCssRule::Document(_) => unimplemented!(), // TODO
+            StyleCssRule::Container(_) => unimplemented!(), // TODO
+            StyleCssRule::Document(_) => unimplemented!(),  // TODO
+            StyleCssRule::LayerBlock(s) => {
+                DomRoot::upcast(CSSLayerBlockRule::new(window, parent_stylesheet, s))
+            },
+            StyleCssRule::LayerStatement(s) => {
+                DomRoot::upcast(CSSLayerStatementRule::new(window, parent_stylesheet, s))
+            },
+            StyleCssRule::FontPaletteValues(_) => unimplemented!(), // TODO
+            StyleCssRule::Property(_) => unimplemented!(),          // TODO
+            StyleCssRule::Margin(_) => unimplemented!(),            // TODO
+            StyleCssRule::Scope(_) => unimplemented!(),             // TODO
+            StyleCssRule::StartingStyle(_) => unimplemented!(),     // TODO
         }
     }
 
@@ -135,7 +149,14 @@ impl CSSRule {
 impl CSSRuleMethods for CSSRule {
     // https://drafts.csswg.org/cssom/#dom-cssrule-type
     fn Type(&self) -> u16 {
-        self.as_specific().ty()
+        let rule_type = self.as_specific().ty() as u16;
+        // Per https://drafts.csswg.org/cssom/#dom-cssrule-type for constants > 15
+        // we return 0.
+        if rule_type > 15 {
+            0
+        } else {
+            rule_type
+        }
     }
 
     // https://drafts.csswg.org/cssom/#dom-cssrule-parentstylesheet
@@ -159,7 +180,7 @@ impl CSSRuleMethods for CSSRule {
 }
 
 pub trait SpecificCSSRule {
-    fn ty(&self) -> u16;
+    fn ty(&self) -> CssRuleType;
     fn get_css(&self) -> DOMString;
     /// Remove parentStylesheet from all transitive children
     fn deparent_children(&self) {

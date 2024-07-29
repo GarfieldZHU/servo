@@ -44,13 +44,13 @@ interface Element : Node {
   [CEReactions, Throws]
   boolean toggleAttribute(DOMString name, optional boolean force);
   [CEReactions, Throws]
-  void setAttribute(DOMString name, DOMString value);
+  undefined setAttribute(DOMString name, DOMString value);
   [CEReactions, Throws]
-  void setAttributeNS(DOMString? namespace, DOMString name, DOMString value);
+  undefined setAttributeNS(DOMString? namespace, DOMString name, DOMString value);
   [CEReactions]
-  void removeAttribute(DOMString name);
+  undefined removeAttribute(DOMString name);
   [CEReactions]
-  void removeAttributeNS(DOMString? namespace, DOMString localName);
+  undefined removeAttributeNS(DOMString? namespace, DOMString localName);
   boolean hasAttribute(DOMString name);
   boolean hasAttributeNS(DOMString? namespace, DOMString localName);
 
@@ -79,9 +79,9 @@ interface Element : Node {
   [CEReactions, Throws]
   Element? insertAdjacentElement(DOMString where_, Element element); // historical
   [Throws]
-  void insertAdjacentText(DOMString where_, DOMString data);
+  undefined insertAdjacentText(DOMString where_, DOMString data);
   [CEReactions, Throws]
-  void insertAdjacentHTML(DOMString position, DOMString html);
+  undefined insertAdjacentHTML(DOMString position, DOMString html);
 
   [Throws, Pref="dom.shadowdom.enabled"] ShadowRoot attachShadow();
 };
@@ -92,13 +92,13 @@ partial interface Element {
   [NewObject]
   DOMRect getBoundingClientRect();
 
-  void scroll(optional ScrollToOptions options = {});
-  void scroll(unrestricted double x, unrestricted double y);
+  undefined scroll(optional ScrollToOptions options = {});
+  undefined scroll(unrestricted double x, unrestricted double y);
 
-  void scrollTo(optional ScrollToOptions options = {});
-  void scrollTo(unrestricted double x, unrestricted double y);
-  void scrollBy(optional ScrollToOptions options = {});
-  void scrollBy(unrestricted double x, unrestricted double y);
+  undefined scrollTo(optional ScrollToOptions options = {});
+  undefined scrollTo(unrestricted double x, unrestricted double y);
+  undefined scrollBy(optional ScrollToOptions options = {});
+  undefined scrollBy(unrestricted double x, unrestricted double y);
   attribute unrestricted double scrollTop;
   attribute unrestricted double scrollLeft;
   readonly attribute long scrollWidth;
@@ -113,17 +113,18 @@ partial interface Element {
 // https://w3c.github.io/DOM-Parsing/#extensions-to-the-element-interface
 partial interface Element {
   [CEReactions, Throws]
-  attribute [TreatNullAs=EmptyString] DOMString innerHTML;
+  attribute [LegacyNullToEmptyString] DOMString innerHTML;
   [CEReactions, Throws]
-  attribute [TreatNullAs=EmptyString] DOMString outerHTML;
+  attribute [LegacyNullToEmptyString] DOMString outerHTML;
 };
 
 // https://fullscreen.spec.whatwg.org/#api
 partial interface Element {
-  Promise<void> requestFullscreen();
+  Promise<undefined> requestFullscreen();
 };
 
 Element includes ChildNode;
 Element includes NonDocumentTypeChildNode;
 Element includes ParentNode;
 Element includes ActivatableElement;
+Element includes ARIAMixin;

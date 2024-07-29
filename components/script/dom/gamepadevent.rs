@@ -2,20 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventBinding::EventMethods;
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+
+use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::GamepadEventBinding;
 use crate::dom::bindings::codegen::Bindings::GamepadEventBinding::GamepadEventMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::Event;
 use crate::dom::gamepad::Gamepad;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_atoms::Atom;
 
 #[dom_struct]
 pub struct GamepadEvent {
@@ -43,7 +45,22 @@ impl GamepadEvent {
         cancelable: bool,
         gamepad: &Gamepad,
     ) -> DomRoot<GamepadEvent> {
-        let ev = reflect_dom_object(Box::new(GamepadEvent::new_inherited(&gamepad)), global);
+        Self::new_with_proto(global, None, type_, bubbles, cancelable, gamepad)
+    }
+
+    fn new_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        type_: Atom,
+        bubbles: bool,
+        cancelable: bool,
+        gamepad: &Gamepad,
+    ) -> DomRoot<GamepadEvent> {
+        let ev = reflect_dom_object_with_proto(
+            Box::new(GamepadEvent::new_inherited(gamepad)),
+            global,
+            proto,
+        );
         {
             let event = ev.upcast::<Event>();
             event.init_event(type_, bubbles, cancelable);
@@ -61,18 +78,20 @@ impl GamepadEvent {
             GamepadEventType::Disconnected => "gamepaddisconnected",
         };
 
-        GamepadEvent::new(&global, name.into(), false, false, &gamepad)
+        GamepadEvent::new(global, name.into(), false, false, gamepad)
     }
 
     // https://w3c.github.io/gamepad/#gamepadevent-interface
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         type_: DOMString,
         init: &GamepadEventBinding::GamepadEventInit,
     ) -> Fallible<DomRoot<GamepadEvent>> {
-        Ok(GamepadEvent::new(
+        Ok(GamepadEvent::new_with_proto(
             &window.global(),
+            proto,
             Atom::from(type_),
             init.parent.bubbles,
             init.parent.cancelable,

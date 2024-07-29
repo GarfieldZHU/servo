@@ -2,6 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::default::Default;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, LocalName, Prefix};
+use js::rust::HandleObject;
+use style_dom::ElementState;
+
 use crate::dom::activation::Activatable;
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::HTMLButtonElementBinding::HTMLButtonElementMethods;
@@ -14,19 +22,15 @@ use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmlfieldsetelement::HTMLFieldSetElement;
-use crate::dom::htmlformelement::HTMLFormElement;
-use crate::dom::htmlformelement::{FormControl, FormDatum, FormDatumValue};
-use crate::dom::htmlformelement::{FormSubmitter, ResetFrom, SubmittedFrom};
+use crate::dom::htmlformelement::{
+    FormControl, FormDatum, FormDatumValue, FormSubmitterElement, HTMLFormElement, ResetFrom,
+    SubmittedFrom,
+};
 use crate::dom::node::{window_from_node, BindContext, Node, UnbindContext};
 use crate::dom::nodelist::NodeList;
 use crate::dom::validation::{is_barred_by_datalist_ancestor, Validatable};
-use crate::dom::validitystate::ValidityState;
+use crate::dom::validitystate::{ValidationFlags, ValidityState};
 use crate::dom::virtualmethods::VirtualMethods;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use std::cell::Cell;
-use std::default::Default;
-use style::element_state::ElementState;
 
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 enum ButtonType {
@@ -52,7 +56,7 @@ impl HTMLButtonElement {
     ) -> HTMLButtonElement {
         HTMLButtonElement {
             htmlelement: HTMLElement::new_inherited_with_state(
-                ElementState::IN_ENABLED_STATE,
+                ElementState::ENABLED,
                 local_name,
                 prefix,
                 document,
@@ -64,17 +68,19 @@ impl HTMLButtonElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLButtonElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLButtonElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 
@@ -186,11 +192,11 @@ impl HTMLButtonElementMethods for HTMLButtonElement {
 impl HTMLButtonElement {
     /// <https://html.spec.whatwg.org/multipage/#constructing-the-form-data-set>
     /// Steps range from 3.1 to 3.7 (specific to HTMLButtonElement)
-    pub fn form_datum(&self, submitter: Option<FormSubmitter>) -> Option<FormDatum> {
+    pub fn form_datum(&self, submitter: Option<FormSubmitterElement>) -> Option<FormDatum> {
         // Step 3.1: disabled state check is in get_unclean_dataset
 
         // Step 3.1: only run steps if this is the submitter
-        if let Some(FormSubmitter::ButtonElement(submitter)) = submitter {
+        if let Some(FormSubmitterElement::Button(submitter)) = submitter {
             if submitter != self {
                 return None;
             }
@@ -209,8 +215,8 @@ impl HTMLButtonElement {
 
         // Step 3.9
         Some(FormDatum {
-            ty: ty,
-            name: name,
+            ty,
+            name,
             value: FormDatumValue::String(self.Value()),
         })
     }
@@ -223,8 +229,8 @@ impl VirtualMethods for HTMLButtonElement {
 
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
-        match attr.local_name() {
-            &local_name!("disabled") => {
+        match *attr.local_name() {
+            local_name!("disabled") => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(Some(_)) => {},
@@ -239,8 +245,10 @@ impl VirtualMethods for HTMLButtonElement {
                     },
                 }
                 el.update_sequentially_focusable_status();
+                self.validity_state()
+                    .perform_validation_and_update(ValidationFlags::all());
             },
-            &local_name!("type") => match mutation {
+            local_name!("type") => match mutation {
                 AttributeMutation::Set(_) => {
                     let value = match &**attr.value() {
                         "reset" => ButtonType::Reset,
@@ -248,20 +256,24 @@ impl VirtualMethods for HTMLButtonElement {
                         _ => ButtonType::Submit,
                     };
                     self.button_type.set(value);
+                    self.validity_state()
+                        .perform_validation_and_update(ValidationFlags::all());
                 },
                 AttributeMutation::Removed => {
                     self.button_type.set(ButtonType::Submit);
                 },
             },
-            &local_name!("form") => {
+            local_name!("form") => {
                 self.form_attribute_mutated(mutation);
+                self.validity_state()
+                    .perform_validation_and_update(ValidationFlags::empty());
             },
             _ => {},
         }
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
 
@@ -294,7 +306,7 @@ impl FormControl for HTMLButtonElement {
         self.form_owner.set(form);
     }
 
-    fn to_element<'a>(&'a self) -> &'a Element {
+    fn to_element(&self) -> &Element {
         self.upcast::<Element>()
     }
 }
@@ -339,7 +351,7 @@ impl Activatable for HTMLButtonElement {
                 if let Some(owner) = self.form_owner() {
                     owner.submit(
                         SubmittedFrom::NotFromForm,
-                        FormSubmitter::ButtonElement(self),
+                        FormSubmitterElement::Button(self),
                     );
                 }
             },

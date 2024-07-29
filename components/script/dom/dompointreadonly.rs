@@ -2,14 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::DOMPointBinding::DOMPointInit;
 use crate::dom::bindings::codegen::Bindings::DOMPointReadOnlyBinding::DOMPointReadOnlyMethods;
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
-use std::cell::Cell;
 
 // http://dev.w3.org/fxtf/geometry/Overview.html#dompointreadonly
 #[dom_struct]
@@ -34,20 +37,33 @@ impl DOMPointReadOnly {
     }
 
     pub fn new(global: &GlobalScope, x: f64, y: f64, z: f64, w: f64) -> DomRoot<DOMPointReadOnly> {
-        reflect_dom_object(
+        Self::new_with_proto(global, None, x, y, z, w)
+    }
+
+    fn new_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        x: f64,
+        y: f64,
+        z: f64,
+        w: f64,
+    ) -> DomRoot<DOMPointReadOnly> {
+        reflect_dom_object_with_proto(
             Box::new(DOMPointReadOnly::new_inherited(x, y, z, w)),
             global,
+            proto,
         )
     }
 
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         x: f64,
         y: f64,
         z: f64,
         w: f64,
     ) -> Fallible<DomRoot<DOMPointReadOnly>> {
-        Ok(DOMPointReadOnly::new(global, x, y, z, w))
+        Ok(DOMPointReadOnly::new_with_proto(global, proto, x, y, z, w))
     }
 
     // https://drafts.fxtf.org/geometry/#dom-dompointreadonly-frompoint

@@ -2,23 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate malloc_size_of_derive;
-
-use gfx_traits::Epoch;
-use ipc_channel::ipc::IpcSender;
-use msg::constellation_msg::PipelineId;
-use profile_traits::time::TimerMetadata;
-use profile_traits::time::{send_profile_data, ProfilerCategory, ProfilerChan};
-use script_traits::{ConstellationControlMsg, LayoutMsg, ProgressiveWebMetricType};
-use servo_config::opts;
-use servo_url::ServoUrl;
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use time::precise_time_ns;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use base::id::PipelineId;
+use base::Epoch;
+use ipc_channel::ipc::IpcSender;
+use log::warn;
+use malloc_size_of_derive::MallocSizeOf;
+use profile_traits::time::{send_profile_data, ProfilerCategory, ProfilerChan, TimerMetadata};
+use script_traits::{ConstellationControlMsg, LayoutMsg, ProgressiveWebMetricType};
+use servo_config::opts;
+use servo_url::ServoUrl;
 
 pub trait ProfilerMetadataFactory {
     fn new_metadata(&self) -> Option<TimerMetadata>;
@@ -35,8 +32,8 @@ pub trait ProgressiveWebMetric {
 /// TODO make this configurable
 /// maximum task time is 50ms (in ns)
 pub const MAX_TASK_NS: u64 = 50000000;
-/// 10 second window (in ns)
-const INTERACTIVE_WINDOW_SECONDS_IN_NS: u64 = 10000000000;
+/// 10 second window
+const INTERACTIVE_WINDOW_SECONDS: Duration = Duration::from_secs(10);
 
 pub trait ToMs<T> {
     fn to_ms(&self) -> T;
@@ -66,7 +63,10 @@ fn set_metric<U: ProgressiveWebMetric>(
     };
     let now = match metric_time {
         Some(time) => time,
-        None => precise_time_ns(),
+        None => SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64,
     };
     let time = now - navigation_start;
     attr.set(Some(time));
@@ -75,13 +75,7 @@ fn set_metric<U: ProgressiveWebMetric>(
     pwm.send_queued_constellation_msg(metric_type, time);
 
     // Send the metric to the time profiler.
-    send_profile_data(
-        category,
-        metadata,
-        &pwm.get_time_profiler_chan(),
-        time,
-        time,
-    );
+    send_profile_data(category, metadata, pwm.get_time_profiler_chan(), time, time);
 
     // Print the metric to console if the print-pwm option was given.
     if opts::get().print_pwm {
@@ -116,31 +110,39 @@ pub struct InteractiveMetrics {
 
 #[derive(Clone, Copy, Debug, MallocSizeOf)]
 pub struct InteractiveWindow {
-    start: u64,
+    start: SystemTime,
+}
+
+impl Default for InteractiveWindow {
+    fn default() -> Self {
+        Self {
+            start: SystemTime::now(),
+        }
+    }
 }
 
 impl InteractiveWindow {
-    pub fn new() -> InteractiveWindow {
-        InteractiveWindow {
-            start: precise_time_ns(),
-        }
-    }
-
     // We need to either start or restart the 10s window
     //   start: we've added a new document
     //   restart: there was a task > 50ms
     //   not all documents are interactive
     pub fn start_window(&mut self) {
-        self.start = precise_time_ns();
+        self.start = SystemTime::now();
     }
 
     /// check if 10s has elapsed since start
     pub fn needs_check(&self) -> bool {
-        precise_time_ns() - self.start >= INTERACTIVE_WINDOW_SECONDS_IN_NS
+        SystemTime::now()
+            .duration_since(self.start)
+            .unwrap_or_default() >=
+            INTERACTIVE_WINDOW_SECONDS
     }
 
     pub fn get_start(&self) -> u64 {
         self.start
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
     }
 }
 
@@ -157,14 +159,19 @@ impl InteractiveMetrics {
             dom_content_loaded: Cell::new(None),
             main_thread_available: Cell::new(None),
             time_to_interactive: Cell::new(None),
-            time_profiler_chan: time_profiler_chan,
+            time_profiler_chan,
             url,
         }
     }
 
     pub fn set_dom_content_loaded(&self) {
         if self.dom_content_loaded.get().is_none() {
-            self.dom_content_loaded.set(Some(precise_time_ns()));
+            self.dom_content_loaded.set(Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64,
+            ));
         }
     }
 
@@ -250,7 +257,7 @@ impl ProgressiveWebMetric for InteractiveMetrics {
 // https://w3c.github.io/paint-timing/
 pub struct PaintTimeMetrics {
     pending_metrics: RefCell<HashMap<Epoch, (Option<TimerMetadata>, bool)>>,
-    navigation_start: Option<u64>,
+    navigation_start: u64,
     first_paint: Cell<Option<u64>>,
     first_contentful_paint: Cell<Option<u64>>,
     pipeline_id: PipelineId,
@@ -267,10 +274,11 @@ impl PaintTimeMetrics {
         constellation_chan: IpcSender<LayoutMsg>,
         script_chan: IpcSender<ConstellationControlMsg>,
         url: ServoUrl,
+        navigation_start: u64,
     ) -> PaintTimeMetrics {
         PaintTimeMetrics {
             pending_metrics: RefCell::new(HashMap::new()),
-            navigation_start: None,
+            navigation_start,
             first_paint: Cell::new(None),
             first_contentful_paint: Cell::new(None),
             pipeline_id,
@@ -331,11 +339,8 @@ impl PaintTimeMetrics {
     }
 
     pub fn maybe_set_metric(&self, epoch: Epoch, paint_time: u64) {
-        if self.first_paint.get().is_some() && self.first_contentful_paint.get().is_some() ||
-            self.navigation_start.is_none()
-        {
-            // If we already set all paint metrics or we have not set navigation start yet,
-            // we just bail out.
+        if self.first_paint.get().is_some() && self.first_contentful_paint.get().is_some() {
+            // If we already set all paint metrics we just bail out.
             return;
         }
 
@@ -376,11 +381,11 @@ impl PaintTimeMetrics {
 
 impl ProgressiveWebMetric for PaintTimeMetrics {
     fn get_navigation_start(&self) -> Option<u64> {
-        self.navigation_start
+        Some(self.navigation_start)
     }
 
     fn set_navigation_start(&mut self, time: u64) {
-        self.navigation_start = Some(time);
+        self.navigation_start = time;
     }
 
     fn send_queued_constellation_msg(&self, name: ProgressiveWebMetricType, time: u64) {

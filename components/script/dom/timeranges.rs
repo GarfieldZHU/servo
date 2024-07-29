@@ -2,14 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::fmt;
+
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::TimeRangesBinding::TimeRangesMethods;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use std::fmt;
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 struct TimeRange {
@@ -54,16 +56,12 @@ pub enum TimeRangesError {
     OutOfRange,
 }
 
-#[derive(Clone, Debug, JSTraceable, MallocSizeOf)]
+#[derive(Clone, Debug, Default, JSTraceable, MallocSizeOf)]
 pub struct TimeRangesContainer {
     ranges: Vec<TimeRange>,
 }
 
 impl TimeRangesContainer {
-    pub fn new() -> Self {
-        Self { ranges: Vec::new() }
-    }
-
     pub fn len(&self) -> u32 {
         self.ranges.len() as u32
     }

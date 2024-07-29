@@ -2,6 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use servo_media::audio::node::{
+    AudioNodeInit, AudioNodeMessage, AudioScheduledSourceNodeMessage, OnEndedCallback,
+};
+
 use crate::dom::audionode::{AudioNode, UnwrappedAudioNodeOptions};
 use crate::dom::baseaudiocontext::BaseAudioContext;
 use crate::dom::bindings::codegen::Bindings::AudioScheduledSourceNodeBinding::AudioScheduledSourceNodeMethods;
@@ -11,10 +18,6 @@ use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomObject;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use servo_media::audio::node::OnEndedCallback;
-use servo_media::audio::node::{AudioNodeInit, AudioNodeMessage, AudioScheduledSourceNodeMessage};
-use std::cell::Cell;
 
 #[dom_struct]
 pub struct AudioScheduledSourceNode {
@@ -24,7 +27,7 @@ pub struct AudioScheduledSourceNode {
 }
 
 impl AudioScheduledSourceNode {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         node_type: AudioNodeInit,
         context: &BaseAudioContext,
@@ -83,7 +86,7 @@ impl AudioScheduledSourceNodeMethods for AudioScheduledSourceNode {
                     window.task_manager().dom_manipulation_task_source().queue_simple_event(
                         this.upcast(),
                         atom!("ended"),
-                        &window
+                        window
                         );
                 }),
                 &canceller,

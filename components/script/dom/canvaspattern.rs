@@ -2,19 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use canvas_traits::canvas::{FillOrStrokeStyle, RepetitionStyle, SurfaceStyle};
+use dom_struct::dom_struct;
+use euclid::default::Size2D;
+
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::canvasgradient::ToFillOrStrokeStyle;
 use crate::dom::globalscope::GlobalScope;
-use canvas_traits::canvas::{FillOrStrokeStyle, RepetitionStyle, SurfaceStyle};
-use dom_struct::dom_struct;
-use euclid::default::Size2D;
 
 // https://html.spec.whatwg.org/multipage/#canvaspattern
 #[dom_struct]
 pub struct CanvasPattern {
     reflector_: Reflector,
     surface_data: Vec<u8>,
+    #[no_trace]
     surface_size: Size2D<u32>,
     repeat_x: bool,
     repeat_y: bool,
@@ -37,11 +39,11 @@ impl CanvasPattern {
 
         CanvasPattern {
             reflector_: Reflector::new(),
-            surface_data: surface_data,
+            surface_data,
             surface_size,
             repeat_x: x,
             repeat_y: y,
-            origin_clean: origin_clean,
+            origin_clean,
         }
     }
     pub fn new(

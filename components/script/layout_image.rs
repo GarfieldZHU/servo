@@ -2,10 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Infrastructure to initiate network requests for images needed by the layout
-//! thread. The script thread needs to be responsible for them because there's
-//! no guarantee that the responsible nodes will still exist in the future if the
-//! layout thread holds on to them during asynchronous operations.
+//! Infrastructure to initiate network requests for images needed by layout. The script thread needs
+//! to be responsible for them because there's no guarantee that the responsible nodes will still
+//! exist in the future if layout holds on to them during asynchronous operations.
+
+use std::sync::{Arc, Mutex};
+
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use net_traits::image_cache::{ImageCache, PendingImageId};
+use net_traits::request::{Destination, RequestBuilder as FetchRequestInit};
+use net_traits::{
+    FetchMetadata, FetchResponseListener, FetchResponseMsg, NetworkError, ResourceFetchTiming,
+    ResourceTimingType,
+};
+use servo_url::ServoUrl;
 
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomObject;
@@ -15,14 +26,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::node::{document_from_node, Node};
 use crate::dom::performanceresourcetiming::InitiatorType;
 use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use net_traits::image_cache::{ImageCache, PendingImageId};
-use net_traits::request::{Destination, RequestBuilder as FetchRequestInit};
-use net_traits::{FetchMetadata, FetchResponseListener, FetchResponseMsg, NetworkError};
-use net_traits::{ResourceFetchTiming, ResourceTimingType};
-use servo_url::ServoUrl;
-use std::sync::{Arc, Mutex};
 
 struct LayoutImageContext {
     id: PendingImageId,
@@ -84,8 +87,8 @@ pub fn fetch_image_for_layout(
     let document = document_from_node(node);
 
     let context = Arc::new(Mutex::new(LayoutImageContext {
-        id: id,
-        cache: cache,
+        id,
+        cache,
         resource_timing: ResourceFetchTiming::new(ResourceTimingType::Resource),
         doc: Trusted::new(&document),
         url: url.clone(),

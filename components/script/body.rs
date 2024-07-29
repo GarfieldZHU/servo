@@ -2,8 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+use std::{ptr, str};
+
+use encoding_rs::UTF_8;
+use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
+use ipc_channel::router::ROUTER;
+use js::jsapi::{Heap, JSObject, JS_ClearPendingException, Value as JSValue};
+use js::jsval::{JSVal, UndefinedValue};
+use js::rust::wrappers::{JS_GetPendingException, JS_ParseJSON};
+use js::rust::HandleValue;
+use js::typedarray::{ArrayBuffer, CreateWith};
+use mime::{self, Mime};
+use net_traits::request::{
+    BodyChunkRequest, BodyChunkResponse, BodySource as NetBodySource, RequestBody,
+};
+use script_traits::serializable::BlobImpl;
+use url::form_urlencoded;
+
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::BlobBinding::BlobBinding::BlobMethods;
+use crate::dom::bindings::codegen::Bindings::BlobBinding::Blob_Binding::BlobMethods;
 use crate::dom::bindings::codegen::Bindings::FormDataBinding::FormDataMethods;
 use crate::dom::bindings::codegen::Bindings::XMLHttpRequestBinding::BodyInit;
 use crate::dom::bindings::error::{Error, Fallible};
@@ -24,30 +42,7 @@ use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext;
 use crate::task::TaskCanceller;
 use crate::task_source::networking::NetworkingTaskSource;
-use crate::task_source::TaskSource;
-use crate::task_source::TaskSourceName;
-use encoding_rs::UTF_8;
-use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
-use ipc_channel::router::ROUTER;
-use js::jsapi::Heap;
-use js::jsapi::JSObject;
-use js::jsapi::JS_ClearPendingException;
-use js::jsapi::Value as JSValue;
-use js::jsval::JSVal;
-use js::jsval::UndefinedValue;
-use js::rust::wrappers::JS_GetPendingException;
-use js::rust::wrappers::JS_ParseJSON;
-use js::rust::HandleValue;
-use js::typedarray::{ArrayBuffer, CreateWith};
-use mime::{self, Mime};
-use net_traits::request::{
-    BodyChunkRequest, BodyChunkResponse, BodySource as NetBodySource, RequestBody,
-};
-use script_traits::serializable::BlobImpl;
-use std::ptr;
-use std::rc::Rc;
-use std::str;
-use url::form_urlencoded;
+use crate::task_source::{TaskSource, TaskSourceName};
 
 /// The Dom object, or ReadableStream, that is the source of a body.
 /// <https://fetch.spec.whatwg.org/#concept-body-source>
@@ -96,7 +91,7 @@ impl TransmitBodyConnectHandler {
         source: BodySource,
     ) -> TransmitBodyConnectHandler {
         TransmitBodyConnectHandler {
-            stream: stream,
+            stream,
             task_source,
             canceller,
             bytes_sender: None,
@@ -281,16 +276,18 @@ impl TransmitBodyConnectHandler {
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 struct TransmitBodyPromiseHandler {
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     bytes_sender: IpcSender<BodyChunkResponse>,
     stream: DomRoot<ReadableStream>,
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     control_sender: IpcSender<BodyChunkRequest>,
 }
 
 impl Callback for TransmitBodyPromiseHandler {
     /// Step 5 of <https://fetch.spec.whatwg.org/#concept-request-transmit-body>
     fn callback(&self, cx: JSContext, v: HandleValue, _realm: InRealm) {
-        let is_done = match get_read_promise_done(cx.clone(), &v) {
+        let is_done = match get_read_promise_done(cx, &v) {
             Ok(is_done) => is_done,
             Err(_) => {
                 // Step 5.5, the "otherwise" steps.
@@ -307,7 +304,7 @@ impl Callback for TransmitBodyPromiseHandler {
             return self.stream.stop_reading();
         }
 
-        let chunk = match get_read_promise_bytes(cx.clone(), &v) {
+        let chunk = match get_read_promise_bytes(cx, &v) {
             Ok(chunk) => chunk,
             Err(_) => {
                 // Step 5.5, the "otherwise" steps.
@@ -328,9 +325,11 @@ impl Callback for TransmitBodyPromiseHandler {
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 struct TransmitBodyPromiseRejectionHandler {
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     bytes_sender: IpcSender<BodyChunkResponse>,
     stream: DomRoot<ReadableStream>,
     #[ignore_malloc_size_of = "Channels are hard"]
+    #[no_trace]
     control_sender: IpcSender<BodyChunkRequest>,
 }
 
@@ -339,11 +338,11 @@ impl Callback for TransmitBodyPromiseRejectionHandler {
     fn callback(&self, _cx: JSContext, _v: HandleValue, _realm: InRealm) {
         // Step 5.4, the "rejection" steps.
         let _ = self.control_sender.send(BodyChunkRequest::Error);
-        return self.stream.stop_reading();
+        self.stream.stop_reading();
     }
 }
 
-/// The result of https://fetch.spec.whatwg.org/#concept-bodyinit-extract
+/// The result of <https://fetch.spec.whatwg.org/#concept-bodyinit-extract>
 pub struct ExtractedBody {
     pub stream: DomRoot<ReadableStream>,
     pub source: BodySource,
@@ -354,12 +353,12 @@ pub struct ExtractedBody {
 impl ExtractedBody {
     /// Build a request body from the extracted body,
     /// to be sent over IPC to net to use with `concept-request-transmit-body`,
-    /// see https://fetch.spec.whatwg.org/#concept-request-transmit-body.
+    /// see <https://fetch.spec.whatwg.org/#concept-request-transmit-body>.
     ///
     /// Also returning the corresponding readable stream,
     /// to be stored on the request in script,
     /// and potentially used as part of `consume_body`,
-    /// see https://fetch.spec.whatwg.org/#concept-body-consume-body
+    /// see <https://fetch.spec.whatwg.org/#concept-body-consume-body>
     ///
     /// Transmitting a body over fetch, and consuming it in script,
     /// are mutually exclusive operations, since each will lock the stream to a reader.
@@ -454,7 +453,7 @@ impl Extractable for BodyInit {
             BodyInit::ArrayBuffer(ref typedarray) => {
                 let bytes = typedarray.to_vec();
                 let total_bytes = bytes.len();
-                let stream = ReadableStream::new_from_bytes(&global, bytes);
+                let stream = ReadableStream::new_from_bytes(global, bytes);
                 Ok(ExtractedBody {
                     stream,
                     total_bytes: Some(total_bytes),
@@ -465,7 +464,7 @@ impl Extractable for BodyInit {
             BodyInit::ArrayBufferView(ref typedarray) => {
                 let bytes = typedarray.to_vec();
                 let total_bytes = bytes.len();
-                let stream = ReadableStream::new_from_bytes(&global, bytes);
+                let stream = ReadableStream::new_from_bytes(global, bytes);
                 Ok(ExtractedBody {
                     stream,
                     total_bytes: Some(total_bytes),
@@ -498,7 +497,7 @@ impl Extractable for Vec<u8> {
     fn extract(&self, global: &GlobalScope) -> Fallible<ExtractedBody> {
         let bytes = self.clone();
         let total_bytes = self.len();
-        let stream = ReadableStream::new_from_bytes(&global, bytes);
+        let stream = ReadableStream::new_from_bytes(global, bytes);
         Ok(ExtractedBody {
             stream,
             total_bytes: Some(total_bytes),
@@ -532,7 +531,7 @@ impl Extractable for DOMString {
         let bytes = self.as_bytes().to_owned();
         let total_bytes = bytes.len();
         let content_type = Some(DOMString::from("text/plain;charset=UTF-8"));
-        let stream = ReadableStream::new_from_bytes(&global, bytes);
+        let stream = ReadableStream::new_from_bytes(global, bytes);
         Ok(ExtractedBody {
             stream,
             total_bytes: Some(total_bytes),
@@ -551,7 +550,7 @@ impl Extractable for FormData {
             "multipart/form-data;boundary={}",
             boundary
         )));
-        let stream = ReadableStream::new_from_bytes(&global, bytes);
+        let stream = ReadableStream::new_from_bytes(global, bytes);
         Ok(ExtractedBody {
             stream,
             total_bytes: Some(total_bytes),
@@ -568,7 +567,7 @@ impl Extractable for URLSearchParams {
         let content_type = Some(DOMString::from(
             "application/x-www-form-urlencoded;charset=UTF-8",
         ));
-        let stream = ReadableStream::new_from_bytes(&global, bytes);
+        let stream = ReadableStream::new_from_bytes(global, bytes);
         Ok(ExtractedBody {
             stream,
             total_bytes: Some(total_bytes),
@@ -657,7 +656,7 @@ impl Callback for ConsumeBodyPromiseHandler {
             .as_ref()
             .expect("ConsumeBodyPromiseHandler has no stream in callback.");
 
-        let is_done = match get_read_promise_done(cx.clone(), &v) {
+        let is_done = match get_read_promise_done(cx, &v) {
             Ok(is_done) => is_done,
             Err(err) => {
                 stream.stop_reading();
@@ -668,9 +667,9 @@ impl Callback for ConsumeBodyPromiseHandler {
 
         if is_done {
             // When read is fulfilled with an object whose done property is true.
-            self.resolve_result_promise(cx.clone());
+            self.resolve_result_promise(cx);
         } else {
-            let chunk = match get_read_promise_bytes(cx.clone(), &v) {
+            let chunk = match get_read_promise_bytes(cx, &v) {
                 Ok(chunk) => chunk,
                 Err(err) => {
                     stream.stop_reading();
@@ -686,7 +685,7 @@ impl Callback for ConsumeBodyPromiseHandler {
                 .expect("No bytes for ConsumeBodyPromiseHandler.");
 
             // Append the value property to bytes.
-            bytes.extend_from_slice(&*chunk);
+            bytes.extend_from_slice(&chunk);
 
             let global = stream.global();
 
@@ -716,12 +715,10 @@ impl Callback for ConsumeBodyPromiseHandler {
 }
 
 // https://fetch.spec.whatwg.org/#concept-body-consume-body
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 pub fn consume_body<T: BodyMixin + DomObject>(object: &T, body_type: BodyType) -> Rc<Promise> {
-    let global = object.global();
-    let in_realm_proof = AlreadyInRealm::assert(&global);
-    let promise =
-        Promise::new_in_current_realm(&object.global(), InRealm::Already(&in_realm_proof));
+    let in_realm_proof = AlreadyInRealm::assert();
+    let promise = Promise::new_in_current_realm(InRealm::Already(&in_realm_proof));
 
     // Step 1
     if object.is_disturbed() || object.is_locked() {
@@ -742,7 +739,7 @@ pub fn consume_body<T: BodyMixin + DomObject>(object: &T, body_type: BodyType) -
 }
 
 // https://fetch.spec.whatwg.org/#concept-body-consume-body
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 fn consume_body_with_promise<T: BodyMixin + DomObject>(
     object: &T,
     body_type: BodyType,
@@ -754,10 +751,7 @@ fn consume_body_with_promise<T: BodyMixin + DomObject>(
     // Step 2.
     let stream = match object.body() {
         Some(stream) => stream,
-        None => {
-            let stream = ReadableStream::new_from_bytes(&global, Vec::with_capacity(0));
-            stream
-        },
+        None => ReadableStream::new_from_bytes(&global, Vec::with_capacity(0)),
     };
 
     // Step 3.

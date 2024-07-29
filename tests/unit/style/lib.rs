@@ -15,14 +15,10 @@ extern crate selectors;
 extern crate serde_json;
 extern crate servo_arc;
 extern crate servo_atoms;
-extern crate servo_config;
-extern crate servo_url;
-#[macro_use]
-extern crate size_of_test;
-#[macro_use]
 extern crate style;
 extern crate style_traits;
 extern crate test;
+extern crate url;
 
 mod animated_properties;
 mod attr;
@@ -31,9 +27,6 @@ mod logical_geometry;
 mod parsing;
 mod properties;
 mod rule_tree;
-mod size_of;
-mod specified_values;
 mod str;
 mod stylesheets;
 mod stylist;
-mod viewport;

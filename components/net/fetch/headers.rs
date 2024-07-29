@@ -2,9 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use headers::HeaderMap;
 use std::iter::Peekable;
 use std::str::Chars;
+
+use headers::HeaderMap;
+use net_traits::fetch::headers::get_value_from_header_list;
 
 /// <https://fetch.spec.whatwg.org/#http-tab-or-space>
 const HTTP_TAB_OR_SPACE: &[char] = &['\u{0009}', '\u{0020}'];
@@ -15,59 +17,63 @@ pub fn determine_nosniff(headers: &HeaderMap) -> bool {
 
     match values {
         None => false,
-        Some(values) => !values.is_empty() && (&values[0]).eq_ignore_ascii_case("nosniff"),
+        Some(values) => !values.is_empty() && values[0].eq_ignore_ascii_case("nosniff"),
     }
 }
 
 /// <https://fetch.spec.whatwg.org/#concept-header-list-get-decode-split>
 fn get_header_value_as_list(name: &str, headers: &HeaderMap) -> Option<Vec<String>> {
     fn char_is_not_quote_or_comma(c: char) -> bool {
-        return c != '\u{0022}' && c != '\u{002C}';
+        c != '\u{0022}' && c != '\u{002C}'
     }
 
     // Step 1
     let initial_value = get_value_from_header_list(name, headers);
 
     if let Some(input) = initial_value {
-        // Step 4
+        // https://fetch.spec.whatwg.org/#header-value-get-decode-and-split
+        // Step 1
+        let input = input.into_iter().map(char::from).collect::<String>();
+
+        // Step 2
         let mut position = input.chars().peekable();
 
-        // Step 5
+        // Step 3
         let mut values: Vec<String> = vec![];
 
-        // Step 6
+        // Step 4
         let mut value = String::new();
 
-        // Step 7
+        // Step 5
         while position.peek().is_some() {
-            // Step 7.1
+            // Step 5.1
             value += &*collect_sequence(&mut position, char_is_not_quote_or_comma);
 
-            // Step 7.2
+            // Step 5.2
             if let Some(&ch) = position.peek() {
                 if ch == '\u{0022}' {
-                    // Step 7.2.1.1
+                    // Step 5.2.1.1
                     value += &*collect_http_quoted_string(&mut position, false);
 
-                    // Step 7.2.1.2
+                    // Step 5.2.1.2
                     if position.peek().is_some() {
                         continue;
                     }
                 } else {
                     // ch == '\u{002C}'
 
-                    // Step 7.2.2.2
+                    // Step 5.2.2.2
                     position.next();
                 }
             }
 
-            // Step 7.3
+            // Step 5.3
             value = value.trim_matches(HTTP_TAB_OR_SPACE).to_string();
 
-            // Step 7.4
+            // Step 5.4
             values.push(value);
 
-            // Step 7.5
+            // Step 5.5
             value = String::new();
         }
 
@@ -75,7 +81,7 @@ fn get_header_value_as_list(name: &str, headers: &HeaderMap) -> Option<Vec<Strin
     }
 
     // Step 2
-    return None;
+    None
 }
 
 /// <https://infra.spec.whatwg.org/#collect-a-sequence-of-code-points>
@@ -96,13 +102,13 @@ where
     }
 
     // Step 3
-    return result;
+    result
 }
 
 /// <https://fetch.spec.whatwg.org/#collect-an-http-quoted-string>
 fn collect_http_quoted_string(position: &mut Peekable<Chars>, extract_value: bool) -> String {
     fn char_is_not_quote_or_backslash(c: char) -> bool {
-        return c != '\u{0022}' && c != '\u{005C}';
+        c != '\u{0022}' && c != '\u{005C}'
     }
 
     // Step 2
@@ -153,21 +159,5 @@ fn collect_http_quoted_string(position: &mut Peekable<Chars>, extract_value: boo
     }
 
     // Step 6, 7
-    return value;
-}
-
-/// <https://fetch.spec.whatwg.org/#concept-header-list-get>
-fn get_value_from_header_list(name: &str, headers: &HeaderMap) -> Option<String> {
-    let values = headers
-        .get_all(name)
-        .iter()
-        .map(|val| val.to_str().unwrap());
-
-    // Step 1
-    if values.size_hint() == (0, Some(0)) {
-        return None;
-    }
-
-    // Step 2
-    return Some(values.collect::<Vec<&str>>().join(", "));
+    value
 }

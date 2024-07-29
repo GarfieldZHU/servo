@@ -2,6 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::ToOwned;
+use std::mem;
+
+use devtools_traits::AttrInfo;
+use dom_struct::dom_struct;
+use html5ever::{namespace_url, ns, LocalName, Namespace, Prefix};
+use servo_atoms::Atom;
+use style::attr::{AttrIdentifier, AttrValue};
+use style::values::GenericAtomIdent;
+
 use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -14,20 +24,14 @@ use crate::dom::mutationobserver::{Mutation, MutationObserver};
 use crate::dom::node::Node;
 use crate::dom::virtualmethods::vtable_for;
 use crate::script_thread::ScriptThread;
-use devtools_traits::AttrInfo;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Namespace, Prefix};
-use servo_atoms::Atom;
-use std::borrow::ToOwned;
-use std::mem;
-use style::attr::{AttrIdentifier, AttrValue};
-use style::values::GenericAtomIdent;
 
 // https://dom.spec.whatwg.org/#interface-attr
 #[dom_struct]
 pub struct Attr {
     node_: Node,
+    #[no_trace]
     identifier: AttrIdentifier,
+    #[no_trace]
     value: DomRefCell<AttrValue>,
 
     /// the element that owns this attribute.
@@ -202,7 +206,7 @@ impl Attr {
             (Some(old), None) => {
                 // Already gone from the list of attributes of old owner.
                 assert!(
-                    old.get_attribute(&ns, &self.identifier.local_name)
+                    old.get_attribute(ns, &self.identifier.local_name)
                         .as_deref() !=
                         Some(self)
                 )
@@ -236,8 +240,8 @@ impl Attr {
 #[allow(unsafe_code)]
 pub trait AttrHelpersForLayout<'dom> {
     fn value(self) -> &'dom AttrValue;
-    fn as_str(self) -> &'dom str;
-    fn as_tokens(self) -> Option<&'dom [Atom]>;
+    fn as_str(&self) -> &'dom str;
+    fn to_tokens(self) -> Option<&'dom [Atom]>;
     fn local_name(self) -> &'dom LocalName;
     fn namespace(self) -> &'dom Namespace;
 }
@@ -250,12 +254,12 @@ impl<'dom> AttrHelpersForLayout<'dom> for LayoutDom<'dom, Attr> {
     }
 
     #[inline]
-    fn as_str(self) -> &'dom str {
-        &**self.value()
+    fn as_str(&self) -> &'dom str {
+        self.value()
     }
 
     #[inline]
-    fn as_tokens(self) -> Option<&'dom [Atom]> {
+    fn to_tokens(self) -> Option<&'dom [Atom]> {
         match *self.value() {
             AttrValue::TokenList(_, ref tokens) => Some(tokens),
             _ => None,
@@ -264,11 +268,11 @@ impl<'dom> AttrHelpersForLayout<'dom> for LayoutDom<'dom, Attr> {
 
     #[inline]
     fn local_name(self) -> &'dom LocalName {
-        unsafe { &self.unsafe_get().identifier.local_name.0 }
+        &self.unsafe_get().identifier.local_name.0
     }
 
     #[inline]
     fn namespace(self) -> &'dom Namespace {
-        unsafe { &self.unsafe_get().identifier.namespace.0 }
+        &self.unsafe_get().identifier.namespace.0
     }
 }

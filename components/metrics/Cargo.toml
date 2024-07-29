@@ -1,24 +1,23 @@
 [package]
 name = "metrics"
-version = "0.0.1"
-authors = ["The Servo Project Developers"]
-license = "MPL-2.0"
-edition = "2018"
-publish = false
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lib]
 name = "metrics"
 path = "lib.rs"
 
 [dependencies]
-gfx_traits = { path = "../gfx_traits" }
-ipc-channel = "0.14"
-log = "0.4"
-malloc_size_of = { path = "../malloc_size_of" }
-malloc_size_of_derive = "0.1"
-msg = { path = "../msg" }
-profile_traits = { path = "../profile_traits" }
-script_traits = { path = "../script_traits" }
+base = { workspace = true }
+fonts_traits = { workspace = true }
+ipc-channel = { workspace = true }
+log = { workspace = true }
+malloc_size_of = { workspace = true }
+malloc_size_of_derive = { workspace = true }
+profile_traits = { workspace = true }
+script_traits = { workspace = true }
 servo_config = { path = "../config" }
 servo_url = { path = "../url" }
-time = "0.1"

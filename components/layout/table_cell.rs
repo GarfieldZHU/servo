@@ -4,6 +4,21 @@
 
 //! CSS table formatting contexts.
 
+use std::fmt;
+
+use app_units::Au;
+use base::print_tree::PrintTree;
+use euclid::default::{Point2D, Rect, SideOffsets2D, Size2D};
+use log::{debug, trace};
+use script_layout_interface::wrapper_traits::ThreadSafeLayoutNode;
+use serde::Serialize;
+use style::logical_geometry::{LogicalMargin, LogicalRect, LogicalSize, WritingMode};
+use style::properties::ComputedValues;
+use style::values::computed::length::Size;
+use style::values::computed::Color;
+use style::values::generics::box_::{VerticalAlign, VerticalAlignKeyword};
+use style::values::specified::BorderStyle;
+
 use crate::block::{BlockFlow, ISizeAndMarginsComputer, MarginsMayCollapseFlag};
 use crate::context::LayoutContext;
 use crate::display_list::{
@@ -11,20 +26,9 @@ use crate::display_list::{
 };
 use crate::flow::{Flow, FlowClass, FlowFlags, GetBaseFlow, OpaqueFlow};
 use crate::fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
-use crate::layout_debug;
 use crate::table::InternalTable;
-use crate::table_row::{CollapsedBorder, CollapsedBorderProvenance};
-use app_units::Au;
-use euclid::default::{Point2D, Rect, SideOffsets2D, Size2D};
-use gfx_traits::print_tree::PrintTree;
-use script_layout_interface::wrapper_traits::ThreadSafeLayoutNode;
-use std::fmt;
-use style::logical_geometry::{LogicalMargin, LogicalRect, LogicalSize, WritingMode};
-use style::properties::ComputedValues;
-use style::values::computed::length::Size;
-use style::values::computed::Color;
-use style::values::generics::box_::{VerticalAlign, VerticalAlignKeyword};
-use style::values::specified::BorderStyle;
+use crate::table_row::{CollapsedBorder, CollapsedBorderFrom};
+use crate::{layout_debug, layout_debug_scope};
 
 #[allow(unsafe_code)]
 unsafe impl crate::flow::HasBaseFlow for TableCellFlow {}
@@ -69,9 +73,9 @@ impl TableCellFlow {
         TableCellFlow {
             block_flow: BlockFlow::from_fragment(fragment),
             collapsed_borders: CollapsedBordersForCell::new(),
-            column_span: node.get_colspan(),
-            row_span: node.get_rowspan(),
-            visible: visible,
+            column_span: node.get_colspan().unwrap_or(1),
+            row_span: node.get_rowspan().unwrap_or(1),
+            visible,
         }
     }
 
@@ -252,6 +256,7 @@ impl Flow for TableCellFlow {
             "assign_inline_sizes({}): assigning inline_size for flow",
             "table_cell"
         );
+        trace!("TableCellFlow before assigning: {:?}", &self);
 
         let shared_context = layout_context.shared_context();
         // The position was set to the column inline-size by the parent flow, table row flow.
@@ -280,11 +285,17 @@ impl Flow for TableCellFlow {
             content_inline_size,
             |_, _, _, _, _, _| {},
         );
+
+        trace!("TableCellFlow after assigning: {:?}", &self);
     }
 
     fn assign_block_size(&mut self, layout_context: &LayoutContext) {
         debug!("assign_block_size: assigning block_size for table_cell");
+        trace!("TableCellFlow before assigning: {:?}", &self);
+
         self.assign_block_size_table_cell_base(layout_context);
+
+        trace!("TableCellFlow after assigning: {:?}", &self);
     }
 
     fn compute_stacking_relative_position(&mut self, layout_context: &LayoutContext) {
@@ -368,7 +379,7 @@ impl fmt::Debug for TableCellFlow {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CollapsedBordersForCell {
     pub inline_start_border: CollapsedBorder,
     pub inline_end_border: CollapsedBorder,
@@ -395,19 +406,19 @@ impl CollapsedBordersForCell {
     }
 
     fn should_paint_inline_start_border(&self) -> bool {
-        self.inline_start_border.provenance != CollapsedBorderProvenance::FromPreviousTableCell
+        self.inline_start_border.provenance != CollapsedBorderFrom::PreviousTableCell
     }
 
     fn should_paint_inline_end_border(&self) -> bool {
-        self.inline_end_border.provenance != CollapsedBorderProvenance::FromNextTableCell
+        self.inline_end_border.provenance != CollapsedBorderFrom::NextTableCell
     }
 
     fn should_paint_block_start_border(&self) -> bool {
-        self.block_start_border.provenance != CollapsedBorderProvenance::FromPreviousTableCell
+        self.block_start_border.provenance != CollapsedBorderFrom::PreviousTableCell
     }
 
     fn should_paint_block_end_border(&self) -> bool {
-        self.block_end_border.provenance != CollapsedBorderProvenance::FromNextTableCell
+        self.block_end_border.provenance != CollapsedBorderFrom::NextTableCell
     }
 
     pub fn adjust_border_widths_for_painting(&self, border_widths: &mut LogicalMargin<Au>) {
@@ -470,8 +481,8 @@ impl CollapsedBordersForCell {
         // FIXME(pcwalton): Get the real container size.
         let mut logical_bounds =
             LogicalRect::from_physical(writing_mode, *border_bounds, Size2D::new(Au(0), Au(0)));
-        logical_bounds.start.i = logical_bounds.start.i - inline_start_offset;
-        logical_bounds.start.b = logical_bounds.start.b - block_start_offset;
+        logical_bounds.start.i -= inline_start_offset;
+        logical_bounds.start.b -= block_start_offset;
         logical_bounds.size.inline =
             logical_bounds.size.inline + inline_start_offset + inline_end_offset;
         logical_bounds.size.block =
@@ -487,10 +498,10 @@ impl CollapsedBordersForCell {
     ) {
         let logical_border_colors = LogicalMargin::new(
             writing_mode,
-            self.block_start_border.color,
-            self.inline_end_border.color,
-            self.block_end_border.color,
-            self.inline_start_border.color,
+            self.block_start_border.color.clone(),
+            self.inline_end_border.color.clone(),
+            self.block_end_border.color.clone(),
+            self.inline_start_border.color.clone(),
         );
         *border_colors = logical_border_colors.to_physical(writing_mode);
 

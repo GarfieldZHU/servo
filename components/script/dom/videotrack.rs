@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::VideoTrackBinding::VideoTrackMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
@@ -9,8 +13,6 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::videotracklist::VideoTrackList;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use std::cell::Cell;
 
 #[dom_struct]
 pub struct VideoTrack {
@@ -33,12 +35,12 @@ impl VideoTrack {
     ) -> VideoTrack {
         VideoTrack {
             reflector_: Reflector::new(),
-            id: id.into(),
-            kind: kind.into(),
-            label: label.into(),
-            language: language.into(),
+            id,
+            kind,
+            label,
+            language,
             selected: Cell::new(false),
-            track_list: DomRefCell::new(track_list.map(|t| Dom::from_ref(t))),
+            track_list: DomRefCell::new(track_list.map(Dom::from_ref)),
         }
     }
 
@@ -67,7 +69,7 @@ impl VideoTrack {
     }
 
     pub fn selected(&self) -> bool {
-        self.selected.get().clone()
+        self.selected.get()
     }
 
     pub fn set_selected(&self, value: bool) {

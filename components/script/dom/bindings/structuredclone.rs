@@ -2,8 +2,30 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! This module implements structured cloning, as defined by [HTML]
-//! (https://html.spec.whatwg.org/multipage/#safe-passing-of-structured-data).
+//! This module implements structured cloning, as defined by [HTML](https://html.spec.whatwg.org/multipage/#safe-passing-of-structured-data).
+
+use std::collections::HashMap;
+use std::os::raw;
+use std::ptr;
+
+use base::id::{BlobId, MessagePortId};
+use js::glue::{
+    CopyJSStructuredCloneData, DeleteJSAutoStructuredCloneBuffer, GetLengthOfJSStructuredCloneData,
+    NewJSAutoStructuredCloneBuffer, WriteBytesToJSStructuredCloneData,
+};
+use js::jsapi::{
+    CloneDataPolicy, HandleObject as RawHandleObject, JSContext, JSObject,
+    JSStructuredCloneCallbacks, JSStructuredCloneReader, JSStructuredCloneWriter,
+    JS_ClearPendingException, JS_ReadUint32Pair, JS_WriteUint32Pair,
+    MutableHandleObject as RawMutableHandleObject, StructuredCloneScope, TransferableOwnership,
+    JS_STRUCTURED_CLONE_VERSION,
+};
+use js::jsval::UndefinedValue;
+use js::rust::wrappers::{JS_ReadStructuredClone, JS_WriteStructuredClone};
+use js::rust::{CustomAutoRooterGuard, HandleValue, MutableHandleValue};
+use script_traits::serializable::BlobImpl;
+use script_traits::transferable::MessagePortImpl;
+use script_traits::StructuredSerializedData;
 
 use crate::dom::bindings::conversions::{root_from_object, ToJSValConvertible};
 use crate::dom::bindings::error::{Error, Fallible};
@@ -16,49 +38,25 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::messageport::MessagePort;
 use crate::realms::{enter_realm, AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext as SafeJSContext;
-use js::glue::CopyJSStructuredCloneData;
-use js::glue::DeleteJSAutoStructuredCloneBuffer;
-use js::glue::GetLengthOfJSStructuredCloneData;
-use js::glue::NewJSAutoStructuredCloneBuffer;
-use js::glue::WriteBytesToJSStructuredCloneData;
-use js::jsapi::CloneDataPolicy;
-use js::jsapi::HandleObject as RawHandleObject;
-use js::jsapi::JSContext;
-use js::jsapi::MutableHandleObject as RawMutableHandleObject;
-use js::jsapi::StructuredCloneScope;
-use js::jsapi::TransferableOwnership;
-use js::jsapi::JS_STRUCTURED_CLONE_VERSION;
-use js::jsapi::{JSObject, JS_ClearPendingException};
-use js::jsapi::{JSStructuredCloneCallbacks, JSStructuredCloneReader, JSStructuredCloneWriter};
-use js::jsapi::{JS_ReadUint32Pair, JS_WriteUint32Pair};
-use js::jsval::UndefinedValue;
-use js::rust::wrappers::{JS_ReadStructuredClone, JS_WriteStructuredClone};
-use js::rust::{CustomAutoRooterGuard, HandleValue, MutableHandleValue};
-use msg::constellation_msg::{BlobId, MessagePortId};
-use script_traits::serializable::BlobImpl;
-use script_traits::transferable::MessagePortImpl;
-use script_traits::StructuredSerializedData;
-use std::collections::HashMap;
-use std::os::raw;
-use std::ptr;
 
 // TODO: Should we add Min and Max const to https://github.com/servo/rust-mozjs/blob/master/src/consts.rs?
 // TODO: Determine for sure which value Min and Max should have.
 // NOTE: Current values found at https://dxr.mozilla.org/mozilla-central/
 // rev/ff04d410e74b69acfab17ef7e73e7397602d5a68/js/public/StructuredClone.h#323
 #[repr(u32)]
-enum StructuredCloneTags {
+pub(super) enum StructuredCloneTags {
     /// To support additional types, add new tags with values incremented from the last one before Max.
     Min = 0xFFFF8000,
     DomBlob = 0xFFFF8001,
     MessagePort = 0xFFFF8002,
+    Principals = 0xFFFF8003,
     Max = 0xFFFFFFFF,
 }
 
 unsafe fn read_blob(
     owner: &GlobalScope,
     r: *mut JSStructuredCloneReader,
-    mut sc_holder: &mut StructuredDataHolder,
+    sc_holder: &mut StructuredDataHolder,
 ) -> *mut JSObject {
     let mut name_space: u32 = 0;
     let mut index: u32 = 0;
@@ -68,7 +66,7 @@ unsafe fn read_blob(
         &mut index as *mut u32
     ));
     let storage_key = StorageKey { index, name_space };
-    if <Blob as Serializable>::deserialize(&owner, &mut sc_holder, storage_key.clone()).is_ok() {
+    if <Blob as Serializable>::deserialize(owner, sc_holder, storage_key).is_ok() {
         let blobs = match sc_holder {
             StructuredDataHolder::Read { blobs, .. } => blobs,
             _ => panic!("Unexpected variant of StructuredDataHolder"),
@@ -110,7 +108,7 @@ unsafe fn write_blob(
         "Writing structured data for a blob failed in {:?}.",
         owner.get_url()
     );
-    return false;
+    false
 }
 
 unsafe extern "C" fn read_callback(
@@ -137,7 +135,7 @@ unsafe extern "C" fn read_callback(
             &mut *(closure as *mut StructuredDataHolder),
         );
     }
-    return ptr::null_mut();
+    ptr::null_mut()
 }
 
 unsafe extern "C" fn write_callback(
@@ -156,7 +154,7 @@ unsafe extern "C" fn write_callback(
             &mut *(closure as *mut StructuredDataHolder),
         );
     }
-    return false;
+    false
 }
 
 unsafe extern "C" fn read_transfer_callback(
@@ -169,15 +167,17 @@ unsafe extern "C" fn read_transfer_callback(
     return_object: RawMutableHandleObject,
 ) -> bool {
     if tag == StructuredCloneTags::MessagePort as u32 {
-        let mut sc_holder = &mut *(closure as *mut StructuredDataHolder);
+        let sc_holder = &mut *(closure as *mut StructuredDataHolder);
         let in_realm_proof = AlreadyInRealm::assert_for_cx(SafeJSContext::from_ptr(cx));
         let owner = GlobalScope::from_context(cx, InRealm::Already(&in_realm_proof));
-        if let Ok(_) = <MessagePort as Transferable>::transfer_receive(
+        if <MessagePort as Transferable>::transfer_receive(
             &owner,
-            &mut sc_holder,
+            sc_holder,
             extra_data,
             return_object,
-        ) {
+        )
+        .is_ok()
+        {
             return true;
         }
     }
@@ -197,8 +197,8 @@ unsafe extern "C" fn write_transfer_callback(
     if let Ok(port) = root_from_object::<MessagePort>(*obj, cx) {
         *tag = StructuredCloneTags::MessagePort as u32;
         *ownership = TransferableOwnership::SCTAG_TMO_CUSTOM;
-        let mut sc_holder = &mut *(closure as *mut StructuredDataHolder);
-        if let Ok(data) = port.transfer(&mut sc_holder) {
+        let sc_holder = &mut *(closure as *mut StructuredDataHolder);
+        if let Ok(data) = port.transfer(sc_holder) {
             *extra_data = data;
             return true;
         }
@@ -255,7 +255,7 @@ static STRUCTURED_CLONE_CALLBACKS: JSStructuredCloneCallbacks = JSStructuredClon
 };
 
 /// A data holder for results from, and inputs to, structured-data read/write operations.
-/// https://html.spec.whatwg.org/multipage/#safe-passing-of-structured-data
+/// <https://html.spec.whatwg.org/multipage/#safe-passing-of-structured-data>
 pub enum StructuredDataHolder {
     Read {
         /// A map of deserialized blobs, stored temporarily here to keep them rooted.
@@ -351,8 +351,8 @@ pub fn read(
     mut data: StructuredSerializedData,
     rval: MutableHandleValue,
 ) -> Result<Vec<DomRoot<MessagePort>>, ()> {
-    let cx = global.get_cx();
-    let _ac = enter_realm(&*global);
+    let cx = GlobalScope::get_cx();
+    let _ac = enter_realm(global);
     let mut sc_holder = StructuredDataHolder::Read {
         blobs: None,
         message_ports: None,

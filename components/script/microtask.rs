@@ -6,6 +6,13 @@
 //! microtask queues. It is up to implementations of event loops to store a queue and
 //! perform checkpoints at appropriate times, as well as enqueue microtasks as required.
 
+use std::cell::Cell;
+use std::mem;
+use std::rc::Rc;
+
+use base::id::PipelineId;
+use js::jsapi::{JSAutoRealm, JobQueueIsEmpty, JobQueueMayNotBeEmpty};
+
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::PromiseBinding::PromiseJobCallback;
@@ -15,13 +22,9 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlimageelement::ImageElementMicrotask;
 use crate::dom::htmlmediaelement::MediaElementMicrotask;
 use crate::dom::mutationobserver::MutationObserver;
+use crate::realms::enter_realm;
 use crate::script_runtime::{notify_about_rejected_promises, JSContext};
 use crate::script_thread::ScriptThread;
-use js::jsapi::{JobQueueIsEmpty, JobQueueMayNotBeEmpty};
-use msg::constellation_msg::PipelineId;
-use std::cell::Cell;
-use std::mem;
-use std::rc::Rc;
 
 /// A collection of microtasks in FIFO order.
 #[derive(Default, JSTraceable, MallocSizeOf)]
@@ -44,6 +47,7 @@ pub enum Microtask {
 
 pub trait MicrotaskRunnable {
     fn handler(&self) {}
+    fn enter_realm(&self) -> JSAutoRealm;
 }
 
 /// A promise callback scheduled to run during the next microtask checkpoint (#4283).
@@ -51,6 +55,7 @@ pub trait MicrotaskRunnable {
 pub struct EnqueuedPromiseCallback {
     #[ignore_malloc_size_of = "Rc has unclear ownership"]
     pub callback: Rc<PromiseJobCallback>,
+    #[no_trace]
     pub pipeline: PipelineId,
     pub is_user_interacting: bool,
 }
@@ -61,6 +66,7 @@ pub struct EnqueuedPromiseCallback {
 pub struct UserMicrotask {
     #[ignore_malloc_size_of = "Rc has unclear ownership"]
     pub callback: Rc<VoidFunction>,
+    #[no_trace]
     pub pipeline: PipelineId,
 }
 
@@ -108,19 +114,23 @@ impl MicrotaskQueue {
                         if let Some(target) = target_provider(job.pipeline) {
                             let was_interacting = ScriptThread::is_user_interacting();
                             ScriptThread::set_user_interacting(job.is_user_interacting);
+                            let _realm = enter_realm(&*target);
                             let _ = job.callback.Call_(&*target, ExceptionHandling::Report);
                             ScriptThread::set_user_interacting(was_interacting);
                         }
                     },
                     Microtask::User(ref job) => {
                         if let Some(target) = target_provider(job.pipeline) {
+                            let _realm = enter_realm(&*target);
                             let _ = job.callback.Call_(&*target, ExceptionHandling::Report);
                         }
                     },
                     Microtask::MediaElement(ref task) => {
+                        let _realm = task.enter_realm();
                         task.handler();
                     },
                     Microtask::ImageElement(ref task) => {
+                        let _realm = task.enter_realm();
                         task.handler();
                     },
                     Microtask::CustomElementReaction => {

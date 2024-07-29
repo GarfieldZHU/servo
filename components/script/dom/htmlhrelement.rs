@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use style::attr::{AttrValue, LengthOrPercentageOrAuto};
+use style::color::AbsoluteColor;
+
 use crate::dom::bindings::codegen::Bindings::HTMLHRElementBinding::HTMLHRElementMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{DomRoot, LayoutDom};
@@ -11,10 +17,6 @@ use crate::dom::element::{Element, LayoutElementHelpers};
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::node::Node;
 use crate::dom::virtualmethods::VirtualMethods;
-use cssparser::RGBA;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use style::attr::{AttrValue, LengthOrPercentageOrAuto};
 
 #[dom_struct]
 pub struct HTMLHRElement {
@@ -32,15 +34,17 @@ impl HTMLHRElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLHRElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLHRElement::new_inherited(local_name, prefix, document)),
             document,
+            proto,
         )
     }
 }
@@ -66,12 +70,12 @@ impl HTMLHRElementMethods for HTMLHRElement {
 }
 
 pub trait HTMLHRLayoutHelpers {
-    fn get_color(self) -> Option<RGBA>;
+    fn get_color(self) -> Option<AbsoluteColor>;
     fn get_width(self) -> LengthOrPercentageOrAuto;
 }
 
 impl HTMLHRLayoutHelpers for LayoutDom<'_, HTMLHRElement> {
-    fn get_color(self) -> Option<RGBA> {
+    fn get_color(self) -> Option<AbsoluteColor> {
         self.upcast::<Element>()
             .get_attr_for_layout(&ns!(), &local_name!("color"))
             .and_then(AttrValue::as_color)
@@ -93,10 +97,10 @@ impl VirtualMethods for HTMLHRElement {
     }
 
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
-        match name {
-            &local_name!("align") => AttrValue::from_dimension(value.into()),
-            &local_name!("color") => AttrValue::from_legacy_color(value.into()),
-            &local_name!("width") => AttrValue::from_dimension(value.into()),
+        match *name {
+            local_name!("align") => AttrValue::from_dimension(value.into()),
+            local_name!("color") => AttrValue::from_legacy_color(value.into()),
+            local_name!("width") => AttrValue::from_dimension(value.into()),
             _ => self
                 .super_type()
                 .unwrap()

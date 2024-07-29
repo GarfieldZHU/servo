@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, LocalName, Prefix};
+use js::rust::HandleObject;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::HTMLDetailsElementBinding::HTMLDetailsElementMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -14,9 +20,6 @@ use crate::dom::htmlelement::HTMLElement;
 use crate::dom::node::{window_from_node, Node, NodeDamage};
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use std::cell::Cell;
 
 #[dom_struct]
 pub struct HTMLDetailsElement {
@@ -36,17 +39,19 @@ impl HTMLDetailsElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLDetailsElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLDetailsElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 

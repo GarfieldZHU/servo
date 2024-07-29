@@ -2,24 +2,37 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_media::streams::registry::MediaStreamId;
+use servo_media::streams::MediaStreamType;
+use servo_media::webrtc::{
+    BundlePolicy, DataChannelEvent, DataChannelId, DataChannelState, GatheringState, IceCandidate,
+    IceConnectionState, SdpType, SessionDescription, SignalingState, WebRtcController,
+    WebRtcSignaller,
+};
+use servo_media::ServoMedia;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::RTCDataChannelBinding::RTCDataChannelInit;
 use crate::dom::bindings::codegen::Bindings::RTCIceCandidateBinding::RTCIceCandidateInit;
-use crate::dom::bindings::codegen::Bindings::RTCPeerConnectionBinding::RTCPeerConnectionMethods;
 use crate::dom::bindings::codegen::Bindings::RTCPeerConnectionBinding::{
     RTCAnswerOptions, RTCBundlePolicy, RTCConfiguration, RTCIceConnectionState,
-    RTCIceGatheringState, RTCOfferOptions, RTCRtpTransceiverInit, RTCSignalingState,
+    RTCIceGatheringState, RTCOfferOptions, RTCPeerConnectionMethods, RTCRtpTransceiverInit,
+    RTCSignalingState,
 };
 use crate::dom::bindings::codegen::Bindings::RTCSessionDescriptionBinding::{
     RTCSdpType, RTCSessionDescriptionInit,
 };
 use crate::dom::bindings::codegen::UnionTypes::{MediaStreamTrackOrString, StringOrStringSequence};
-use crate::dom::bindings::error::Error;
-use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
-use crate::dom::bindings::reflector::reflect_dom_object;
-use crate::dom::bindings::reflector::DomObject;
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::USVString;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
@@ -40,25 +53,12 @@ use crate::realms::{enter_realm, InRealm};
 use crate::task::TaskCanceller;
 use crate::task_source::networking::NetworkingTaskSource;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-
-use servo_media::streams::registry::MediaStreamId;
-use servo_media::streams::MediaStreamType;
-use servo_media::webrtc::{
-    BundlePolicy, DataChannelEvent, DataChannelId, DataChannelState, GatheringState, IceCandidate,
-    IceConnectionState, SdpType, SessionDescription, SignalingState, WebRtcController,
-    WebRtcSignaller,
-};
-use servo_media::ServoMedia;
-
-use std::cell::Cell;
-use std::collections::HashMap;
-use std::rc::Rc;
 
 #[dom_struct]
 pub struct RTCPeerConnection {
     eventtarget: EventTarget,
     #[ignore_malloc_size_of = "defined in servo-media"]
+    #[no_trace]
     controller: DomRefCell<Option<WebRtcController>>,
     closed: Cell<bool>,
     // Helps track state changes between the time createOffer/createAnswer
@@ -193,15 +193,23 @@ impl RTCPeerConnection {
         }
     }
 
-    pub fn new(global: &GlobalScope, config: &RTCConfiguration) -> DomRoot<RTCPeerConnection> {
-        let this = reflect_dom_object(Box::new(RTCPeerConnection::new_inherited()), global);
+    fn new(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        config: &RTCConfiguration,
+    ) -> DomRoot<RTCPeerConnection> {
+        let this = reflect_dom_object_with_proto(
+            Box::new(RTCPeerConnection::new_inherited()),
+            global,
+            proto,
+        );
         let signaller = this.make_signaller();
         *this.controller.borrow_mut() = Some(ServoMedia::get().unwrap().create_webrtc(signaller));
         if let Some(ref servers) = config.iceServers {
-            if let Some(ref server) = servers.get(0) {
+            if let Some(server) = servers.first() {
                 let server = match server.urls {
                     StringOrStringSequence::String(ref s) => Some(s.clone()),
-                    StringOrStringSequence::StringSequence(ref s) => s.get(0).cloned(),
+                    StringOrStringSequence::StringSequence(ref s) => s.first().cloned(),
                 };
                 if let Some(server) = server {
                     let policy = match config.bundlePolicy {
@@ -223,9 +231,10 @@ impl RTCPeerConnection {
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         config: &RTCConfiguration,
     ) -> Fallible<DomRoot<RTCPeerConnection>> {
-        Ok(RTCPeerConnection::new(&window.global(), config))
+        Ok(RTCPeerConnection::new(&window.global(), proto, config))
     }
 
     pub fn get_webrtc_controller(&self) -> &DomRefCell<Option<WebRtcController>> {
@@ -298,7 +307,7 @@ impl RTCPeerConnection {
             DataChannelEvent::NewChannel => {
                 let channel = RTCDataChannel::new(
                     &self.global(),
-                    &self,
+                    self,
                     USVString::from("".to_owned()),
                     &RTCDataChannelInit::empty(),
                     Some(channel_id),
@@ -348,10 +357,10 @@ impl RTCPeerConnection {
     }
 
     pub fn unregister_data_channel(&self, id: &DataChannelId) {
-        self.data_channels.borrow_mut().remove(&id);
+        self.data_channels.borrow_mut().remove(id);
     }
 
-    /// https://www.w3.org/TR/webrtc/#update-ice-gathering-state
+    /// <https://www.w3.org/TR/webrtc/#update-ice-gathering-state>
     fn update_gathering_state(&self, state: GatheringState) {
         // step 1
         if self.closed.get() {
@@ -391,7 +400,7 @@ impl RTCPeerConnection {
         }
     }
 
-    /// https://www.w3.org/TR/webrtc/#update-ice-connection-state
+    /// <https://www.w3.org/TR/webrtc/#update-ice-connection-state>
     fn update_ice_connection_state(&self, state: IceConnectionState) {
         // step 1
         if self.closed.get() {
@@ -449,8 +458,11 @@ impl RTCPeerConnection {
             .task_manager()
             .networking_task_source_with_canceller();
         let this = Trusted::new(self);
-        self.controller.borrow_mut().as_ref().unwrap().create_offer(
-            (move |desc: SessionDescription| {
+        self.controller
+            .borrow_mut()
+            .as_ref()
+            .unwrap()
+            .create_offer(Box::new(move |desc: SessionDescription| {
                 let _ = task_source.queue_with_canceller(
                     task!(offer_created: move || {
                         let this = this.root();
@@ -467,9 +479,7 @@ impl RTCPeerConnection {
                     }),
                     &canceller,
                 );
-            })
-            .into(),
-        );
+            }));
     }
 
     fn create_answer(&self) {
@@ -484,27 +494,24 @@ impl RTCPeerConnection {
             .borrow_mut()
             .as_ref()
             .unwrap()
-            .create_answer(
-                (move |desc: SessionDescription| {
-                    let _ = task_source.queue_with_canceller(
-                        task!(answer_created: move || {
-                            let this = this.root();
-                            if this.offer_answer_generation.get() != generation {
-                                // the state has changed since we last created the offer,
-                                // create a fresh one
-                                this.create_answer();
-                            } else {
-                                let init: RTCSessionDescriptionInit = desc.into();
-                                for promise in this.answer_promises.borrow_mut().drain(..) {
-                                    promise.resolve_native(&init);
-                                }
+            .create_answer(Box::new(move |desc: SessionDescription| {
+                let _ = task_source.queue_with_canceller(
+                    task!(answer_created: move || {
+                        let this = this.root();
+                        if this.offer_answer_generation.get() != generation {
+                            // the state has changed since we last created the offer,
+                            // create a fresh one
+                            this.create_answer();
+                        } else {
+                            let init: RTCSessionDescriptionInit = desc.into();
+                            for promise in this.answer_promises.borrow_mut().drain(..) {
+                                promise.resolve_native(&init);
                             }
-                        }),
-                        &canceller,
-                    );
-                })
-                .into(),
-            );
+                        }
+                    }),
+                    &canceller,
+                );
+            }));
     }
 }
 
@@ -546,21 +553,21 @@ impl RTCPeerConnectionMethods for RTCPeerConnection {
     // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-ondatachannel
     event_handler!(datachannel, GetOndatachannel, SetOndatachannel);
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-addicecandidate
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-addicecandidate>
     fn AddIceCandidate(&self, candidate: &RTCIceCandidateInit, comp: InRealm) -> Rc<Promise> {
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
         if candidate.sdpMid.is_none() && candidate.sdpMLineIndex.is_none() {
-            p.reject_error(Error::Type(format!(
-                "one of sdpMid and sdpMLineIndex must be set"
-            )));
+            p.reject_error(Error::Type(
+                "one of sdpMid and sdpMLineIndex must be set".to_string(),
+            ));
             return p;
         }
 
         // XXXManishearth add support for sdpMid
         if candidate.sdpMLineIndex.is_none() {
-            p.reject_error(Error::Type(format!(
-                "servo only supports sdpMLineIndex right now"
-            )));
+            p.reject_error(Error::Type(
+                "servo only supports sdpMLineIndex right now".to_string(),
+            ));
             return p;
         }
 
@@ -581,9 +588,9 @@ impl RTCPeerConnectionMethods for RTCPeerConnection {
         p
     }
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-createoffer
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-createoffer>
     fn CreateOffer(&self, _options: &RTCOfferOptions, comp: InRealm) -> Rc<Promise> {
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
         if self.closed.get() {
             p.reject_error(Error::InvalidState);
             return p;
@@ -593,9 +600,9 @@ impl RTCPeerConnectionMethods for RTCPeerConnection {
         p
     }
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-createoffer
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-createoffer>
     fn CreateAnswer(&self, _options: &RTCAnswerOptions, comp: InRealm) -> Rc<Promise> {
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
         if self.closed.get() {
             p.reject_error(Error::InvalidState);
             return p;
@@ -605,20 +612,20 @@ impl RTCPeerConnectionMethods for RTCPeerConnection {
         p
     }
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-localdescription
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-localdescription>
     fn GetLocalDescription(&self) -> Option<DomRoot<RTCSessionDescription>> {
         self.local_description.get()
     }
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-remotedescription
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-remotedescription>
     fn GetRemoteDescription(&self) -> Option<DomRoot<RTCSessionDescription>> {
         self.remote_description.get()
     }
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-setlocaldescription
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-setlocaldescription>
     fn SetLocalDescription(&self, desc: &RTCSessionDescriptionInit, comp: InRealm) -> Rc<Promise> {
         // XXXManishearth validate the current state
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
         let this = Trusted::new(self);
         let desc: SessionDescription = desc.into();
         let trusted_promise = TrustedPromise::new(p.clone());
@@ -631,27 +638,34 @@ impl RTCPeerConnectionMethods for RTCPeerConnection {
             .borrow_mut()
             .as_ref()
             .unwrap()
-            .set_local_description(desc.clone(), (move || {
+            .set_local_description(
+                desc.clone(),
+                Box::new(move || {
                     let _ = task_source.queue_with_canceller(
                         task!(local_description_set: move || {
                             // XXXManishearth spec actually asks for an intricate
                             // dance between pending/current local/remote descriptions
                             let this = this.root();
                             let desc = desc.into();
-                            let desc = RTCSessionDescription::Constructor(&this.global().as_window(), &desc).unwrap();
+                            let desc = RTCSessionDescription::Constructor(
+                                this.global().as_window(),
+                                None,
+                                &desc,
+                            ).unwrap();
                             this.local_description.set(Some(&desc));
                             trusted_promise.root().resolve_native(&())
                         }),
                         &canceller,
                     );
-            }).into());
+                }),
+            );
         p
     }
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-setremotedescription
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-setremotedescription>
     fn SetRemoteDescription(&self, desc: &RTCSessionDescriptionInit, comp: InRealm) -> Rc<Promise> {
         // XXXManishearth validate the current state
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
         let this = Trusted::new(self);
         let desc: SessionDescription = desc.into();
         let trusted_promise = TrustedPromise::new(p.clone());
@@ -664,20 +678,27 @@ impl RTCPeerConnectionMethods for RTCPeerConnection {
             .borrow_mut()
             .as_ref()
             .unwrap()
-            .set_remote_description(desc.clone(), (move || {
+            .set_remote_description(
+                desc.clone(),
+                Box::new(move || {
                     let _ = task_source.queue_with_canceller(
                         task!(remote_description_set: move || {
                             // XXXManishearth spec actually asks for an intricate
                             // dance between pending/current local/remote descriptions
                             let this = this.root();
                             let desc = desc.into();
-                            let desc = RTCSessionDescription::Constructor(&this.global().as_window(), &desc).unwrap();
+                            let desc = RTCSessionDescription::Constructor(
+                                this.global().as_window(),
+                                None,
+                                &desc,
+                            ).unwrap();
                             this.remote_description.set(Some(&desc));
                             trusted_promise.root().resolve_native(&())
                         }),
                         &canceller,
                     );
-            }).into());
+                }),
+            );
         p
     }
 
@@ -692,22 +713,22 @@ impl RTCPeerConnectionMethods for RTCPeerConnection {
         }
     }
 
-    /// https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-icegatheringstate
+    /// <https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-icegatheringstate>
     fn IceGatheringState(&self) -> RTCIceGatheringState {
         self.gathering_state.get()
     }
 
-    /// https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-iceconnectionstate
+    /// <https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-iceconnectionstate>
     fn IceConnectionState(&self) -> RTCIceConnectionState {
         self.ice_connection_state.get()
     }
 
-    /// https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-signalingstate
+    /// <https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-signalingstate>
     fn SignalingState(&self) -> RTCSignalingState {
         self.signaling_state.get()
     }
 
-    /// https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close
+    /// <https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close>
     fn Close(&self) {
         // Step 1
         if self.closed.get() {
@@ -737,16 +758,16 @@ impl RTCPeerConnectionMethods for RTCPeerConnection {
         // (no current support for connection state)
     }
 
-    /// https://www.w3.org/TR/webrtc/#dom-peerconnection-createdatachannel
+    /// <https://www.w3.org/TR/webrtc/#dom-peerconnection-createdatachannel>
     fn CreateDataChannel(
         &self,
         label: USVString,
         init: &RTCDataChannelInit,
     ) -> DomRoot<RTCDataChannel> {
-        RTCDataChannel::new(&self.global(), &self, label, init, None)
+        RTCDataChannel::new(&self.global(), self, label, init, None)
     }
 
-    /// https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-addtransceiver
+    /// <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-addtransceiver>
     fn AddTransceiver(
         &self,
         _track_or_kind: MediaStreamTrackOrString,

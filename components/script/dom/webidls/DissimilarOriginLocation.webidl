@@ -14,12 +14,12 @@
 // way to enforce security policy.
 
 // https://html.spec.whatwg.org/multipage/#location
-[Exposed=(Window,DissimilarOriginWindow), Unforgeable, NoInterfaceObject]
+[Exposed=(Window,DissimilarOriginWindow), LegacyUnforgeable, LegacyNoInterfaceObject]
 interface DissimilarOriginLocation {
   [Throws] attribute USVString href;
-  [Throws] void assign(USVString url);
-  [Throws] void replace(USVString url);
-  [Throws] void reload();
+  [Throws] undefined assign(USVString url);
+  [Throws] undefined replace(USVString url);
+  [Throws] undefined reload();
   [Throws] stringifier;
 
   // TODO: finish this interface

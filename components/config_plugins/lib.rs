@@ -2,17 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#![feature(proc_macro_diagnostic)]
+use std::collections::{hash_map, HashMap};
+use std::fmt::Write;
+use std::iter;
 
 use itertools::Itertools;
 use proc_macro2::{Span, TokenStream};
 use quote::*;
-use std::collections::{hash_map, HashMap};
-use std::{fmt::Write, iter};
-use syn::{
-    parse::Result, parse_macro_input, spanned::Spanned, Attribute, Ident, Lit, LitStr, Meta,
-    MetaList, MetaNameValue, NestedMeta, Path,
-};
+use syn::parse::Result;
+use syn::spanned::Spanned;
+use syn::{parse_macro_input, Attribute, Ident, LitStr, Path};
 
 mod parse;
 use parse::*;
@@ -22,15 +21,7 @@ pub fn build_structs(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream
     let input: MacroInput = parse_macro_input!(tokens);
     let out = Build::new(&input)
         .build(&input.type_def)
-        .unwrap_or_else(|e| {
-            proc_macro::Diagnostic::spanned(
-                e.span().unwrap(),
-                proc_macro::Level::Error,
-                format!("{}", e),
-            )
-            .emit();
-            TokenStream::new()
-        });
+        .unwrap_or_else(|e| syn::Error::new(e.span(), e).to_compile_error());
     out.into()
 }
 
@@ -68,7 +59,7 @@ impl Build {
             self.path_stack.push(field.name.clone());
 
             if let FieldType::NewTypeDef(new_def) = &field.field_type {
-                self.walk(&new_def)?;
+                self.walk(new_def)?;
             } else {
                 let pref_name =
                     self.pref_name(field, &self.path_stack[..self.path_stack.len() - 1]);
@@ -154,7 +145,7 @@ impl Build {
                 }
             },
             FieldType::Existing(type_name) => {
-                let pref_name = self.pref_name(field, &path_stack);
+                let pref_name = self.pref_name(field, path_stack);
                 let attributes = field.get_attributes(&pref_name);
                 quote! {
                     #attributes
@@ -195,23 +186,19 @@ impl Field {
 }
 
 fn attr_to_pref_name(attr: &Attribute) -> Option<LitStr> {
-    attr.parse_meta().ok().and_then(|meta| {
-        if let Meta::List(MetaList { path, nested, .. }) = meta {
-            if path.is_ident("serde") {
-                if let Some(NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                    ref path,
-                    lit: Lit::Str(val),
-                    ..
-                }))) = nested.iter().next()
-                {
-                    if path.is_ident("rename") {
-                        return Some(val.clone());
-                    }
-                }
+    if attr.path().is_ident("serde") {
+        // If `parse_nested_meta()` fails, `result` will remain None.
+        let mut result = None;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename") {
+                result = Some(meta.value()?.parse()?);
             }
-        }
+            Ok(())
+        });
+        result
+    } else {
         None
-    })
+    }
 }
 
 fn err<S: Spanned>(s: S, msg: &str) -> syn::Error {

@@ -2,6 +2,27 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::sync::{Arc, Mutex};
+
+use dom_struct::dom_struct;
+use euclid::default::Size2D;
+use html5ever::{local_name, LocalName, Prefix};
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use js::rust::HandleObject;
+use net_traits::image_cache::{
+    ImageCache, ImageCacheResult, ImageOrMetadataAvailable, ImageResponse, PendingImageId,
+    UsePlaceholder,
+};
+use net_traits::request::{CredentialsMode, Destination, RequestBuilder};
+use net_traits::{
+    CoreResourceMsg, FetchChannels, FetchMetadata, FetchResponseListener, FetchResponseMsg,
+    NetworkError, ResourceFetchTiming, ResourceTimingType,
+};
+use servo_media::player::video::VideoFrame;
+use servo_url::ServoUrl;
+
 use crate::document_loader::{LoadBlocker, LoadType};
 use crate::dom::attr::Attr;
 use crate::dom::bindings::cell::DomRefCell;
@@ -21,24 +42,6 @@ use crate::dom::virtualmethods::VirtualMethods;
 use crate::fetch::FetchCanceller;
 use crate::image_listener::{generate_cache_listener_for_element, ImageCacheListener};
 use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
-use dom_struct::dom_struct;
-use euclid::default::Size2D;
-use html5ever::{LocalName, Prefix};
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use net_traits::image_cache::{
-    ImageCache, ImageCacheResult, ImageOrMetadataAvailable, ImageResponse, PendingImageId,
-    UsePlaceholder,
-};
-use net_traits::request::{CredentialsMode, Destination, RequestBuilder};
-use net_traits::{
-    CoreResourceMsg, FetchChannels, FetchMetadata, FetchResponseListener, FetchResponseMsg,
-};
-use net_traits::{NetworkError, ResourceFetchTiming, ResourceTimingType};
-use servo_media::player::video::VideoFrame;
-use servo_url::ServoUrl;
-use std::cell::Cell;
-use std::sync::{Arc, Mutex};
 
 const DEFAULT_WIDTH: u32 = 300;
 const DEFAULT_HEIGHT: u32 = 150;
@@ -46,9 +49,9 @@ const DEFAULT_HEIGHT: u32 = 150;
 #[dom_struct]
 pub struct HTMLVideoElement {
     htmlmediaelement: HTMLMediaElement,
-    /// https://html.spec.whatwg.org/multipage/#dom-video-videowidth
+    /// <https://html.spec.whatwg.org/multipage/#dom-video-videowidth>
     video_width: Cell<u32>,
-    /// https://html.spec.whatwg.org/multipage/#dom-video-videoheight
+    /// <https://html.spec.whatwg.org/multipage/#dom-video-videoheight>
     video_height: Cell<u32>,
     /// Incremented whenever tasks associated with this element are cancelled.
     generation_id: Cell<u32>,
@@ -59,6 +62,7 @@ pub struct HTMLVideoElement {
     load_blocker: DomRefCell<Option<LoadBlocker>>,
     /// A copy of the last frame
     #[ignore_malloc_size_of = "VideoFrame"]
+    #[no_trace]
     last_frame: DomRefCell<Option<VideoFrame>>,
 }
 
@@ -79,17 +83,19 @@ impl HTMLVideoElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLVideoElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLVideoElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 
@@ -107,10 +113,6 @@ impl HTMLVideoElement {
 
     pub fn set_video_height(&self, height: u32) {
         self.video_height.set(height);
-    }
-
-    pub fn allow_load_event(&self) {
-        LoadBlocker::terminate(&mut *self.load_blocker.borrow_mut());
     }
 
     pub fn get_current_frame_data(&self) -> Option<(Option<ipc::IpcSharedMemory>, Size2D<u32>)> {
@@ -134,7 +136,7 @@ impl HTMLVideoElement {
         }
     }
 
-    /// https://html.spec.whatwg.org/multipage/#poster-frame
+    /// <https://html.spec.whatwg.org/multipage/#poster-frame>
     fn fetch_poster_frame(&self, poster_url: &str) {
         // Step 1.
         let cancel_receiver = self.poster_frame_canceller.borrow_mut().initialize();
@@ -146,7 +148,7 @@ impl HTMLVideoElement {
         }
 
         // Step 3.
-        let poster_url = match document_from_node(self).url().join(&poster_url) {
+        let poster_url = match document_from_node(self).url().join(poster_url) {
             Ok(url) => url,
             Err(_) => return,
         };
@@ -180,7 +182,7 @@ impl HTMLVideoElement {
         }
     }
 
-    /// https://html.spec.whatwg.org/multipage/#poster-frame
+    /// <https://html.spec.whatwg.org/multipage/#poster-frame>
     fn do_fetch_poster_frame(
         &self,
         poster_url: ServoUrl,
@@ -203,7 +205,7 @@ impl HTMLVideoElement {
         // (which triggers no media load algorithm unless a explicit call to .load() is done)
         // will block the document's load event forever.
         let mut blocker = self.load_blocker.borrow_mut();
-        LoadBlocker::terminate(&mut *blocker);
+        LoadBlocker::terminate(&mut blocker);
         *blocker = Some(LoadBlocker::new(
             &document_from_node(self),
             LoadType::Image(poster_url.clone()),
@@ -277,12 +279,9 @@ impl VirtualMethods for HTMLVideoElement {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
 
         if let Some(new_value) = mutation.new_value(attr) {
-            match attr.local_name() {
-                &local_name!("poster") => {
-                    self.fetch_poster_frame(&new_value);
-                },
-                _ => (),
-            };
+            if attr.local_name() == &local_name!("poster") {
+                self.fetch_poster_frame(&new_value);
+            }
         }
     }
 }
@@ -293,7 +292,19 @@ impl ImageCacheListener for HTMLVideoElement {
     }
 
     fn process_image_response(&self, response: ImageResponse) {
-        self.htmlmediaelement.process_poster_response(response);
+        match response {
+            ImageResponse::Loaded(image, url) => {
+                debug!("Loaded poster image for video element: {:?}", url);
+                self.htmlmediaelement.process_poster_image_loaded(image);
+                LoadBlocker::terminate(&mut self.load_blocker.borrow_mut());
+            },
+            ImageResponse::MetadataLoaded(..) => {},
+            // The image cache may have loaded a placeholder for an invalid poster url
+            ImageResponse::PlaceholderLoaded(..) | ImageResponse::None => {
+                // A failed load should unblock the document load.
+                LoadBlocker::terminate(&mut self.load_blocker.borrow_mut());
+            },
+        }
     }
 }
 
@@ -351,7 +362,6 @@ impl FetchResponseListener for PosterFrameFetchContext {
     }
 
     fn process_response_eof(&mut self, response: Result<ResourceFetchTiming, NetworkError>) {
-        self.elem.root().allow_load_event();
         self.image_cache
             .notify_pending_response(self.id, FetchResponseMsg::ProcessResponseEOF(response));
     }

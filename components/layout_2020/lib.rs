@@ -4,48 +4,43 @@
 
 #![deny(unsafe_code)]
 
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate serde;
-
 mod cell;
 pub mod context;
-pub mod data;
 pub mod display_list;
+pub mod dom;
 mod dom_traversal;
-pub mod element_data;
 mod flexbox;
 pub mod flow;
 mod formatting_contexts;
-mod fragments;
+mod fragment_tree;
 pub mod geom;
 #[macro_use]
 pub mod layout_debug;
 mod lists;
-mod opaque_node;
 mod positioned;
 pub mod query;
 mod replaced;
 mod sizing;
 mod style_ext;
+pub mod table;
 pub mod traversal;
-pub mod wrapper;
 
-pub use flow::{BoxTree, FragmentTree};
-
-use crate::geom::flow_relative::Vec2;
+use app_units::Au;
+pub use flow::BoxTree;
+pub use fragment_tree::FragmentTree;
+use geom::AuOrAuto;
 use style::properties::ComputedValues;
-use style::values::computed::{Length, LengthOrAuto};
+
+use crate::geom::LogicalVec2;
 
 pub struct ContainingBlock<'a> {
-    inline_size: Length,
-    block_size: LengthOrAuto,
+    inline_size: Au,
+    block_size: AuOrAuto,
     style: &'a ComputedValues,
 }
 
 struct DefiniteContainingBlock<'a> {
-    size: Vec2<Length>,
+    size: LogicalVec2<Au>,
     style: &'a ComputedValues,
 }
 
@@ -53,7 +48,7 @@ impl<'a> From<&'_ DefiniteContainingBlock<'a>> for ContainingBlock<'a> {
     fn from(definite: &DefiniteContainingBlock<'a>) -> Self {
         ContainingBlock {
             inline_size: definite.size.inline,
-            block_size: LengthOrAuto::LengthPercentage(definite.size.block),
+            block_size: AuOrAuto::LengthPercentage(definite.size.block),
             style: definite.style,
         }
     }

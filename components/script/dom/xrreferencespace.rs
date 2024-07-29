@@ -2,8 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::XRReferenceSpaceBinding::XRReferenceSpaceMethods;
-use crate::dom::bindings::codegen::Bindings::XRReferenceSpaceBinding::XRReferenceSpaceType;
+use dom_struct::dom_struct;
+use euclid::RigidTransform3D;
+use webxr_api::{self, Frame, Space};
+
+use crate::dom::bindings::codegen::Bindings::XRReferenceSpaceBinding::{
+    XRReferenceSpaceMethods, XRReferenceSpaceType,
+};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -11,9 +16,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::xrrigidtransform::XRRigidTransform;
 use crate::dom::xrsession::{cast_transform, ApiPose, BaseTransform, XRSession};
 use crate::dom::xrspace::XRSpace;
-use dom_struct::dom_struct;
-use euclid::RigidTransform3D;
-use webxr_api::{self, Frame, Space};
 
 #[dom_struct]
 pub struct XRReferenceSpace {
@@ -53,7 +55,7 @@ impl XRReferenceSpace {
         offset: &XRRigidTransform,
     ) -> DomRoot<XRReferenceSpace> {
         reflect_dom_object(
-            Box::new(XRReferenceSpace::new_inherited(session, &offset, ty)),
+            Box::new(XRReferenceSpace::new_inherited(session, offset, ty)),
             global,
         )
     }
@@ -71,9 +73,9 @@ impl XRReferenceSpace {
 }
 
 impl XRReferenceSpaceMethods for XRReferenceSpace {
-    /// https://immersive-web.github.io/webxr/#dom-xrreferencespace-getoffsetreferencespace
+    /// <https://immersive-web.github.io/webxr/#dom-xrreferencespace-getoffsetreferencespace>
     fn GetOffsetReferenceSpace(&self, new: &XRRigidTransform) -> DomRoot<Self> {
-        let offset = self.offset.transform().pre_transform(&new.transform());
+        let offset = new.transform().then(&self.offset.transform());
         let offset = XRRigidTransform::new(&self.global(), offset);
         Self::new_offset(
             &self.global(),
@@ -106,7 +108,7 @@ impl XRReferenceSpace {
         // offset is a transform from offset space to unoffset space,
         // we want a transform from unoffset space to native space,
         // which is pose * offset in column vector notation
-        Some(pose.pre_transform(&offset))
+        Some(offset.then(&pose))
     }
 
     /// Gets pose represented by this space

@@ -2,6 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use embedder_traits::EmbedderMsg;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use servo_url::ServoUrl;
+use style::attr::AttrValue;
+use style::color::AbsoluteColor;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::codegen::Bindings::HTMLBodyElementBinding::HTMLBodyElementMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
@@ -14,12 +22,6 @@ use crate::dom::eventtarget::EventTarget;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::node::{document_from_node, window_from_node, BindContext, Node};
 use crate::dom::virtualmethods::VirtualMethods;
-use cssparser::RGBA;
-use dom_struct::dom_struct;
-use embedder_traits::EmbedderMsg;
-use html5ever::{LocalName, Prefix};
-use servo_url::ServoUrl;
-use style::attr::AttrValue;
 
 /// How long we should wait before performing the initial reflow after `<body>` is parsed, in
 /// nanoseconds.
@@ -41,15 +43,17 @@ impl HTMLBodyElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLBodyElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLBodyElement::new_inherited(local_name, prefix, document)),
             document,
+            proto,
         )
     }
 
@@ -83,8 +87,10 @@ impl HTMLBodyElementMethods for HTMLBodyElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-body-background
     fn SetBackground(&self, input: DOMString) {
-        let value =
-            AttrValue::from_resolved_url(&document_from_node(self).base_url(), input.into());
+        let value = AttrValue::from_resolved_url(
+            &document_from_node(self).base_url().get_arc(),
+            input.into(),
+        );
         self.upcast::<Element>()
             .set_attribute(&local_name!("background"), value);
     }
@@ -94,20 +100,20 @@ impl HTMLBodyElementMethods for HTMLBodyElement {
 }
 
 pub trait HTMLBodyElementLayoutHelpers {
-    fn get_background_color(self) -> Option<RGBA>;
-    fn get_color(self) -> Option<RGBA>;
+    fn get_background_color(self) -> Option<AbsoluteColor>;
+    fn get_color(self) -> Option<AbsoluteColor>;
     fn get_background(self) -> Option<ServoUrl>;
 }
 
 impl HTMLBodyElementLayoutHelpers for LayoutDom<'_, HTMLBodyElement> {
-    fn get_background_color(self) -> Option<RGBA> {
+    fn get_background_color(self) -> Option<AbsoluteColor> {
         self.upcast::<Element>()
             .get_attr_for_layout(&ns!(), &local_name!("bgcolor"))
             .and_then(AttrValue::as_color)
             .cloned()
     }
 
-    fn get_color(self) -> Option<RGBA> {
+    fn get_color(self) -> Option<AbsoluteColor> {
         self.upcast::<Element>()
             .get_attr_for_layout(&ns!(), &local_name!("text"))
             .and_then(AttrValue::as_color)
@@ -119,6 +125,7 @@ impl HTMLBodyElementLayoutHelpers for LayoutDom<'_, HTMLBodyElement> {
             .get_attr_for_layout(&ns!(), &local_name!("background"))
             .and_then(AttrValue::as_resolved_url)
             .cloned()
+            .map(Into::into)
     }
 }
 
@@ -138,7 +145,7 @@ impl VirtualMethods for HTMLBodyElement {
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
 
@@ -160,9 +167,10 @@ impl VirtualMethods for HTMLBodyElement {
             local_name!("bgcolor") | local_name!("text") => {
                 AttrValue::from_legacy_color(value.into())
             },
-            local_name!("background") => {
-                AttrValue::from_resolved_url(&document_from_node(self).base_url(), value.into())
-            },
+            local_name!("background") => AttrValue::from_resolved_url(
+                &document_from_node(self).base_url().get_arc(),
+                value.into(),
+            ),
             _ => self
                 .super_type()
                 .unwrap()

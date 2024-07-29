@@ -4,22 +4,23 @@
 
 //! Functions for validating and extracting qualified XML names.
 
+use html5ever::{namespace_url, ns, LocalName, Namespace, Prefix};
+
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::str::DOMString;
-use html5ever::{LocalName, Namespace, Prefix};
 
-/// Validate a qualified name. See https://dom.spec.whatwg.org/#validate for details.
+/// Validate a qualified name. See <https://dom.spec.whatwg.org/#validate> for details.
 pub fn validate_qualified_name(qualified_name: &str) -> ErrorResult {
     // Step 2.
     match xml_name_type(qualified_name) {
-        XMLName::InvalidXMLName => Err(Error::InvalidCharacter),
+        XMLName::Invalid => Err(Error::InvalidCharacter),
         XMLName::Name => Err(Error::InvalidCharacter), // see whatwg/dom#671
         XMLName::QName => Ok(()),
     }
 }
 
 /// Validate a namespace and qualified name and extract their parts.
-/// See https://dom.spec.whatwg.org/#validate-and-extract for details.
+/// See <https://dom.spec.whatwg.org/#validate-and-extract> for details.
 pub fn validate_and_extract(
     namespace: Option<DOMString>,
     qualified_name: &str,
@@ -82,15 +83,14 @@ pub fn validate_and_extract(
 pub enum XMLName {
     QName,
     Name,
-    InvalidXMLName,
+    Invalid,
 }
 
-/// Check if an element name is valid. See http://www.w3.org/TR/xml/#NT-Name
+/// Check if an element name is valid. See <http://www.w3.org/TR/xml/#NT-Name>
 /// for details.
 pub fn xml_name_type(name: &str) -> XMLName {
     fn is_valid_start(c: char) -> bool {
-        match c {
-            ':' |
+        matches!(c, ':' |
             'A'..='Z' |
             '_' |
             'a'..='z' |
@@ -105,32 +105,28 @@ pub fn xml_name_type(name: &str) -> XMLName {
             '\u{3001}'..='\u{D7FF}' |
             '\u{F900}'..='\u{FDCF}' |
             '\u{FDF0}'..='\u{FFFD}' |
-            '\u{10000}'..='\u{EFFFF}' => true,
-            _ => false,
-        }
+            '\u{10000}'..='\u{EFFFF}')
     }
 
     fn is_valid_continuation(c: char) -> bool {
         is_valid_start(c) ||
-            match c {
+            matches!(c,
                 '-' |
                 '.' |
                 '0'..='9' |
                 '\u{B7}' |
                 '\u{300}'..='\u{36F}' |
-                '\u{203F}'..='\u{2040}' => true,
-                _ => false,
-            }
+                '\u{203F}'..='\u{2040}')
     }
 
     let mut iter = name.chars();
     let mut non_qname_colons = false;
     let mut seen_colon = false;
     let mut last = match iter.next() {
-        None => return XMLName::InvalidXMLName,
+        None => return XMLName::Invalid,
         Some(c) => {
             if !is_valid_start(c) {
-                return XMLName::InvalidXMLName;
+                return XMLName::Invalid;
             }
             if c == ':' {
                 non_qname_colons = true;
@@ -141,7 +137,7 @@ pub fn xml_name_type(name: &str) -> XMLName {
 
     for c in iter {
         if !is_valid_continuation(c) {
-            return XMLName::InvalidXMLName;
+            return XMLName::Invalid;
         }
         if c == ':' {
             if seen_colon {

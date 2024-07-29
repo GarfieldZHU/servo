@@ -2,8 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::cmp::Ordering;
+
+use base::id::HistoryStateId;
+use dom_struct::dom_struct;
+use js::jsapi::Heap;
+use js::jsval::{JSVal, NullValue, UndefinedValue};
+use js::rust::HandleValue;
+use net_traits::{CoreResourceMsg, IpcSend};
+use profile_traits::ipc;
+use profile_traits::ipc::channel;
+use script_traits::{ScriptMsg, StructuredSerializedData, TraversalDirection};
+use servo_url::ServoUrl;
+
 use crate::dom::bindings::codegen::Bindings::HistoryBinding::HistoryMethods;
-use crate::dom::bindings::codegen::Bindings::LocationBinding::LocationBinding::LocationMethods;
+use crate::dom::bindings::codegen::Bindings::LocationBinding::Location_Binding::LocationMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -18,30 +32,20 @@ use crate::dom::hashchangeevent::HashChangeEvent;
 use crate::dom::popstateevent::PopStateEvent;
 use crate::dom::window::Window;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsapi::Heap;
-use js::jsval::{JSVal, NullValue, UndefinedValue};
-use js::rust::HandleValue;
-use msg::constellation_msg::{HistoryStateId, TraversalDirection};
-use net_traits::{CoreResourceMsg, IpcSend};
-use profile_traits::ipc;
-use profile_traits::ipc::channel;
-use script_traits::{ScriptMsg, StructuredSerializedData};
-use servo_url::ServoUrl;
-use std::cell::Cell;
 
 enum PushOrReplace {
     Push,
     Replace,
 }
 
-// https://html.spec.whatwg.org/multipage/#the-history-interface
+/// <https://html.spec.whatwg.org/multipage/#the-history-interface>
 #[dom_struct]
 pub struct History {
     reflector_: Reflector,
     window: Dom<Window>,
     #[ignore_malloc_size_of = "mozjs"]
     state: Heap<JSVal>,
+    #[no_trace]
     state_id: Cell<Option<HistoryStateId>>,
 }
 
@@ -51,8 +55,8 @@ impl History {
         state.set(NullValue());
         History {
             reflector_: Reflector::new(),
-            window: Dom::from_ref(&window),
-            state: state,
+            window: Dom::from_ref(window),
+            state,
             state_id: Cell::new(None),
         }
     }
@@ -76,8 +80,8 @@ impl History {
         Ok(())
     }
 
-    // https://html.spec.whatwg.org/multipage/#history-traversal
-    // Steps 5-16
+    /// <https://html.spec.whatwg.org/multipage/#history-traversal>
+    /// Steps 5-16
     #[allow(unsafe_code)]
     pub fn activate_state(&self, state_id: Option<HistoryStateId>, url: ServoUrl) {
         // Steps 5
@@ -117,8 +121,8 @@ impl History {
                     blobs: None,
                 };
                 let global_scope = self.window.upcast::<GlobalScope>();
-                rooted!(in(*global_scope.get_cx()) let mut state = UndefinedValue());
-                if let Err(_) = structuredclone::read(&global_scope, data, state.handle_mut()) {
+                rooted!(in(*GlobalScope::get_cx()) let mut state = UndefinedValue());
+                if structuredclone::read(global_scope, data, state.handle_mut()).is_err() {
                     warn!("Error reading structuredclone data");
                 }
                 self.state.set(state.get());
@@ -133,7 +137,7 @@ impl History {
         if state_changed {
             PopStateEvent::dispatch_jsval(
                 self.window.upcast::<EventTarget>(),
-                &*self.window,
+                &self.window,
                 unsafe { HandleValue::from_raw(self.state.handle()) },
             );
         }
@@ -162,8 +166,8 @@ impl History {
             .send(CoreResourceMsg::RemoveHistoryStates(states));
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-history-pushstate
-    // https://html.spec.whatwg.org/multipage/#dom-history-replacestate
+    /// <https://html.spec.whatwg.org/multipage/#dom-history-pushstate>
+    /// <https://html.spec.whatwg.org/multipage/#dom-history-replacestate>
     fn push_or_replace_state(
         &self,
         cx: JSContext,
@@ -267,7 +271,7 @@ impl History {
         // Step 11
         let global_scope = self.window.upcast::<GlobalScope>();
         rooted!(in(*cx) let mut state = UndefinedValue());
-        if let Err(_) = structuredclone::read(&global_scope, serialized_data, state.handle_mut()) {
+        if structuredclone::read(global_scope, serialized_data, state.handle_mut()).is_err() {
             warn!("Error reading structuredclone data");
         }
 
@@ -282,7 +286,7 @@ impl History {
 }
 
 impl HistoryMethods for History {
-    // https://html.spec.whatwg.org/multipage/#dom-history-state
+    /// <https://html.spec.whatwg.org/multipage/#dom-history-state>
     fn GetState(&self, _cx: JSContext) -> Fallible<JSVal> {
         if !self.window.Document().is_fully_active() {
             return Err(Error::Security);
@@ -290,7 +294,7 @@ impl HistoryMethods for History {
         Ok(self.state.get())
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-history-length
+    /// <https://html.spec.whatwg.org/multipage/#dom-history-length>
     fn GetLength(&self) -> Fallible<u32> {
         if !self.window.Document().is_fully_active() {
             return Err(Error::Security);
@@ -306,30 +310,28 @@ impl HistoryMethods for History {
         Ok(recv.recv().unwrap())
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-history-go
+    /// <https://html.spec.whatwg.org/multipage/#dom-history-go>
     fn Go(&self, delta: i32) -> ErrorResult {
-        let direction = if delta > 0 {
-            TraversalDirection::Forward(delta as usize)
-        } else if delta < 0 {
-            TraversalDirection::Back(-delta as usize)
-        } else {
-            return self.window.Location().Reload();
+        let direction = match delta.cmp(&0) {
+            Ordering::Greater => TraversalDirection::Forward(delta as usize),
+            Ordering::Less => TraversalDirection::Back(-delta as usize),
+            Ordering::Equal => return self.window.Location().Reload(),
         };
 
         self.traverse_history(direction)
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-history-back
+    /// <https://html.spec.whatwg.org/multipage/#dom-history-back>
     fn Back(&self) -> ErrorResult {
         self.traverse_history(TraversalDirection::Back(1))
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-history-forward
+    /// <https://html.spec.whatwg.org/multipage/#dom-history-forward>
     fn Forward(&self) -> ErrorResult {
         self.traverse_history(TraversalDirection::Forward(1))
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-history-pushstate
+    /// <https://html.spec.whatwg.org/multipage/#dom-history-pushstate>
     fn PushState(
         &self,
         cx: JSContext,
@@ -340,7 +342,7 @@ impl HistoryMethods for History {
         self.push_or_replace_state(cx, data, title, url, PushOrReplace::Push)
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-history-replacestate
+    /// <https://html.spec.whatwg.org/multipage/#dom-history-replacestate>
     fn ReplaceState(
         &self,
         cx: JSContext,

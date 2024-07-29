@@ -2,6 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::convert::TryInto;
+use std::num::NonZeroU32;
+use std::rc::Rc;
+
+use base::id::{MessagePortId, MessagePortIndex, PipelineNamespaceId};
+use dom_struct::dom_struct;
+use js::jsapi::{Heap, JSObject, MutableHandleObject};
+use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
+use script_traits::PortMessageTask;
+
 use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::EventHandlerNonNull;
 use crate::dom::bindings::codegen::Bindings::MessagePortBinding::{
     MessagePortMethods, PostMessageOptions,
@@ -17,23 +29,14 @@ use crate::dom::bindings::transferable::Transferable;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::script_runtime::JSContext as SafeJSContext;
-use dom_struct::dom_struct;
-use js::jsapi::Heap;
-use js::jsapi::{JSObject, MutableHandleObject};
-use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
-use msg::constellation_msg::{MessagePortId, MessagePortIndex, PipelineNamespaceId};
-use script_traits::PortMessageTask;
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::convert::TryInto;
-use std::num::NonZeroU32;
-use std::rc::Rc;
 
 #[dom_struct]
 /// The MessagePort used in the DOM.
 pub struct MessagePort {
     eventtarget: EventTarget,
+    #[no_trace]
     message_port_id: MessagePortId,
+    #[no_trace]
     entangled_port: RefCell<Option<MessagePortId>>,
     detached: Cell<bool>,
 }
@@ -148,7 +151,7 @@ impl MessagePort {
 
         // Have the global proxy this call to the corresponding MessagePortImpl.
         self.global()
-            .post_messageport_msg(self.message_port_id().clone(), task);
+            .post_messageport_msg(*self.message_port_id(), task);
         Ok(())
     }
 }
@@ -173,15 +176,15 @@ impl Transferable for MessagePort {
 
         // 2. Store the transferred object at a given key.
         if let Some(ports) = port_impls.as_mut() {
-            ports.insert(id.clone(), transferred_port);
+            ports.insert(*id, transferred_port);
         } else {
             let mut ports = HashMap::new();
-            ports.insert(id.clone(), transferred_port);
+            ports.insert(*id, transferred_port);
             *port_impls = Some(ports);
         }
 
-        let PipelineNamespaceId(name_space) = id.clone().namespace_id;
-        let MessagePortIndex(index) = id.clone().index;
+        let PipelineNamespaceId(name_space) = (id).namespace_id;
+        let MessagePortIndex(index) = (id).index;
         let index = index.get();
 
         let mut big: [u8; 8] = [0; 8];
@@ -196,7 +199,7 @@ impl Transferable for MessagePort {
         Ok(u64::from_ne_bytes(big))
     }
 
-    /// https://html.spec.whatwg.org/multipage/#message-ports:transfer-receiving-steps
+    /// <https://html.spec.whatwg.org/multipage/#message-ports:transfer-receiving-steps>
     fn transfer_receive(
         owner: &GlobalScope,
         sc_holder: &mut StructuredDataHolder,
@@ -248,7 +251,7 @@ impl Transferable for MessagePort {
         };
 
         let transferred_port =
-            MessagePort::new_transferred(&*owner, id.clone(), port_impl.entangled_port_id());
+            MessagePort::new_transferred(owner, id, port_impl.entangled_port_id());
         owner.track_message_port(&transferred_port, Some(port_impl));
 
         return_object.set(transferred_port.reflector().rootable().get());

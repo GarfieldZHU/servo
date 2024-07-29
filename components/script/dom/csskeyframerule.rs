@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use servo_arc::Arc;
+use style::shared_lock::{Locked, ToCssWithGuard};
+use style::stylesheets::keyframes_rule::Keyframe;
+use style::stylesheets::CssRuleType;
+
 use crate::dom::bindings::codegen::Bindings::CSSKeyframeRuleBinding::CSSKeyframeRuleMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
@@ -11,15 +17,12 @@ use crate::dom::cssrule::{CSSRule, SpecificCSSRule};
 use crate::dom::cssstyledeclaration::{CSSModificationAccess, CSSStyleDeclaration, CSSStyleOwner};
 use crate::dom::cssstylesheet::CSSStyleSheet;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_arc::Arc;
-use style::shared_lock::{Locked, ToCssWithGuard};
-use style::stylesheets::keyframes_rule::Keyframe;
 
 #[dom_struct]
 pub struct CSSKeyframeRule {
     cssrule: CSSRule,
     #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
     keyframerule: Arc<Locked<Keyframe>>,
     style_decl: MutNullableDom<CSSStyleDeclaration>,
 }
@@ -31,12 +34,12 @@ impl CSSKeyframeRule {
     ) -> CSSKeyframeRule {
         CSSKeyframeRule {
             cssrule: CSSRule::new_inherited(parent_stylesheet),
-            keyframerule: keyframerule,
+            keyframerule,
             style_decl: Default::default(),
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         window: &Window,
         parent_stylesheet: &CSSStyleSheet,
@@ -71,9 +74,8 @@ impl CSSKeyframeRuleMethods for CSSKeyframeRule {
 }
 
 impl SpecificCSSRule for CSSKeyframeRule {
-    fn ty(&self) -> u16 {
-        use crate::dom::bindings::codegen::Bindings::CSSRuleBinding::CSSRuleConstants;
-        CSSRuleConstants::KEYFRAME_RULE
+    fn ty(&self) -> CssRuleType {
+        CssRuleType::Keyframe
     }
 
     fn get_css(&self) -> DOMString {

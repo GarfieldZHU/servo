@@ -11,54 +11,20 @@
 //! maybe it's an absolute or fixed position thing that hasn't found its containing block yet.
 //! Construction items bubble up the tree from children to parents until they find their homes.
 
-use crate::block::BlockFlow;
-use crate::context::{with_thread_local_font_context, LayoutContext};
-use crate::data::{LayoutData, LayoutDataFlags};
-use crate::display_list::items::OpaqueNode;
-use crate::flex::FlexFlow;
-use crate::floats::FloatKind;
-use crate::flow::{AbsoluteDescendants, Flow, FlowClass, GetBaseFlow, ImmutableFlowUtils};
-use crate::flow::{FlowFlags, MutableFlowUtils, MutableOwnedFlowUtils};
-use crate::flow_ref::FlowRef;
-use crate::fragment::{
-    CanvasFragmentInfo, Fragment, FragmentFlags, GeneratedContentInfo, IframeFragmentInfo,
-};
-use crate::fragment::{
-    ImageFragmentInfo, InlineAbsoluteFragmentInfo, InlineAbsoluteHypotheticalFragmentInfo,
-};
-use crate::fragment::{
-    InlineBlockFragmentInfo, MediaFragmentInfo, SpecificFragmentInfo, SvgFragmentInfo,
-};
-use crate::fragment::{
-    TableColumnFragmentInfo, UnscannedTextFragmentInfo, WhitespaceStrippingResult,
-};
-use crate::inline::{InlineFlow, InlineFragmentNodeFlags, InlineFragmentNodeInfo};
-use crate::linked_list::prepend_from;
-use crate::list_item::{ListItemFlow, ListStyleTypeContent};
-use crate::multicol::{MulticolColumnFlow, MulticolFlow};
-use crate::parallel;
-use crate::table::TableFlow;
-use crate::table_caption::TableCaptionFlow;
-use crate::table_cell::TableCellFlow;
-use crate::table_colgroup::TableColGroupFlow;
-use crate::table_row::TableRowFlow;
-use crate::table_rowgroup::TableRowGroupFlow;
-use crate::table_wrapper::TableWrapperFlow;
-use crate::text::TextRunScanner;
-use crate::traversal::PostorderNodeMutTraversal;
-use crate::wrapper::{LayoutNodeLayoutData, TextContent, ThreadSafeLayoutNodeHelpers};
-use crate::ServoArc;
+use std::collections::LinkedList;
+use std::marker::PhantomData;
+use std::mem;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use html5ever::{local_name, namespace_url, ns};
+use log::debug;
 use script_layout_interface::wrapper_traits::{
     PseudoElementType, ThreadSafeLayoutElement, ThreadSafeLayoutNode,
 };
 use script_layout_interface::{LayoutElementType, LayoutNodeType};
 use servo_config::opts;
 use servo_url::ServoUrl;
-use std::collections::LinkedList;
-use std::marker::PhantomData;
-use std::mem;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use style::computed_values::caption_side::T as CaptionSide;
 use style::computed_values::display::T as Display;
 use style::computed_values::empty_cells::T as EmptyCells;
@@ -73,12 +39,47 @@ use style::selector_parser::{PseudoElement, RestyleDamage};
 use style::servo::restyle_damage::ServoRestyleDamage;
 use style::values::computed::Image;
 use style::values::generics::counters::ContentItem;
+use style::LocalName;
+
+use crate::block::BlockFlow;
+use crate::context::LayoutContext;
+use crate::data::{InnerLayoutData, LayoutDataFlags};
+use crate::display_list::items::OpaqueNode;
+use crate::flex::FlexFlow;
+use crate::floats::FloatKind;
+use crate::flow::{
+    AbsoluteDescendants, Flow, FlowClass, FlowFlags, GetBaseFlow, ImmutableFlowUtils,
+    MutableFlowUtils, MutableOwnedFlowUtils,
+};
+use crate::flow_ref::FlowRef;
+use crate::fragment::{
+    CanvasFragmentInfo, Fragment, FragmentFlags, GeneratedContentInfo, IframeFragmentInfo,
+    ImageFragmentInfo, InlineAbsoluteFragmentInfo, InlineAbsoluteHypotheticalFragmentInfo,
+    InlineBlockFragmentInfo, MediaFragmentInfo, SpecificFragmentInfo, SvgFragmentInfo,
+    TableColumnFragmentInfo, UnscannedTextFragmentInfo, WhitespaceStrippingResult,
+};
+use crate::inline::{InlineFlow, InlineFragmentNodeFlags, InlineFragmentNodeInfo};
+use crate::linked_list::prepend_from;
+use crate::list_item::{ListItemFlow, ListStyleTypeContent};
+use crate::multicol::{MulticolColumnFlow, MulticolFlow};
+use crate::table::TableFlow;
+use crate::table_caption::TableCaptionFlow;
+use crate::table_cell::TableCellFlow;
+use crate::table_colgroup::TableColGroupFlow;
+use crate::table_row::TableRowFlow;
+use crate::table_rowgroup::TableRowGroupFlow;
+use crate::table_wrapper::TableWrapperFlow;
+use crate::text::TextRunScanner;
+use crate::traversal::PostorderNodeMutTraversal;
+use crate::wrapper::{TextContent, ThreadSafeLayoutNodeHelpers};
+use crate::{parallel, ServoArc};
 
 /// The results of flow construction for a DOM node.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum ConstructionResult {
     /// This node contributes nothing at all (`display: none`). Alternately, this is what newly
     /// created nodes have their `ConstructionResult` set to.
+    #[default]
     None,
 
     /// This node contributed a flow at the proper position in the tree.
@@ -199,8 +200,8 @@ impl InlineBlockSplit {
                 fragment_accumulator,
                 InlineFragmentsAccumulator::from_inline_node(node, style_context),
             )
-            .to_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(style_context),
-            flow: flow,
+            .get_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(style_context),
+            flow,
         };
 
         fragment_accumulator
@@ -305,7 +306,7 @@ impl InlineFragmentsAccumulator {
             .push_descendants(fragments.absolute_descendants);
     }
 
-    fn to_intermediate_inline_fragments<'dom, N>(
+    fn get_intermediate_inline_fragments<'dom, N>(
         self,
         context: &SharedStyleContext,
     ) -> IntermediateInlineFragments
@@ -381,7 +382,7 @@ where
     /// Creates a new flow constructor.
     pub fn new(layout_context: &'a LayoutContext<'a>) -> Self {
         FlowConstructor {
-            layout_context: layout_context,
+            layout_context,
             phantom2: PhantomData,
         }
     }
@@ -411,7 +412,7 @@ where
                     node.image_url(),
                     node.image_density(),
                     node,
-                    &self.layout_context,
+                    self.layout_context,
                 ));
                 SpecificFragmentInfo::Image(image_info)
             },
@@ -433,7 +434,7 @@ where
                     object_data,
                     None,
                     node,
-                    &self.layout_context,
+                    self.layout_context,
                 ));
                 SpecificFragmentInfo::Image(image_info)
             },
@@ -482,7 +483,9 @@ where
         node: &ConcreteThreadSafeLayoutNode,
     ) {
         let mut fragments = fragment_accumulator
-            .to_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(self.style_context());
+            .get_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(
+                self.style_context(),
+            );
         if fragments.is_empty() {
             return;
         };
@@ -514,13 +517,10 @@ where
         // We must scan for runs before computing minimum ascent and descent because scanning
         // for runs might collapse so much whitespace away that only hypothetical fragments
         // remain. In that case the inline flow will compute its ascent and descent to be zero.
-        let scanned_fragments =
-            with_thread_local_font_context(self.layout_context, |font_context| {
-                TextRunScanner::new().scan_for_runs(
-                    font_context,
-                    mem::replace(&mut fragments.fragments, LinkedList::new()),
-                )
-            });
+        let scanned_fragments = TextRunScanner::new().scan_for_runs(
+            &self.layout_context.font_context,
+            mem::take(&mut fragments.fragments),
+        );
         let mut inline_flow_ref = FlowRef::new(Arc::new(InlineFlow::from_fragments(
             scanned_fragments,
             node.style(self.style_context()).writing_mode,
@@ -549,11 +549,10 @@ where
         {
             // FIXME(#6503): Use Arc::get_mut().unwrap() here.
             let inline_flow = FlowRef::deref_mut(&mut inline_flow_ref).as_mut_inline();
-            inline_flow.minimum_line_metrics =
-                with_thread_local_font_context(self.layout_context, |font_context| {
-                    inline_flow
-                        .minimum_line_metrics(font_context, &node.style(self.style_context()))
-                });
+            inline_flow.minimum_line_metrics = inline_flow.minimum_line_metrics(
+                &self.layout_context.font_context,
+                &node.style(self.style_context()),
+            );
         }
 
         inline_flow_ref.finish();
@@ -805,7 +804,7 @@ where
                 .stylist
                 .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                     &context.guards,
-                    &PseudoElement::ServoText,
+                    &PseudoElement::ServoLegacyText,
                     &style,
                 );
             if node_is_input_or_text_area {
@@ -813,7 +812,7 @@ where
                     .stylist
                     .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                         &context.guards,
-                        &PseudoElement::ServoInputText,
+                        &PseudoElement::ServoLegacyInputText,
                         &style,
                     )
             }
@@ -841,10 +840,7 @@ where
 
         match text_content {
             TextContent::Text(string) => {
-                let info = Box::new(UnscannedTextFragmentInfo::new(
-                    string.into(),
-                    node.selection(),
-                ));
+                let info = Box::new(UnscannedTextFragmentInfo::new(string, node.selection()));
                 let specific_fragment_info = SpecificFragmentInfo::UnscannedText(info);
                 fragments
                     .fragments
@@ -861,6 +857,15 @@ where
                 for content_item in content_items.into_iter() {
                     let specific_fragment_info = match content_item {
                         ContentItem::String(string) => {
+                            let info =
+                                Box::new(UnscannedTextFragmentInfo::new(string.into(), None));
+                            SpecificFragmentInfo::UnscannedText(info)
+                        },
+                        ContentItem::Attr(attr) => {
+                            let element = node.as_element().expect("Expected an element");
+                            let attr_val = element
+                                .get_attr(&attr.namespace_url, &LocalName::from(&*attr.attribute));
+                            let string = attr_val.map_or("".to_string(), |s| s.to_string());
                             let info =
                                 Box::new(UnscannedTextFragmentInfo::new(string.into(), None));
                             SpecificFragmentInfo::UnscannedText(info)
@@ -970,7 +975,7 @@ where
                     } else {
                         // Push the absolutely-positioned kid as an inline containing block.
                         let kid_node = flow.as_block().fragment.node;
-                        let kid_pseudo = flow.as_block().fragment.pseudo.clone();
+                        let kid_pseudo = flow.as_block().fragment.pseudo;
                         let kid_style = flow.as_block().fragment.style.clone();
                         let kid_selected_style = flow.as_block().fragment.selected_style.clone();
                         let kid_restyle_damage = flow.as_block().fragment.restyle_damage;
@@ -1053,9 +1058,9 @@ where
         }
 
         // Finally, make a new construction result.
-        if opt_inline_block_splits.len() > 0 ||
+        if !opt_inline_block_splits.is_empty() ||
             !fragment_accumulator.fragments.is_empty() ||
-            abs_descendants.len() > 0
+            !abs_descendants.is_empty()
         {
             fragment_accumulator
                 .fragments
@@ -1075,7 +1080,7 @@ where
                 ConstructionItem::InlineFragments(InlineFragmentsConstructionResult {
                     splits: opt_inline_block_splits,
                     fragments: fragment_accumulator
-                        .to_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(
+                        .get_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(
                             self.style_context(),
                         ),
                 });
@@ -1107,7 +1112,7 @@ where
                     .stylist
                     .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                         &context.guards,
-                        &PseudoElement::ServoText,
+                        &PseudoElement::ServoLegacyText,
                         &style,
                     ),
                 node.restyle_damage(),
@@ -1124,7 +1129,7 @@ where
                     .stylist
                     .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                         &context.guards,
-                        &PseudoElement::ServoText,
+                        &PseudoElement::ServoLegacyText,
                         &style,
                     );
                 self.create_fragments_for_node_text_content(&mut fragments, node, &text_style)
@@ -1140,7 +1145,7 @@ where
         let construction_item =
             ConstructionItem::InlineFragments(InlineFragmentsConstructionResult {
                 splits: LinkedList::new(),
-                fragments: fragments,
+                fragments,
             });
         ConstructionResult::ConstructionItem(construction_item)
     }
@@ -1167,7 +1172,7 @@ where
             .stylist
             .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                 &context.guards,
-                &PseudoElement::ServoInlineBlockWrapper,
+                &PseudoElement::ServoLegacyInlineBlockWrapper,
                 &style,
             );
         let fragment_info =
@@ -1192,7 +1197,7 @@ where
             ConstructionItem::InlineFragments(InlineFragmentsConstructionResult {
                 splits: LinkedList::new(),
                 fragments: fragment_accumulator
-                    .to_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(context),
+                    .get_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(context),
             });
         ConstructionResult::ConstructionItem(construction_item)
     }
@@ -1218,7 +1223,7 @@ where
             .stylist
             .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                 &style_context.guards,
-                &PseudoElement::ServoInlineAbsolute,
+                &PseudoElement::ServoLegacyInlineAbsolute,
                 &style,
             );
         let fragment = Fragment::from_opaque_node_and_style(
@@ -1242,7 +1247,7 @@ where
             ConstructionItem::InlineFragments(InlineFragmentsConstructionResult {
                 splits: LinkedList::new(),
                 fragments: fragment_accumulator
-                    .to_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(
+                    .get_intermediate_inline_fragments::<ConcreteThreadSafeLayoutNode>(
                         style_context,
                     ),
             });
@@ -1363,7 +1368,7 @@ where
                 .stylist
                 .style_for_anonymous::<ConcreteThreadSafeLayoutNode::ConcreteElement>(
                     &context.guards,
-                    &PseudoElement::ServoTableWrapper,
+                    &PseudoElement::ServoLegacyTableWrapper,
                     &table_style,
                 );
         }
@@ -1508,10 +1513,10 @@ where
         let marker_fragments = match node.style(self.style_context()).get_list().list_style_image {
             Image::Url(ref url_value) => {
                 let image_info = Box::new(ImageFragmentInfo::new(
-                    url_value.url().cloned(),
+                    url_value.url().cloned().map(Into::into),
                     None,
                     node,
-                    &self.layout_context,
+                    self.layout_context,
                 ));
                 vec![Fragment::new(
                     node,
@@ -1521,7 +1526,6 @@ where
             },
             // XXX: Non-None image types unimplemented.
             Image::ImageSet(..) |
-            Image::Rect(..) |
             Image::Gradient(..) |
             Image::PaintWorklet(..) |
             Image::CrossFade(..) |
@@ -1539,11 +1543,10 @@ where
                         )),
                         self.layout_context,
                     ));
-                    let marker_fragments =
-                        with_thread_local_font_context(self.layout_context, |mut font_context| {
-                            TextRunScanner::new()
-                                .scan_for_runs(&mut font_context, unscanned_marker_fragments)
-                        });
+                    let marker_fragments = TextRunScanner::new().scan_for_runs(
+                        &self.layout_context.font_context,
+                        unscanned_marker_fragments,
+                    );
                     marker_fragments.fragments
                 },
                 ListStyleTypeContent::GeneratedContent(info) => vec![Fragment::new(
@@ -1707,7 +1710,7 @@ where
             let damage = node.restyle_damage();
             let mut data = node.mutate_layout_data().unwrap();
 
-            match *node.construction_result_mut(&mut *data) {
+            match *node.construction_result_mut(&mut data) {
                 ConstructionResult::None => true,
                 ConstructionResult::Flow(ref mut flow, _) => {
                     // The node's flow is of the same type and has the same set of children and can
@@ -1795,7 +1798,7 @@ where
         if set_has_newly_constructed_flow_flag {
             node.insert_flags(LayoutDataFlags::HAS_NEWLY_CONSTRUCTED_FLOW);
         }
-        return result;
+        result
     }
 }
 
@@ -1987,7 +1990,7 @@ trait NodeUtils {
     /// Returns true if this node doesn't render its kids and false otherwise.
     fn is_replaced_content(&self) -> bool;
 
-    fn construction_result_mut(self, layout_data: &mut LayoutData) -> &mut ConstructionResult;
+    fn construction_result_mut(self, layout_data: &mut InnerLayoutData) -> &mut ConstructionResult;
 
     /// Sets the construction result of a flow.
     fn set_flow_construction_result(self, result: ConstructionResult);
@@ -2024,7 +2027,7 @@ where
         }
     }
 
-    fn construction_result_mut(self, data: &mut LayoutData) -> &mut ConstructionResult {
+    fn construction_result_mut(self, data: &mut InnerLayoutData) -> &mut ConstructionResult {
         match self.get_pseudo_element_type() {
             PseudoElementType::Before => &mut data.before_flow_construction_result,
             PseudoElementType::After => &mut data.after_flow_construction_result,
@@ -2037,14 +2040,14 @@ where
     #[inline(always)]
     fn set_flow_construction_result(self, result: ConstructionResult) {
         let mut layout_data = self.mutate_layout_data().unwrap();
-        let dst = self.construction_result_mut(&mut *layout_data);
+        let dst = self.construction_result_mut(&mut layout_data);
         *dst = result;
     }
 
     #[inline(always)]
     fn get_construction_result(self) -> ConstructionResult {
         let mut layout_data = self.mutate_layout_data().unwrap();
-        self.construction_result_mut(&mut *layout_data).get()
+        self.construction_result_mut(&mut layout_data).get()
     }
 }
 
@@ -2068,7 +2071,7 @@ impl FlowRef {
     /// All flows must be finished at some point, or they will not have their intrinsic inline-sizes
     /// properly computed. (This is not, however, a memory safety problem.)
     fn finish(&mut self) {
-        if !opts::get().bubble_inline_sizes_separately {
+        if !opts::get().debug.bubble_inline_sizes_separately {
             FlowRef::deref_mut(self).bubble_inline_sizes();
             FlowRef::deref_mut(self)
                 .mut_base()
@@ -2180,7 +2183,7 @@ where
     )));
     let text_style = context.stylist.style_for_anonymous::<E>(
         &context.guards,
-        &PseudoElement::ServoText,
+        &PseudoElement::ServoLegacyText,
         &node.style,
     );
 
@@ -2199,14 +2202,15 @@ fn has_padding_or_border(values: &ComputedValues) -> bool {
     let padding = values.get_padding();
     let border = values.get_border();
 
+    use style::Zero;
     !padding.padding_top.is_definitely_zero() ||
         !padding.padding_right.is_definitely_zero() ||
         !padding.padding_bottom.is_definitely_zero() ||
         !padding.padding_left.is_definitely_zero() ||
-        border.border_top_width.px() != 0. ||
-        border.border_right_width.px() != 0. ||
-        border.border_bottom_width.px() != 0. ||
-        border.border_left_width.px() != 0.
+        !border.border_top_width.is_zero() ||
+        !border.border_right_width.is_zero() ||
+        !border.border_bottom_width.is_zero() ||
+        !border.border_left_width.is_zero()
 }
 
 /// Maintains a stack of anonymous boxes needed to ensure that the flow tree is *legal*. The tree
@@ -2308,7 +2312,7 @@ impl Legalizer {
                 let mut block_wrapper = Legalizer::create_anonymous_flow::<E, _>(
                     context,
                     parent,
-                    &[PseudoElement::ServoAnonymousBlock],
+                    &[PseudoElement::ServoLegacyAnonymousBlock],
                     SpecificFragmentInfo::Generic,
                     BlockFlow::from_fragment,
                 );
@@ -2383,7 +2387,7 @@ impl Legalizer {
             FlowClass::TableWrapper => self.push_new_anonymous_flow::<E, _>(
                 context,
                 parent,
-                &[PseudoElement::ServoAnonymousTable],
+                &[PseudoElement::ServoLegacyAnonymousTable],
                 SpecificFragmentInfo::Table,
                 TableFlow::from_fragment,
             ),
@@ -2391,8 +2395,8 @@ impl Legalizer {
                 context,
                 parent,
                 &[
-                    PseudoElement::ServoTableWrapper,
-                    PseudoElement::ServoAnonymousTableWrapper,
+                    PseudoElement::ServoLegacyTableWrapper,
+                    PseudoElement::ServoLegacyAnonymousTableWrapper,
                 ],
                 SpecificFragmentInfo::TableWrapper,
                 TableWrapperFlow::from_fragment,
@@ -2454,7 +2458,6 @@ impl Legalizer {
 }
 
 pub fn is_image_data(uri: &str) -> bool {
-    static TYPES: &'static [&'static str] =
-        &["data:image/png", "data:image/gif", "data:image/jpeg"];
+    static TYPES: &[&str] = &["data:image/png", "data:image/gif", "data:image/jpeg"];
     TYPES.iter().any(|&type_| uri.starts_with(type_))
 }

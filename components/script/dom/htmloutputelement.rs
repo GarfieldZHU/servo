@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::{local_name, LocalName, Prefix};
+use js::rust::HandleObject;
+
 use crate::dom::attr::Attr;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::HTMLOutputElementBinding::HTMLOutputElementMethods;
@@ -17,8 +21,6 @@ use crate::dom::nodelist::NodeList;
 use crate::dom::validation::Validatable;
 use crate::dom::validitystate::ValidityState;
 use crate::dom::virtualmethods::VirtualMethods;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
 
 #[dom_struct]
 pub struct HTMLOutputElement {
@@ -44,17 +46,19 @@ impl HTMLOutputElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLOutputElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLOutputElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 
@@ -107,7 +111,7 @@ impl HTMLOutputElementMethods for HTMLOutputElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-output-type
     fn Type(&self) -> DOMString {
-        return DOMString::from("output");
+        DOMString::from("output")
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-fe-name
@@ -148,17 +152,14 @@ impl HTMLOutputElementMethods for HTMLOutputElement {
 }
 
 impl VirtualMethods for HTMLOutputElement {
-    fn super_type<'b>(&'b self) -> Option<&'b dyn VirtualMethods> {
+    fn super_type(&self) -> Option<&dyn VirtualMethods> {
         Some(self.upcast::<HTMLElement>() as &dyn VirtualMethods)
     }
 
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
-        match attr.local_name() {
-            &local_name!("form") => {
-                self.form_attribute_mutated(mutation);
-            },
-            _ => {},
+        if attr.local_name() == &local_name!("form") {
+            self.form_attribute_mutated(mutation);
         }
     }
 }
@@ -172,7 +173,7 @@ impl FormControl for HTMLOutputElement {
         self.form_owner.set(form);
     }
 
-    fn to_element<'a>(&'a self) -> &'a Element {
+    fn to_element(&self) -> &Element {
         self.upcast::<Element>()
     }
 }

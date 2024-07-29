@@ -2,18 +2,23 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-from __future__ import print_function, unicode_literals
-
+import hashlib
 import os
 import platform
+import site
+import subprocess
 import sys
-from distutils.spawn import find_executable
-from subprocess import Popen
-import shutil
-from tempfile import TemporaryFile
+
+SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
+TOP_DIR = os.path.abspath(os.path.join(SCRIPT_PATH, ".."))
+WPT_PATH = os.path.join(TOP_DIR, "tests", "wpt")
+WPT_TOOLS_PATH = os.path.join(WPT_PATH, "tests", "tools")
+WPT_RUNNER_PATH = os.path.join(WPT_TOOLS_PATH, "wptrunner")
+WPT_SERVE_PATH = os.path.join(WPT_TOOLS_PATH, "wptserve")
 
 SEARCH_PATHS = [
-    os.path.join("python", "tidy"),
+    os.path.join("python", "mach"),
+    os.path.join("third_party", "mozdebug"),
 ]
 
 # Individual files providing mach commands.
@@ -75,144 +80,96 @@ CATEGORIES = {
     }
 }
 
-# Possible names of executables
-# NOTE: Windows Python doesn't provide versioned executables, so we must use
-# the plain names. On MSYS, we still use Windows Python.
-PYTHON_NAMES = ["python-2.7", "python2.7", "python2", "python"]
 
-
-def _get_exec_path(names, is_valid_path=lambda _path: True):
-    for name in names:
-        path = find_executable(name)
-        if path and is_valid_path(path):
-            return path
-    return None
-
-
+# venv calls its scripts folder "bin" on non-Windows and "Scripts" on Windows.
 def _get_virtualenv_script_dir():
-    # Virtualenv calls its scripts folder "bin" on linux/OSX/MSYS64 but "Scripts" on Windows
     if os.name == "nt" and os.sep != "/":
         return "Scripts"
     return "bin"
 
 
+# venv names its lib folder something like "lib/python3.11/site-packages" on
+# non-Windows and "Lib\site-packages" on Window.
+def _get_virtualenv_lib_dir():
+    if os.name == "nt" and os.sep != "/":
+        return os.path.join("Lib", "site-packages")
+    return os.path.join(
+        "lib",
+        f"python{sys.version_info[0]}.{sys.version_info[1]}",
+        "site-packages"
+    )
+
+
 def _process_exec(args):
-    with TemporaryFile() as out:
-        with TemporaryFile() as err:
-            process = Popen(args, stdout=out, stderr=err)
-            process.wait()
-            if process.returncode:
-                print('"%s" failed with error code %d:' % ('" "'.join(args), process.returncode))
-
-                if sys.version_info >= (3, 0):
-                    stdout = sys.stdout.buffer
-                else:
-                    stdout = sys.stdout
-
-                print('Output:')
-                out.seek(0)
-                stdout.flush()
-                shutil.copyfileobj(out, stdout)
-                stdout.flush()
-
-                print('Error:')
-                err.seek(0)
-                stdout.flush()
-                shutil.copyfileobj(err, stdout)
-                stdout.flush()
-
-                sys.exit(1)
+    try:
+        subprocess.check_output(args, stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as exception:
+        print(exception.output.decode(sys.stdout.encoding))
+        print(f"Process failed with return code: {exception.returncode}")
+        sys.exit(1)
 
 
-def wpt_path(is_firefox, topdir, *paths):
-    if is_firefox:
-        rel = os.path.join("..", "testing", "web-platform")
-    else:
-        rel = os.path.join("tests", "wpt")
-
-    return os.path.join(topdir, rel, *paths)
-
-
-def wptrunner_path(is_firefox, topdir, *paths):
-    wpt_root = wpt_path(is_firefox, topdir)
-    if is_firefox:
-        rel = os.path.join(wpt_root, "tests", "tools", "wptrunner")
-    else:
-        rel = os.path.join(wpt_root, "web-platform-tests", "tools", "wptrunner")
-
-    return os.path.join(topdir, rel, *paths)
-
-
-def wptserve_path(is_firefox, topdir, *paths):
-    wpt_root = wpt_path(is_firefox, topdir)
-    if is_firefox:
-        rel = os.path.join(wpt_root, "tests", "tools", "wptserve")
-    else:
-        rel = os.path.join(wpt_root, "web-platform-tests", "tools", "wptserve")
-
-    return os.path.join(topdir, rel, *paths)
-
-
-def _activate_virtualenv(topdir, is_firefox):
-    virtualenv_path = os.path.join(topdir, "python", "_virtualenv%d.%d" % (sys.version_info[0], sys.version_info[1]))
-    python = sys.executable   # If there was no python, mach wouldn't have run at all!
-    if not python:
-        sys.exit('Failed to find python executable for starting virtualenv.')
-
-    script_dir = _get_virtualenv_script_dir()
-    activate_path = os.path.join(virtualenv_path, script_dir, "activate_this.py")
-    need_pip_upgrade = False
-    if not (os.path.exists(virtualenv_path) and os.path.exists(activate_path)):
-        import imp
-        try:
-            imp.find_module('virtualenv')
-        except ImportError:
-            sys.exit("Python virtualenv is not installed. Please install it prior to running mach.")
-
-        _process_exec([python, "-m", "virtualenv", "-p", python, "--system-site-packages", virtualenv_path])
-
-        # We want to upgrade pip when virtualenv created for the first time
-        need_pip_upgrade = True
-
-    exec(compile(open(activate_path).read(), activate_path, 'exec'), dict(__file__=activate_path))
-
-    python = _get_exec_path(PYTHON_NAMES,
-                            is_valid_path=lambda path: path.startswith(virtualenv_path))
-    if not python:
-        sys.exit("Python executable in virtualenv failed to activate.")
-
-    # TODO: Right now, we iteratively install all the requirements by invoking
-    # `pip install` each time. If it were the case that there were conflicting
-    # requirements, we wouldn't know about them. Once
-    # https://github.com/pypa/pip/issues/988 is addressed, then we can just
-    # chain each of the requirements files into the same `pip install` call
-    # and it will check for conflicts.
+def install_virtual_env_requirements(project_path: str, python: str, virtualenv_path: str):
     requirements_paths = [
-        os.path.join("python", "requirements.txt"),
-        wptrunner_path(is_firefox, topdir, "requirements.txt",),
-        wptrunner_path(is_firefox, topdir, "requirements_firefox.txt"),
-        wptrunner_path(is_firefox, topdir, "requirements_servo.txt"),
+        os.path.join(project_path, "python", "requirements.txt"),
+        os.path.join(project_path, WPT_TOOLS_PATH, "requirements_tests.txt",),
+        os.path.join(project_path, WPT_RUNNER_PATH, "requirements.txt",),
     ]
 
-    if need_pip_upgrade:
-        # Upgrade pip when virtualenv is created to fix the issue
-        # https://github.com/servo/servo/issues/11074
-        _process_exec([python, "-m", "pip", "install", "-I", "-U", "pip"])
+    requirements_hasher = hashlib.sha256()
+    for path in requirements_paths:
+        with open(path, 'rb') as file:
+            requirements_hasher.update(file.read())
 
-    for req_rel_path in requirements_paths:
-        req_path = os.path.join(topdir, req_rel_path)
-        marker_file = req_rel_path.replace(os.path.sep, '-')
-        marker_path = os.path.join(virtualenv_path, marker_file)
+    try:
+        marker_path = os.path.join(virtualenv_path, "requirements.sha256")
+        with open(marker_path, 'r') as marker_file:
+            marker_hash = marker_file.read()
+    except FileNotFoundError:
+        marker_hash = None
 
-        try:
-            if os.path.getmtime(req_path) + 10 < os.path.getmtime(marker_path):
-                continue
-        except OSError:
-            pass
+    requirements_hash = requirements_hasher.hexdigest()
 
-        _process_exec([python, "-m", "pip", "install", "-I", "-r", req_path])
+    if marker_hash != requirements_hash:
+        print(" * Upgrading pip...")
+        _process_exec([python, "-m", "pip", "install", "--upgrade", "pip"])
 
-        open(marker_path, 'w').close()
+        print(" * Installing Python requirements...")
+        _process_exec([python, "-m", "pip", "install", "-I",
+                       "-r", requirements_paths[0],
+                       "-r", requirements_paths[1],
+                       "-r", requirements_paths[2]])
+        with open(marker_path, "w") as marker_file:
+            marker_file.write(requirements_hash)
+
+
+def _activate_virtualenv(topdir):
+    virtualenv_path = os.path.join(topdir, "python", "_venv%d.%d" % (sys.version_info[0], sys.version_info[1]))
+    python = sys.executable
+
+    if os.environ.get("VIRTUAL_ENV") != virtualenv_path:
+        venv_script_path = os.path.join(virtualenv_path, _get_virtualenv_script_dir())
+        if not os.path.exists(virtualenv_path):
+            print(" * Setting up virtual environment...")
+            _process_exec([python, "-m", "venv", "--system-site-packages", virtualenv_path])
+
+        # This general approach is taken from virtualenv's `activate_this.py`.
+        os.environ["PATH"] = os.pathsep.join([venv_script_path, *os.environ.get("PATH", "").split(os.pathsep)])
+        os.environ["VIRTUAL_ENV"] = virtualenv_path
+
+        prev_length = len(sys.path)
+        lib_path = os.path.realpath(os.path.join(virtualenv_path, _get_virtualenv_lib_dir()))
+        site.addsitedir(lib_path)
+        sys.path[:] = sys.path[prev_length:] + sys.path[0:prev_length]
+
+        sys.real_prefix = sys.prefix
+        sys.prefix = virtualenv_path
+
+        # Use the python in our venv for subprocesses, not the python we were originally run with.
+        # Otherwise pip may still try to write to the wrong site-packages directory.
+        python = os.path.join(venv_script_path, "python")
+
+    install_virtual_env_requirements(topdir, python, virtualenv_path)
 
 
 def _ensure_case_insensitive_if_windows():
@@ -228,30 +185,27 @@ def _is_windows():
     return sys.platform == 'win32'
 
 
-class DummyContext(object):
-    pass
-
-
-def is_firefox_checkout(topdir):
-    parentdir = os.path.normpath(os.path.join(topdir, '..'))
-    is_firefox = os.path.isfile(os.path.join(parentdir,
-                                             'build/mach_bootstrap.py'))
-    return is_firefox
-
-
 def bootstrap_command_only(topdir):
     # we should activate the venv before importing servo.boostrap
     # because the module requires non-standard python packages
-    _activate_virtualenv(topdir, is_firefox_checkout(topdir))
+    _activate_virtualenv(topdir)
 
-    from servo.bootstrap import bootstrap
+    # We cannot import these modules until the virtual environment
+    # is active because they depend on modules installed via the
+    # virtual environment.
+    # pylint: disable=import-outside-toplevel
+    import servo.platform
+    import servo.util
 
-    context = DummyContext()
-    context.topdir = topdir
-    force = False
-    if len(sys.argv) == 3 and sys.argv[2] == "-f":
-        force = True
-    bootstrap(context, force)
+    try:
+        force = '-f' in sys.argv or '--force' in sys.argv
+        skip_platform = '--skip-platform' in sys.argv
+        skip_lints = '--skip-lints' in sys.argv
+        servo.platform.get().bootstrap(force, skip_platform, skip_lints)
+    except NotImplementedError as exception:
+        print(exception)
+        return 1
+
     return 0
 
 
@@ -260,18 +214,6 @@ def bootstrap(topdir):
 
     topdir = os.path.abspath(topdir)
 
-    len(sys.argv) > 1 and sys.argv[1] == "bootstrap"
-
-    # We don't support paths with Unicode characters for now
-    # https://github.com/servo/servo/issues/10002
-    try:
-        # Trick to support both python2 and python3
-        topdir.encode().decode('ascii')
-    except UnicodeDecodeError:
-        print('Cannot run mach in a path with Unicode characters.')
-        print('Current path:', topdir)
-        sys.exit(1)
-
     # We don't support paths with spaces for now
     # https://github.com/servo/servo/issues/9442
     if ' ' in topdir:
@@ -279,16 +221,14 @@ def bootstrap(topdir):
         print('Current path:', topdir)
         sys.exit(1)
 
-    # Ensure we are running Python 2.7+ or Python 3.5+. We put this check here so we generate a
+    # Ensure we are running Python 3.10+. We put this check here so we generate a
     # user-friendly error message rather than a cryptic stack trace on module import.
-    if sys.version_info < (2, 7) or (sys.version_info >= (3, 0) and sys.version_info < (3, 5)):
-        print('Python2 (>=2.7) or Python3 (>=3.5) is required to run mach.')
+    if sys.version_info < (3, 10):
+        print('Python3 (>=3.10) is required to run mach.')
         print('You are running Python', platform.python_version())
         sys.exit(1)
 
-    is_firefox = is_firefox_checkout(topdir)
-
-    _activate_virtualenv(topdir, is_firefox)
+    _activate_virtualenv(topdir)
 
     def populate_context(context, key=None):
         if key is None:
@@ -298,10 +238,7 @@ def bootstrap(topdir):
         raise AttributeError(key)
 
     sys.path[0:0] = [os.path.join(topdir, path) for path in SEARCH_PATHS]
-
-    sys.path[0:0] = [wpt_path(is_firefox, topdir),
-                     wptrunner_path(is_firefox, topdir),
-                     wptserve_path(is_firefox, topdir)]
+    sys.path[0:0] = [WPT_PATH, WPT_RUNNER_PATH, WPT_SERVE_PATH]
 
     import mach.main
     mach = mach.main.Mach(os.getcwd())

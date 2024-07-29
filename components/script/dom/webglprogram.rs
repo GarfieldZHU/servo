@@ -3,6 +3,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
+use std::cell::Cell;
+
+use canvas_traits::webgl::{
+    webgl_channel, ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, WebGLCommand,
+    WebGLError, WebGLProgramId, WebGLResult,
+};
+use dom_struct::dom_struct;
+use fnv::FnvHashSet;
+
 use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
@@ -15,17 +24,11 @@ use crate::dom::webglobject::WebGLObject;
 use crate::dom::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webglshader::WebGLShader;
 use crate::dom::webgluniformlocation::WebGLUniformLocation;
-use canvas_traits::webgl::{webgl_channel, WebGLProgramId, WebGLResult};
-use canvas_traits::webgl::{
-    ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, WebGLCommand, WebGLError,
-};
-use dom_struct::dom_struct;
-use fnv::FnvHashSet;
-use std::cell::Cell;
 
 #[dom_struct]
 pub struct WebGLProgram {
     webgl_object: WebGLObject,
+    #[no_trace]
     id: WebGLProgramId,
     is_in_use: Cell<bool>,
     marked_for_deletion: Cell<bool>,
@@ -34,8 +37,11 @@ pub struct WebGLProgram {
     link_generation: Cell<u64>,
     fragment_shader: MutNullableDom<WebGLShader>,
     vertex_shader: MutNullableDom<WebGLShader>,
+    #[no_trace]
     active_attribs: DomRefCell<Box<[ActiveAttribInfo]>>,
+    #[no_trace]
     active_uniforms: DomRefCell<Box<[ActiveUniformInfo]>>,
+    #[no_trace]
     active_uniform_blocks: DomRefCell<Box<[ActiveUniformBlockInfo]>>,
     transform_feedback_varyings_length: Cell<i32>,
     transform_feedback_mode: Cell<i32>,
@@ -45,7 +51,7 @@ impl WebGLProgram {
     fn new_inherited(context: &WebGLRenderingContext, id: WebGLProgramId) -> Self {
         Self {
             webgl_object: WebGLObject::new_inherited(context),
-            id: id,
+            id,
             is_in_use: Default::default(),
             marked_for_deletion: Default::default(),
             link_called: Default::default(),
@@ -357,7 +363,7 @@ impl WebGLProgram {
             .active_attribs
             .borrow()
             .iter()
-            .find(|attrib| attrib.name == &*name)
+            .find(|attrib| attrib.name == *name)
             .map_or(-1, |attrib| attrib.location);
         Ok(location)
     }
@@ -472,7 +478,7 @@ impl WebGLProgram {
 
         let validation_errors = names
             .iter()
-            .map(|name| validate_glsl_name(&name))
+            .map(|name| validate_glsl_name(name))
             .collect::<Vec<_>>();
         let first_validation_error = validation_errors.iter().find(|result| result.is_err());
         if let Some(error) = first_validation_error {

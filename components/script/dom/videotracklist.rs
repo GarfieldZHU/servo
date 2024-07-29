@@ -2,20 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::VideoTrackListBinding::VideoTrackListMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
-use crate::dom::bindings::root::Dom;
-use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::htmlmediaelement::HTMLMediaElement;
 use crate::dom::videotrack::VideoTrack;
 use crate::dom::window::Window;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
 
 #[dom_struct]
 pub struct VideoTrackList {
@@ -32,7 +32,7 @@ impl VideoTrackList {
         VideoTrackList {
             eventtarget: EventTarget::new_inherited(),
             tracks: DomRefCell::new(tracks.iter().map(|track| Dom::from_ref(&**track)).collect()),
-            media_element: media_element.map(|m| Dom::from_ref(m)),
+            media_element: media_element.map(Dom::from_ref),
         }
     }
 
@@ -149,7 +149,7 @@ impl VideoTrackListMethods for VideoTrackList {
         if let Some(idx) = self.selected_index() {
             return idx as i32;
         }
-        return -1;
+        -1
     }
 
     // https://html.spec.whatwg.org/multipage/#handler-tracklist-onchange

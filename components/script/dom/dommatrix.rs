@@ -2,23 +2,24 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use euclid::default::Transform3D;
+use js::rust::{CustomAutoRooterGuard, HandleObject};
+use js::typedarray::{Float32Array, Float64Array};
+
 use crate::dom::bindings::codegen::Bindings::DOMMatrixBinding::{DOMMatrixInit, DOMMatrixMethods};
 use crate::dom::bindings::codegen::Bindings::DOMMatrixReadOnlyBinding::DOMMatrixReadOnlyMethods;
 use crate::dom::bindings::codegen::UnionTypes::StringOrUnrestrictedDoubleSequence;
 use crate::dom::bindings::error;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::dommatrixreadonly::{
     dommatrixinit_to_matrix, entries_to_matrix, transform_to_matrix, DOMMatrixReadOnly,
 };
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use euclid::default::Transform3D;
-use js::rust::CustomAutoRooterGuard;
-use js::typedarray::{Float32Array, Float64Array};
 
 #[dom_struct]
 pub struct DOMMatrix {
@@ -27,10 +28,19 @@ pub struct DOMMatrix {
 
 #[allow(non_snake_case)]
 impl DOMMatrix {
-    #[allow(unrooted_must_root)]
     pub fn new(global: &GlobalScope, is2D: bool, matrix: Transform3D<f64>) -> DomRoot<Self> {
+        Self::new_with_proto(global, None, is2D, matrix)
+    }
+
+    #[allow(crown::unrooted_must_root)]
+    fn new_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        is2D: bool,
+        matrix: Transform3D<f64>,
+    ) -> DomRoot<Self> {
         let dommatrix = Self::new_inherited(is2D, matrix);
-        reflect_dom_object(Box::new(dommatrix), global)
+        reflect_dom_object_with_proto(Box::new(dommatrix), global, proto)
     }
 
     pub fn new_inherited(is2D: bool, matrix: Transform3D<f64>) -> Self {
@@ -42,10 +52,16 @@ impl DOMMatrix {
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrixreadonly-dommatrixreadonly
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         init: Option<StringOrUnrestrictedDoubleSequence>,
     ) -> Fallible<DomRoot<Self>> {
         if init.is_none() {
-            return Ok(Self::new(global, true, Transform3D::identity()));
+            return Ok(Self::new_with_proto(
+                global,
+                proto,
+                true,
+                Transform3D::identity(),
+            ));
         }
         match init.unwrap() {
             StringOrUnrestrictedDoubleSequence::String(ref s) => {
@@ -58,22 +74,22 @@ impl DOMMatrix {
                     return Ok(Self::new(global, true, Transform3D::identity()));
                 }
                 transform_to_matrix(s.to_string())
-                    .map(|(is2D, matrix)| Self::new(global, is2D, matrix))
+                    .map(|(is2D, matrix)| Self::new_with_proto(global, proto, is2D, matrix))
             },
             StringOrUnrestrictedDoubleSequence::UnrestrictedDoubleSequence(ref entries) => {
                 entries_to_matrix(&entries[..])
-                    .map(|(is2D, matrix)| Self::new(global, is2D, matrix))
+                    .map(|(is2D, matrix)| Self::new_with_proto(global, proto, is2D, matrix))
             },
         }
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-frommatrix
     pub fn FromMatrix(global: &GlobalScope, other: &DOMMatrixInit) -> Fallible<DomRoot<Self>> {
-        dommatrixinit_to_matrix(&other).map(|(is2D, matrix)| Self::new(global, is2D, matrix))
+        dommatrixinit_to_matrix(other).map(|(is2D, matrix)| Self::new(global, is2D, matrix))
     }
 
     pub fn from_readonly(global: &GlobalScope, ro: &DOMMatrixReadOnly) -> DomRoot<Self> {
-        Self::new(global, ro.is2D(), ro.matrix().clone())
+        Self::new(global, ro.is2D(), *ro.matrix())
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-fromfloat32array
@@ -84,6 +100,7 @@ impl DOMMatrix {
         let vec: Vec<f64> = array.to_vec().iter().map(|&x| x as f64).collect();
         DOMMatrix::Constructor(
             global,
+            None,
             Some(StringOrUnrestrictedDoubleSequence::UnrestrictedDoubleSequence(vec)),
         )
     }
@@ -96,6 +113,7 @@ impl DOMMatrix {
         let vec: Vec<f64> = array.to_vec();
         DOMMatrix::Constructor(
             global,
+            None,
             Some(StringOrUnrestrictedDoubleSequence::UnrestrictedDoubleSequence(vec)),
         )
     }
@@ -329,7 +347,7 @@ impl DOMMatrixMethods for DOMMatrix {
         self.upcast::<DOMMatrixReadOnly>()
             .multiply_self(other)
             // Step 4.
-            .and(Ok(DomRoot::from_ref(&self)))
+            .and(Ok(DomRoot::from_ref(self)))
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-premultiplyself
@@ -338,7 +356,7 @@ impl DOMMatrixMethods for DOMMatrix {
         self.upcast::<DOMMatrixReadOnly>()
             .pre_multiply_self(other)
             // Step 4.
-            .and(Ok(DomRoot::from_ref(&self)))
+            .and(Ok(DomRoot::from_ref(self)))
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-translateself
@@ -347,7 +365,7 @@ impl DOMMatrixMethods for DOMMatrix {
         self.upcast::<DOMMatrixReadOnly>()
             .translate_self(tx, ty, tz);
         // Step 3.
-        DomRoot::from_ref(&self)
+        DomRoot::from_ref(self)
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-scaleself
@@ -364,7 +382,7 @@ impl DOMMatrixMethods for DOMMatrix {
         self.upcast::<DOMMatrixReadOnly>()
             .scale_self(scaleX, scaleY, scaleZ, originX, originY, originZ);
         // Step 7.
-        DomRoot::from_ref(&self)
+        DomRoot::from_ref(self)
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-scale3dself
@@ -379,7 +397,7 @@ impl DOMMatrixMethods for DOMMatrix {
         self.upcast::<DOMMatrixReadOnly>()
             .scale_3d_self(scale, originX, originY, originZ);
         // Step 5.
-        DomRoot::from_ref(&self)
+        DomRoot::from_ref(self)
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-rotateself
@@ -388,7 +406,7 @@ impl DOMMatrixMethods for DOMMatrix {
         self.upcast::<DOMMatrixReadOnly>()
             .rotate_self(rotX, rotY, rotZ);
         // Step 8.
-        DomRoot::from_ref(&self)
+        DomRoot::from_ref(self)
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-rotatefromvectorself
@@ -397,7 +415,7 @@ impl DOMMatrixMethods for DOMMatrix {
         self.upcast::<DOMMatrixReadOnly>()
             .rotate_from_vector_self(x, y);
         // Step 2.
-        DomRoot::from_ref(&self)
+        DomRoot::from_ref(self)
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-rotateaxisangleself
@@ -406,7 +424,7 @@ impl DOMMatrixMethods for DOMMatrix {
         self.upcast::<DOMMatrixReadOnly>()
             .rotate_axis_angle_self(x, y, z, angle);
         // Step 3.
-        DomRoot::from_ref(&self)
+        DomRoot::from_ref(self)
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-skewxself
@@ -414,7 +432,7 @@ impl DOMMatrixMethods for DOMMatrix {
         // Step 1.
         self.upcast::<DOMMatrixReadOnly>().skew_x_self(sx);
         // Step 2.
-        DomRoot::from_ref(&self)
+        DomRoot::from_ref(self)
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-skewyself
@@ -422,7 +440,7 @@ impl DOMMatrixMethods for DOMMatrix {
         // Step 1.
         self.upcast::<DOMMatrixReadOnly>().skew_y_self(sy);
         // Step 2.
-        DomRoot::from_ref(&self)
+        DomRoot::from_ref(self)
     }
 
     // https://drafts.fxtf.org/geometry-1/#dom-dommatrix-invertself
@@ -430,6 +448,6 @@ impl DOMMatrixMethods for DOMMatrix {
         // Steps 1-2.
         self.upcast::<DOMMatrixReadOnly>().invert_self();
         // Step 3.
-        DomRoot::from_ref(&self)
+        DomRoot::from_ref(self)
     }
 }

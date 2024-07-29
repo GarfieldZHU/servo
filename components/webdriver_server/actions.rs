@@ -2,23 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::Handler;
-use compositing::ConstellationMsg;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+use std::{cmp, thread};
+
+use compositing_traits::ConstellationMsg;
 use ipc_channel::ipc;
 use keyboard_types::webdriver::KeyInputState;
 use script_traits::webdriver_msg::WebDriverScriptCommand;
 use script_traits::{MouseButton, MouseEventType, WebDriverCommandMsg};
-use std::cmp;
-use std::collections::HashSet;
-use std::thread;
-use std::time::{Duration, Instant};
-use webdriver::actions::{ActionSequence, ActionsType, GeneralAction, NullActionItem};
-use webdriver::actions::{KeyAction, KeyActionItem, KeyDownAction, KeyUpAction};
 use webdriver::actions::{
-    PointerAction, PointerActionItem, PointerActionParameters, PointerDownAction,
+    ActionSequence, ActionsType, GeneralAction, KeyAction, KeyActionItem, KeyDownAction,
+    KeyUpAction, NullActionItem, PointerAction, PointerActionItem, PointerActionParameters,
+    PointerDownAction, PointerMoveAction, PointerOrigin, PointerType, PointerUpAction,
 };
-use webdriver::actions::{PointerMoveAction, PointerOrigin, PointerType, PointerUpAction};
 use webdriver::error::ErrorStatus;
+
+use crate::Handler;
 
 // Interval between pointerMove increments in ms, based on common vsync
 static POINTERMOVE_INTERVAL: u64 = 17;
@@ -77,6 +77,7 @@ fn compute_tick_duration(tick_actions: &ActionSequence) -> u64 {
             }
         },
         ActionsType::Key { actions: _ } => (),
+        ActionsType::Wheel { .. } => todo!("Not implemented."),
     }
     duration
 }
@@ -100,8 +101,8 @@ impl Handler {
         actions_by_tick: &[ActionSequence],
     ) -> Result<(), ErrorStatus> {
         for tick_actions in actions_by_tick.iter() {
-            let tick_duration = compute_tick_duration(&tick_actions);
-            self.dispatch_tick_actions(&tick_actions, tick_duration)?;
+            let tick_duration = compute_tick_duration(tick_actions);
+            self.dispatch_tick_actions(tick_actions, tick_duration)?;
         }
         Ok(())
     }
@@ -143,10 +144,10 @@ impl Handler {
                                 .or_insert(InputSourceState::Key(KeyInputState::new()));
                             match action {
                                 KeyAction::Down(action) => {
-                                    self.dispatch_keydown_action(&source_id, &action)
+                                    self.dispatch_keydown_action(source_id, action)
                                 },
                                 KeyAction::Up(action) => {
-                                    self.dispatch_keyup_action(&source_id, &action)
+                                    self.dispatch_keyup_action(source_id, action)
                                 },
                             };
                         },
@@ -173,21 +174,22 @@ impl Handler {
                             match action {
                                 PointerAction::Cancel => (),
                                 PointerAction::Down(action) => {
-                                    self.dispatch_pointerdown_action(&source_id, &action)
+                                    self.dispatch_pointerdown_action(source_id, action)
                                 },
                                 PointerAction::Move(action) => self.dispatch_pointermove_action(
-                                    &source_id,
-                                    &action,
+                                    source_id,
+                                    action,
                                     tick_duration,
                                 )?,
                                 PointerAction::Up(action) => {
-                                    self.dispatch_pointerup_action(&source_id, &action)
+                                    self.dispatch_pointerup_action(source_id, action)
                                 },
                             }
                         },
                     }
                 }
             },
+            ActionsType::Wheel { .. } => todo!("Not implemented."),
         }
 
         Ok(())
@@ -282,6 +284,7 @@ impl Handler {
                 actions: vec![PointerActionItem::Pointer(PointerAction::Up(
                     PointerUpAction {
                         button: action.button,
+                        ..Default::default()
                     },
                 ))],
             },
@@ -328,6 +331,7 @@ impl Handler {
                 actions: vec![PointerActionItem::Pointer(PointerAction::Down(
                     PointerDownAction {
                         button: action.button,
+                        ..Default::default()
                     },
                 ))],
             },
@@ -356,8 +360,8 @@ impl Handler {
         let tick_start = Instant::now();
 
         // Steps 1 - 2
-        let x_offset = action.x.unwrap_or(0);
-        let y_offset = action.y.unwrap_or(0);
+        let x_offset = action.x;
+        let y_offset = action.y;
 
         // Steps 3 - 4
         let (start_x, start_y) = match self
@@ -430,7 +434,8 @@ impl Handler {
         Ok(())
     }
 
-    // https://w3c.github.io/webdriver/#dfn-perform-a-pointer-move
+    /// <https://w3c.github.io/webdriver/#dfn-perform-a-pointer-move>
+    #[allow(clippy::too_many_arguments)]
     fn perform_pointer_move(
         &mut self,
         source_id: &str,
@@ -466,11 +471,7 @@ impl Handler {
             };
 
             // Step 3
-            let last = if 1.0 - duration_ratio < 0.001 {
-                true
-            } else {
-                false
-            };
+            let last = 1.0 - duration_ratio < 0.001;
 
             // Step 4
             let (x, y) = if last {

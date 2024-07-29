@@ -2,10 +2,26 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestInfo;
-use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestInit;
-use crate::dom::bindings::codegen::Bindings::ResponseBinding::ResponseBinding::ResponseMethods;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use ipc_channel::ipc;
+use ipc_channel::router::ROUTER;
+use net_traits::request::{
+    CorsSettings, CredentialsMode, Destination, Referrer, Request as NetTraitsRequest,
+    RequestBuilder, RequestMode, ServiceWorkersMode,
+};
+use net_traits::CoreResourceMsg::Fetch as NetTraitsFetch;
+use net_traits::{
+    CoreResourceMsg, CoreResourceThread, FetchChannels, FetchMetadata, FetchResponseListener,
+    FetchResponseMsg, FilteredMetadata, Metadata, NetworkError, ResourceFetchTiming,
+    ResourceTimingType,
+};
+use servo_url::ServoUrl;
+
+use crate::dom::bindings::codegen::Bindings::RequestBinding::{RequestInfo, RequestInit};
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::ResponseType as DOMResponseType;
+use crate::dom::bindings::codegen::Bindings::ResponseBinding::Response_Binding::ResponseMethods;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
@@ -24,20 +40,6 @@ use crate::network_listener::{
 };
 use crate::realms::{enter_realm, InRealm};
 use crate::task_source::TaskSourceName;
-use ipc_channel::ipc;
-use ipc_channel::router::ROUTER;
-use net_traits::request::{
-    CorsSettings, CredentialsMode, Destination, RequestBuilder, RequestMode,
-};
-use net_traits::request::{Referrer, Request as NetTraitsRequest, ServiceWorkersMode};
-use net_traits::CoreResourceMsg::Fetch as NetTraitsFetch;
-use net_traits::{CoreResourceMsg, CoreResourceThread, FetchResponseMsg};
-use net_traits::{FetchChannels, FetchResponseListener, NetworkError};
-use net_traits::{FetchMetadata, FilteredMetadata, Metadata};
-use net_traits::{ResourceFetchTiming, ResourceTimingType};
-use servo_url::ServoUrl;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
 struct FetchContext {
     fetch_promise: Option<TrustedPromise>,
@@ -52,6 +54,7 @@ struct FetchContext {
 #[derive(Default, JSTraceable, MallocSizeOf)]
 pub struct FetchCanceller {
     #[ignore_malloc_size_of = "channels are hard"]
+    #[no_trace]
     cancel_chan: Option<ipc::IpcSender<()>>,
 }
 
@@ -127,11 +130,13 @@ fn request_init_from_request(request: NetTraitsRequest) -> RequestBuilder {
         initiator: request.initiator,
         csp_list: None,
         https_state: request.https_state,
+        response_tainting: request.response_tainting,
+        crash: None,
     }
 }
 
 // https://fetch.spec.whatwg.org/#fetch-method
-#[allow(unrooted_must_root, non_snake_case)]
+#[allow(crown::unrooted_must_root, non_snake_case)]
 pub fn Fetch(
     global: &GlobalScope,
     input: RequestInfo,
@@ -141,11 +146,11 @@ pub fn Fetch(
     let core_resource_thread = global.core_resource_thread();
 
     // Step 1
-    let promise = Promise::new_in_current_realm(global, comp);
+    let promise = Promise::new_in_current_realm(comp);
     let response = Response::new(global);
 
     // Step 2
-    let request = match Request::Constructor(global, input, init) {
+    let request = match Request::Constructor(global, None, input, init) {
         Err(e) => {
             response.error_stream(e.clone());
             promise.reject_error(e);
@@ -156,7 +161,7 @@ pub fn Fetch(
     let timing_type = request.timing_type();
 
     let mut request_init = request_init_from_request(request);
-    request_init.csp_list = global.get_csp_list().clone();
+    request_init.csp_list.clone_from(&global.get_csp_list());
 
     // Step 3
     if global.downcast::<ServiceWorkerGlobalScope>().is_some() {
@@ -206,7 +211,7 @@ impl FetchResponseListener for FetchContext {
         // TODO
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn process_response(&mut self, fetch_metadata: Result<FetchMetadata, NetworkError>) {
         let promise = self
             .fetch_promise
@@ -283,10 +288,9 @@ impl FetchResponseListener for FetchContext {
 
     fn submit_resource_timing(&mut self) {
         // navigation submission is handled in servoparser/mod.rs
-        match self.resource_timing.timing_type {
-            ResourceTimingType::Resource => network_listener::submit_timing(self),
-            _ => {},
-        };
+        if self.resource_timing.timing_type == ResourceTimingType::Resource {
+            network_listener::submit_timing(self)
+        }
     }
 }
 
@@ -341,7 +345,7 @@ pub fn load_whole_resource(
             FetchResponseMsg::ProcessResponseEOF(Ok(_)) => {
                 let metadata = metadata.unwrap();
                 if let Some(timing) = &metadata.timing {
-                    submit_timing_data(global, url, InitiatorType::Other, &timing);
+                    submit_timing_data(global, url, InitiatorType::Other, timing);
                 }
                 return Ok((metadata, buf));
             },
@@ -351,7 +355,7 @@ pub fn load_whole_resource(
     }
 }
 
-/// https://html.spec.whatwg.org/multipage/#create-a-potential-cors-request
+/// <https://html.spec.whatwg.org/multipage/#create-a-potential-cors-request>
 pub(crate) fn create_a_potential_cors_request(
     url: ServoUrl,
     destination: Destination,

@@ -2,20 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use canvas_traits::webgl::WebGLError::*;
+use canvas_traits::webgl::{webgl_channel, WebGLCommand, WebGLSamplerId};
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webglobject::WebGLObject;
 use crate::dom::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use canvas_traits::webgl::WebGLError::*;
-use canvas_traits::webgl::{webgl_channel, WebGLCommand, WebGLSamplerId};
-use dom_struct::dom_struct;
-use std::cell::Cell;
 
 #[dom_struct]
 pub struct WebGLSampler {
     webgl_object: WebGLObject,
+    #[no_trace]
     gl_id: WebGLSamplerId,
     marked_for_deletion: Cell<bool>,
 }
@@ -63,10 +66,10 @@ fn validate_params(pname: u32, value: WebGLSamplerValue) -> bool {
             };
             allowed_values.contains(&value)
         },
-        WebGLSamplerValue::Float(_) => match pname {
-            constants::TEXTURE_MIN_LOD | constants::TEXTURE_MAX_LOD => true,
-            _ => false,
-        },
+        WebGLSamplerValue::Float(_) => matches!(
+            pname,
+            constants::TEXTURE_MIN_LOD | constants::TEXTURE_MAX_LOD
+        ),
     }
 }
 

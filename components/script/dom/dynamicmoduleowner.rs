@@ -2,18 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use uuid::Uuid;
+
 use crate::dom::bindings::codegen::Bindings::DynamicModuleOwnerBinding::DynamicModuleOwnerMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
-use dom_struct::dom_struct;
-use std::rc::Rc;
-use uuid::Uuid;
 
 /// An unique id for dynamic module
 #[derive(Clone, Copy, Debug, Eq, Hash, JSTraceable, PartialEq)]
-pub struct DynamicModuleId(pub Uuid);
+pub struct DynamicModuleId(#[no_trace] pub Uuid);
 
 #[dom_struct]
 pub struct DynamicModuleOwner {
@@ -28,7 +30,7 @@ pub struct DynamicModuleOwner {
 }
 
 impl DynamicModuleOwner {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn new_inherited(promise: Rc<Promise>, id: DynamicModuleId) -> Self {
         DynamicModuleOwner {
             reflector_: Reflector::new(),
@@ -37,7 +39,7 @@ impl DynamicModuleOwner {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(global: &GlobalScope, promise: Rc<Promise>, id: DynamicModuleId) -> DomRoot<Self> {
         reflect_dom_object(
             Box::new(DynamicModuleOwner::new_inherited(promise, id)),

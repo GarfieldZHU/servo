@@ -2,6 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::{Arc, Mutex};
+
+use net_traits::{
+    Action, FetchResponseListener, FetchResponseMsg, ResourceFetchTiming, ResourceTimingType,
+};
+use servo_url::ServoUrl;
+
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
@@ -10,11 +17,6 @@ use crate::dom::performanceresourcetiming::{InitiatorType, PerformanceResourceTi
 use crate::task::{TaskCanceller, TaskOnce};
 use crate::task_source::networking::NetworkingTaskSource;
 use crate::task_source::TaskSource;
-use net_traits::{
-    Action, FetchResponseListener, FetchResponseMsg, ResourceFetchTiming, ResourceTimingType,
-};
-use servo_url::ServoUrl;
-use std::sync::{Arc, Mutex};
 
 /// An off-thread sink for async network event tasks. All such events are forwarded to
 /// a target thread, where they are invoked on the provided context object.
@@ -69,7 +71,7 @@ impl<Listener: PreInvoke + Send + 'static> NetworkListener<Listener> {
     pub fn notify<A: Action<Listener> + Send + 'static>(&self, action: A) {
         let task = ListenerTask {
             context: self.context.clone(),
-            action: action,
+            action,
         };
         let result = if let Some(ref canceller) = self.canceller {
             self.task_source.queue_with_canceller(task, canceller)

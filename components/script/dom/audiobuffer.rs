@@ -2,6 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cmp::min;
+
+use dom_struct::dom_struct;
+use js::rust::{CustomAutoRooterGuard, HandleObject};
+use js::typedarray::{Float32, Float32Array};
+use servo_media::audio::buffer_source_node::AudioBuffer as ServoMediaAudioBuffer;
+
+use super::bindings::buffer_source::HeapBufferSource;
 use crate::dom::audionode::MAX_CHANNEL_COUNT;
 use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::AudioBufferBinding::{
@@ -9,34 +17,24 @@ use crate::dom::bindings::codegen::Bindings::AudioBufferBinding::{
 };
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, Reflector};
 use crate::dom::bindings::root::DomRoot;
+use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
 use crate::realms::enter_realm;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsapi::JS_GetArrayBufferViewBuffer;
-use js::jsapi::{Heap, JSObject};
-use js::rust::wrappers::DetachArrayBuffer;
-use js::rust::CustomAutoRooterGuard;
-use js::typedarray::{CreateWith, Float32Array};
-use servo_media::audio::buffer_source_node::AudioBuffer as ServoMediaAudioBuffer;
-use std::cmp::min;
-use std::ptr::{self, NonNull};
 
 // Spec mandates at least [8000, 96000], we use [8000, 192000] to match Firefox
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbuffer
 pub const MIN_SAMPLE_RATE: f32 = 8000.;
 pub const MAX_SAMPLE_RATE: f32 = 192000.;
 
-type JSAudioChannel = Heap<*mut JSObject>;
-
 /// The AudioBuffer keeps its data either in js_channels
 /// or in shared_channels if js_channels buffers are detached.
 ///
 /// js_channels buffers are (re)attached right before calling GetChannelData
 /// and remain attached until its contents are needed by some other API
-/// implementation. Follow https://webaudio.github.io/web-audio-api/#acquire-the-content
+/// implementation. Follow <https://webaudio.github.io/web-audio-api/#acquire-the-content>
 /// to know in which situations js_channels buffers must be detached.
 ///
 #[dom_struct]
@@ -44,26 +42,28 @@ pub struct AudioBuffer {
     reflector_: Reflector,
     /// Float32Arrays returned by calls to GetChannelData.
     #[ignore_malloc_size_of = "mozjs"]
-    js_channels: DomRefCell<Vec<JSAudioChannel>>,
+    js_channels: DomRefCell<Vec<HeapBufferSource<Float32>>>,
     /// Aggregates the data from js_channels.
-    /// This is Some<T> iff the buffers in js_channels are detached.
+    /// This is `Some<T>` iff the buffers in js_channels are detached.
     #[ignore_malloc_size_of = "servo_media"]
+    #[no_trace]
     shared_channels: DomRefCell<Option<ServoMediaAudioBuffer>>,
-    /// https://webaudio.github.io/web-audio-api/#dom-audiobuffer-samplerate
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiobuffer-samplerate>
     sample_rate: f32,
-    /// https://webaudio.github.io/web-audio-api/#dom-audiobuffer-length
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiobuffer-length>
     length: u32,
-    /// https://webaudio.github.io/web-audio-api/#dom-audiobuffer-duration
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiobuffer-duration>
     duration: f64,
-    /// https://webaudio.github.io/web-audio-api/#dom-audiobuffer-numberofchannels
+    /// <https://webaudio.github.io/web-audio-api/#dom-audiobuffer-numberofchannels>
     number_of_channels: u32,
 }
 
 impl AudioBuffer {
-    #[allow(unrooted_must_root)]
-    #[allow(unsafe_code)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(number_of_channels: u32, length: u32, sample_rate: f32) -> AudioBuffer {
-        let vec = (0..number_of_channels).map(|_| Heap::default()).collect();
+        let vec = (0..number_of_channels)
+            .map(|_| HeapBufferSource::default())
+            .collect();
         AudioBuffer {
             reflector_: Reflector::new(),
             js_channels: DomRefCell::new(vec),
@@ -75,7 +75,6 @@ impl AudioBuffer {
         }
     }
 
-    #[allow(unrooted_must_root)]
     pub fn new(
         global: &Window,
         number_of_channels: u32,
@@ -83,8 +82,27 @@ impl AudioBuffer {
         sample_rate: f32,
         initial_data: Option<&[Vec<f32>]>,
     ) -> DomRoot<AudioBuffer> {
+        Self::new_with_proto(
+            global,
+            None,
+            number_of_channels,
+            length,
+            sample_rate,
+            initial_data,
+        )
+    }
+
+    #[allow(crown::unrooted_must_root)]
+    fn new_with_proto(
+        global: &Window,
+        proto: Option<HandleObject>,
+        number_of_channels: u32,
+        length: u32,
+        sample_rate: f32,
+        initial_data: Option<&[Vec<f32>]>,
+    ) -> DomRoot<AudioBuffer> {
         let buffer = AudioBuffer::new_inherited(number_of_channels, length, sample_rate);
-        let buffer = reflect_dom_object(Box::new(buffer), global);
+        let buffer = reflect_dom_object_with_proto(Box::new(buffer), global, proto);
         buffer.set_initial_data(initial_data);
         buffer
     }
@@ -93,18 +111,20 @@ impl AudioBuffer {
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         options: &AudioBufferOptions,
     ) -> Fallible<DomRoot<AudioBuffer>> {
-        if options.length <= 0 ||
-            options.numberOfChannels <= 0 ||
+        if options.length == 0 ||
+            options.numberOfChannels == 0 ||
             options.numberOfChannels > MAX_CHANNEL_COUNT ||
             *options.sampleRate < MIN_SAMPLE_RATE ||
             *options.sampleRate > MAX_SAMPLE_RATE
         {
             return Err(Error::NotSupported);
         }
-        Ok(AudioBuffer::new(
+        Ok(AudioBuffer::new_with_proto(
             window,
+            proto,
             options.numberOfChannels,
             options.length,
             *options.sampleRate,
@@ -129,34 +149,23 @@ impl AudioBuffer {
         *self.shared_channels.borrow_mut() = Some(channels);
     }
 
-    #[allow(unsafe_code)]
     fn restore_js_channel_data(&self, cx: JSContext) -> bool {
-        let _ac = enter_realm(&*self);
+        let _ac = enter_realm(self);
         for (i, channel) in self.js_channels.borrow_mut().iter().enumerate() {
-            if !channel.get().is_null() {
+            if channel.is_initialized() {
                 // Already have data in JS array.
                 continue;
             }
 
-            rooted!(in (*cx) let mut array = ptr::null_mut::<JSObject>());
             if let Some(ref shared_channels) = *self.shared_channels.borrow() {
                 // Step 4. of
                 // https://webaudio.github.io/web-audio-api/#acquire-the-content
                 // "Attach ArrayBuffers containing copies of the data to the AudioBuffer,
                 // to be returned by the next call to getChannelData()".
-                unsafe {
-                    if Float32Array::create(
-                        *cx,
-                        CreateWith::Slice(&shared_channels.buffers[i]),
-                        array.handle_mut(),
-                    )
-                    .is_err()
-                    {
-                        return false;
-                    }
+                if channel.set_data(cx, &shared_channels.buffers[i]).is_err() {
+                    return false;
                 }
             }
-            channel.set(array.get());
         }
 
         *self.shared_channels.borrow_mut() = None;
@@ -165,41 +174,21 @@ impl AudioBuffer {
     }
 
     // https://webaudio.github.io/web-audio-api/#acquire-the-content
-    #[allow(unsafe_code)]
     fn acquire_contents(&self) -> Option<ServoMediaAudioBuffer> {
         let mut result = ServoMediaAudioBuffer::new(
             self.number_of_channels as u8,
             self.length as usize,
             self.sample_rate,
         );
-        let cx = self.global().get_cx();
+        let cx = GlobalScope::get_cx();
         for (i, channel) in self.js_channels.borrow_mut().iter().enumerate() {
             // Step 1.
-            if channel.get().is_null() {
+            if !channel.is_initialized() {
                 return None;
             }
 
-            // Step 2.
-            let channel_data = unsafe {
-                typedarray!(in(*cx) let array: Float32Array = channel.get());
-                if let Ok(array) = array {
-                    let data = array.to_vec();
-                    let mut is_shared = false;
-                    rooted!(in (*cx) let view_buffer =
-                        JS_GetArrayBufferViewBuffer(*cx, channel.handle(), &mut is_shared));
-                    // This buffer is always created unshared
-                    debug_assert!(!is_shared);
-                    let _ = DetachArrayBuffer(*cx, view_buffer.handle());
-                    data
-                } else {
-                    return None;
-                }
-            };
-
-            channel.set(ptr::null_mut());
-
             // Step 3.
-            result.buffers[i] = channel_data;
+            result.buffers[i] = channel.acquire_data(cx).ok()?;
         }
 
         Some(result)
@@ -238,8 +227,7 @@ impl AudioBufferMethods for AudioBuffer {
     }
 
     // https://webaudio.github.io/web-audio-api/#dom-audiobuffer-getchanneldata
-    #[allow(unsafe_code)]
-    fn GetChannelData(&self, cx: JSContext, channel: u32) -> Fallible<NonNull<JSObject>> {
+    fn GetChannelData(&self, cx: JSContext, channel: u32) -> Fallible<Float32Array> {
         if channel >= self.number_of_channels {
             return Err(Error::IndexSize);
         }
@@ -247,11 +235,10 @@ impl AudioBufferMethods for AudioBuffer {
         if !self.restore_js_channel_data(cx) {
             return Err(Error::JSFailed);
         }
-        unsafe {
-            Ok(NonNull::new_unchecked(
-                self.js_channels.borrow()[channel as usize].get(),
-            ))
-        }
+
+        self.js_channels.borrow()[channel as usize]
+            .get_buffer()
+            .map_err(|_| Error::JSFailed)
     }
 
     // https://webaudio.github.io/web-audio-api/#dom-audiobuffer-copyfromchannel
@@ -271,18 +258,19 @@ impl AudioBufferMethods for AudioBuffer {
         }
 
         let bytes_to_copy = min(self.length - start_in_channel, destination.len() as u32) as usize;
-        let cx = self.global().get_cx();
+        let cx = GlobalScope::get_cx();
         let channel_number = channel_number as usize;
         let offset = start_in_channel as usize;
-        let mut dest = Vec::with_capacity(destination.len());
+        let mut dest = vec![0.0_f32; bytes_to_copy];
 
         // We either copy form js_channels or shared_channels.
-        let js_channel = self.js_channels.borrow()[channel_number].get();
-        if !js_channel.is_null() {
-            typedarray!(in(*cx) let array: Float32Array = js_channel);
-            if let Ok(array) = array {
-                let data = unsafe { array.as_slice() };
-                dest.extend_from_slice(&data[offset..offset + bytes_to_copy]);
+        let js_channel = &self.js_channels.borrow()[channel_number];
+        if js_channel.is_initialized() {
+            if js_channel
+                .copy_data_to(cx, &mut dest, offset, offset + bytes_to_copy)
+                .is_err()
+            {
+                return Err(Error::IndexSize);
             }
         } else if let Some(ref shared_channels) = *self.shared_channels.borrow() {
             if let Some(shared_channel) = shared_channels.buffers.get(channel_number) {
@@ -298,7 +286,6 @@ impl AudioBufferMethods for AudioBuffer {
     }
 
     // https://webaudio.github.io/web-audio-api/#dom-audiobuffer-copytochannel
-    #[allow(unsafe_code)]
     fn CopyToChannel(
         &self,
         source: CustomAutoRooterGuard<Float32Array>,
@@ -313,30 +300,20 @@ impl AudioBufferMethods for AudioBuffer {
             return Err(Error::IndexSize);
         }
 
-        let cx = self.global().get_cx();
+        let cx = GlobalScope::get_cx();
         if !self.restore_js_channel_data(cx) {
             return Err(Error::JSFailed);
         }
 
-        let js_channel = self.js_channels.borrow()[channel_number as usize].get();
-        if js_channel.is_null() {
+        let js_channel = &self.js_channels.borrow()[channel_number as usize];
+        if !js_channel.is_initialized() {
             // The array buffer was detached.
             return Err(Error::IndexSize);
         }
 
-        typedarray!(in(*cx) let js_channel: Float32Array = js_channel);
-        if let Ok(mut js_channel) = js_channel {
-            let bytes_to_copy = min(self.length - start_in_channel, source.len() as u32) as usize;
-            let js_channel_data = unsafe { js_channel.as_mut_slice() };
-            let (_, js_channel_data) = js_channel_data.split_at_mut(start_in_channel as usize);
-            unsafe {
-                js_channel_data[0..bytes_to_copy]
-                    .copy_from_slice(&source.as_slice()[0..bytes_to_copy])
-            };
-        } else {
-            return Err(Error::IndexSize);
-        }
-
-        Ok(())
+        let bytes_to_copy = min(self.length - start_in_channel, source.len() as u32) as usize;
+        js_channel
+            .copy_data_from(cx, source, start_in_channel as usize, bytes_to_copy)
+            .map_err(|_| Error::IndexSize)
     }
 }

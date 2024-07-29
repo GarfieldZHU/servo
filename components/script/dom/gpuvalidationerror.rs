@@ -2,41 +2,42 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::GPUValidationErrorBinding::GPUValidationErrorMethods;
-use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+
+use super::types::GPUError;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
 
 #[dom_struct]
 pub struct GPUValidationError {
-    reflector_: Reflector,
-    message: DOMString,
+    gpu_error: GPUError,
 }
 
 impl GPUValidationError {
     fn new_inherited(message: DOMString) -> Self {
         Self {
-            reflector_: Reflector::new(),
-            message,
+            gpu_error: GPUError::new_inherited(message),
         }
     }
 
-    pub fn new(global: &GlobalScope, message: DOMString) -> DomRoot<Self> {
-        reflect_dom_object(Box::new(GPUValidationError::new_inherited(message)), global)
+    pub fn new_with_proto(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        message: DOMString,
+    ) -> DomRoot<Self> {
+        reflect_dom_object_with_proto(Box::new(Self::new_inherited(message)), global, proto)
     }
 
-    /// https://gpuweb.github.io/gpuweb/#dom-gpuvalidationerror-gpuvalidationerror
+    /// <https://gpuweb.github.io/gpuweb/#dom-gpuvalidationerror-gpuvalidationerror>
     #[allow(non_snake_case)]
-    pub fn Constructor(global: &GlobalScope, message: DOMString) -> DomRoot<Self> {
-        GPUValidationError::new(global, message)
-    }
-}
-
-impl GPUValidationErrorMethods for GPUValidationError {
-    /// https://gpuweb.github.io/gpuweb/#dom-gpuvalidationerror-message
-    fn Message(&self) -> DOMString {
-        self.message.clone()
+    pub fn Constructor(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+        message: DOMString,
+    ) -> DomRoot<Self> {
+        Self::new_with_proto(global, proto, message)
     }
 }

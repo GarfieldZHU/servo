@@ -2,188 +2,60 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Utilities for querying the layout, as needed by the layout thread.
-use crate::context::LayoutContext;
-use crate::flow::FragmentTree;
-use crate::fragments::{Fragment, Tag};
+//! Utilities for querying the layout, as needed by layout.
+use std::sync::Arc;
+
 use app_units::Au;
 use euclid::default::{Point2D, Rect};
-use euclid::Size2D;
-use euclid::Vector2D;
-use ipc_channel::ipc::IpcSender;
-use msg::constellation_msg::PipelineId;
-use script_layout_interface::rpc::TextIndexResponse;
-use script_layout_interface::rpc::{ContentBoxResponse, ContentBoxesResponse, LayoutRPC};
-use script_layout_interface::rpc::{NodeGeometryResponse, NodeScrollIdResponse};
-use script_layout_interface::rpc::{OffsetParentResponse, ResolvedStyleResponse};
+use euclid::{SideOffsets2D, Size2D, Vector2D};
+use log::warn;
 use script_layout_interface::wrapper_traits::{
     LayoutNode, ThreadSafeLayoutElement, ThreadSafeLayoutNode,
 };
-use script_traits::LayoutMsg as ConstellationMsg;
-use script_traits::UntrustedNodeAddress;
+use script_layout_interface::OffsetParentResponse;
 use servo_arc::Arc as ServoArc;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use servo_url::ServoUrl;
 use style::computed_values::position::T as Position;
-use style::context::{StyleContext, ThreadLocalStyleContext};
-use style::dom::OpaqueNode;
-use style::dom::TElement;
+use style::context::{QuirksMode, SharedStyleContext, StyleContext, ThreadLocalStyleContext};
+use style::dom::{OpaqueNode, TElement};
 use style::properties::style_structs::Font;
-use style::properties::{LonghandId, PropertyDeclarationId, PropertyId};
+use style::properties::{
+    parse_one_declaration_into, ComputedValues, Importance, LonghandId, PropertyDeclarationBlock,
+    PropertyDeclarationId, PropertyId, ShorthandId, SourcePropertyDeclaration,
+};
 use style::selector_parser::PseudoElement;
+use style::shared_lock::SharedRwLock;
+use style::stylesheets::{CssRuleType, Origin, UrlExtraData};
 use style::stylist::RuleInclusion;
 use style::traversal::resolve_style;
-use style::values::generics::text::LineHeight;
-use style_traits::CSSPixel;
-use style_traits::ToCss;
-use webrender_api::units::LayoutPixel;
-use webrender_api::ExternalScrollId;
+use style::values::generics::font::LineHeight;
+use style_traits::{ParsingMode, ToCss};
 
-/// Mutable data belonging to the LayoutThread.
-///
-/// This needs to be protected by a mutex so we can do fast RPCs.
-pub struct LayoutThreadData {
-    /// The channel on which messages can be sent to the constellation.
-    pub constellation_chan: IpcSender<ConstellationMsg>,
-
-    /// The root stacking context.
-    pub display_list: Option<webrender_api::DisplayListBuilder>,
-
-    /// A queued response for the union of the content boxes of a node.
-    pub content_box_response: Option<Rect<Au>>,
-
-    /// A queued response for the content boxes of a node.
-    pub content_boxes_response: Vec<Rect<Au>>,
-
-    /// A queued response for the client {top, left, width, height} of a node in pixels.
-    pub client_rect_response: Rect<i32>,
-
-    /// A queued response for the scroll id for a given node.
-    pub scroll_id_response: Option<ExternalScrollId>,
-
-    /// A queued response for the scroll {top, left, width, height} of a node in pixels.
-    pub scroll_area_response: Rect<i32>,
-
-    /// A queued response for the resolved style property of an element.
-    pub resolved_style_response: String,
-
-    /// A queued response for the resolved font style for canvas.
-    pub resolved_font_style_response: Option<ServoArc<Font>>,
-
-    /// A queued response for the offset parent/rect of a node.
-    pub offset_parent_response: OffsetParentResponse,
-
-    /// Scroll offsets of scrolling regions.
-    pub scroll_offsets: HashMap<ExternalScrollId, Vector2D<f32, LayoutPixel>>,
-
-    /// Index in a text fragment. We need this do determine the insertion point.
-    pub text_index_response: TextIndexResponse,
-
-    /// A queued response for the list of nodes at a given point.
-    pub nodes_from_point_response: Vec<UntrustedNodeAddress>,
-
-    /// A queued response for the inner text of a given element.
-    pub element_inner_text_response: String,
-
-    /// A queued response for the viewport dimensions for a given browsing context.
-    pub inner_window_dimensions_response: Option<Size2D<f32, CSSPixel>>,
-}
-
-pub struct LayoutRPCImpl(pub Arc<Mutex<LayoutThreadData>>);
-
-impl LayoutRPC for LayoutRPCImpl {
-    // The neat thing here is that in order to answer the following two queries we only
-    // need to compare nodes for equality. Thus we can safely work only with `OpaqueNode`.
-    fn content_box(&self) -> ContentBoxResponse {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        ContentBoxResponse(rw_data.content_box_response)
-    }
-
-    /// Requests the dimensions of all the content boxes, as in the `getClientRects()` call.
-    fn content_boxes(&self) -> ContentBoxesResponse {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        ContentBoxesResponse(rw_data.content_boxes_response.clone())
-    }
-
-    fn nodes_from_point_response(&self) -> Vec<UntrustedNodeAddress> {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        rw_data.nodes_from_point_response.clone()
-    }
-
-    fn node_geometry(&self) -> NodeGeometryResponse {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        NodeGeometryResponse {
-            client_rect: rw_data.client_rect_response,
-        }
-    }
-
-    fn node_scroll_area(&self) -> NodeGeometryResponse {
-        NodeGeometryResponse {
-            client_rect: self.0.lock().unwrap().scroll_area_response,
-        }
-    }
-
-    fn node_scroll_id(&self) -> NodeScrollIdResponse {
-        NodeScrollIdResponse(
-            self.0
-                .lock()
-                .unwrap()
-                .scroll_id_response
-                .expect("scroll id is not correctly fetched"),
-        )
-    }
-
-    /// Retrieves the resolved value for a CSS style property.
-    fn resolved_style(&self) -> ResolvedStyleResponse {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        ResolvedStyleResponse(rw_data.resolved_style_response.clone())
-    }
-
-    fn resolved_font_style(&self) -> Option<ServoArc<Font>> {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        rw_data.resolved_font_style_response.clone()
-    }
-
-    fn offset_parent(&self) -> OffsetParentResponse {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        rw_data.offset_parent_response.clone()
-    }
-
-    fn text_index(&self) -> TextIndexResponse {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        rw_data.text_index_response.clone()
-    }
-
-    fn element_inner_text(&self) -> String {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        rw_data.element_inner_text_response.clone()
-    }
-
-    fn inner_window_dimensions(&self) -> Option<Size2D<f32, CSSPixel>> {
-        let &LayoutRPCImpl(ref rw_data) = self;
-        let rw_data = rw_data.lock().unwrap();
-        rw_data.inner_window_dimensions_response.clone()
-    }
-}
+use crate::fragment_tree::{BoxFragment, Fragment, FragmentFlags, FragmentTree, Tag};
 
 pub fn process_content_box_request(
     requested_node: OpaqueNode,
     fragment_tree: Option<Arc<FragmentTree>>,
 ) -> Option<Rect<Au>> {
-    Some(fragment_tree?.get_content_box_for_node(requested_node))
+    let rects = fragment_tree?.get_content_boxes_for_node(requested_node);
+    if rects.is_empty() {
+        return None;
+    }
+
+    Some(
+        rects
+            .iter()
+            .fold(Rect::zero(), |unioned_rect, rect| rect.union(&unioned_rect)),
+    )
 }
 
-pub fn process_content_boxes_request(_requested_node: OpaqueNode) -> Vec<Rect<Au>> {
-    vec![]
+pub fn process_content_boxes_request(
+    requested_node: OpaqueNode,
+    fragment_tree: Option<Arc<FragmentTree>>,
+) -> Vec<Rect<Au>> {
+    fragment_tree
+        .map(|tree| tree.get_content_boxes_for_node(requested_node))
+        .unwrap_or_default()
 }
 
 pub fn process_node_geometry_request(
@@ -197,23 +69,30 @@ pub fn process_node_geometry_request(
     }
 }
 
-pub fn process_node_scroll_id_request<'dom>(
-    id: PipelineId,
-    requested_node: impl LayoutNode<'dom>,
-) -> ExternalScrollId {
-    let layout_node = requested_node.to_threadsafe();
-    layout_node.generate_scroll_id(id)
-}
+/// <https://drafts.csswg.org/cssom-view/#scrolling-area>
+pub fn process_node_scroll_area_request(
+    requested_node: Option<OpaqueNode>,
+    fragment_tree: Option<Arc<FragmentTree>>,
+) -> Rect<i32> {
+    let rect = match (fragment_tree, requested_node) {
+        (Some(tree), Some(node)) => tree.get_scrolling_area_for_node(node),
+        (Some(tree), None) => tree.get_scrolling_area_for_viewport(),
+        _ => return Rect::zero(),
+    };
 
-/// https://drafts.csswg.org/cssom-view/#scrolling-area
-pub fn process_node_scroll_area_request(_requested_node: OpaqueNode) -> Rect<i32> {
-    Rect::zero()
+    Rect::new(
+        Point2D::new(rect.origin.x.to_f32_px(), rect.origin.y.to_f32_px()),
+        Size2D::new(rect.size.width.to_f32_px(), rect.size.height.to_f32_px()),
+    )
+    .round()
+    .to_i32()
+    .to_untyped()
 }
 
 /// Return the resolved value of property for a given (pseudo)element.
 /// <https://drafts.csswg.org/cssom/#resolved-value>
 pub fn process_resolved_style_request<'dom>(
-    context: &LayoutContext,
+    context: &SharedStyleContext,
     node: impl LayoutNode<'dom>,
     pseudo: &Option<PseudoElement>,
     property: &PropertyId,
@@ -248,10 +127,10 @@ pub fn process_resolved_style_request<'dom>(
 
     let style = &*layout_element.resolved_style();
     let longhand_id = match *property {
-        PropertyId::LonghandAlias(id, _) | PropertyId::Longhand(id) => id,
-        // Firefox returns blank strings for the computed value of shorthands,
-        // so this should be web-compatible.
-        PropertyId::ShorthandAlias(..) | PropertyId::Shorthand(_) => return String::new(),
+        PropertyId::NonCustom(id) => match id.longhand_or_shorthand() {
+            Ok(longhand_id) => longhand_id,
+            Err(shorthand_id) => return shorthand_to_css_string(shorthand_id, style),
+        },
         PropertyId::Custom(ref name) => {
             return style.computed_value_to_string(PropertyDeclarationId::Custom(name));
         },
@@ -261,13 +140,7 @@ pub fn process_resolved_style_request<'dom>(
     let computed_style =
         || style.computed_value_to_string(PropertyDeclarationId::Longhand(longhand_id));
 
-    let opaque = node.opaque();
-    let tag_to_find = match *pseudo {
-        None => Tag::Node(opaque),
-        Some(PseudoElement::Before) => Tag::BeforePseudo(opaque),
-        Some(PseudoElement::After) => Tag::AfterPseudo(opaque),
-        Some(_) => unreachable!("Should have returned before this point."),
-    };
+    let tag_to_find = Tag::new_pseudo(node.opaque(), *pseudo);
 
     // https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle
     // Here we are trying to conform to the specification that says that getComputedStyle
@@ -278,8 +151,9 @@ pub fn process_resolved_style_request<'dom>(
     // For line height, the resolved value is the computed value if it
     // is "normal" and the used value otherwise.
     if longhand_id == LonghandId::LineHeight {
-        let font_size = style.get_font().font_size.size.0;
-        return match style.get_inherited_text().line_height {
+        let font = style.get_font();
+        let font_size = font.font_size.computed_size();
+        return match font.line_height {
             LineHeight::Normal => computed_style(),
             LineHeight::Number(value) => (font_size * value.0).to_css_string(),
             LineHeight::Length(value) => value.0.to_css_string(),
@@ -300,24 +174,64 @@ pub fn process_resolved_style_request<'dom>(
     };
     fragment_tree
         .find(|fragment, _, containing_block| {
-            let box_fragment = match fragment {
-                Fragment::Box(ref box_fragment) if box_fragment.tag == tag_to_find => box_fragment,
+            if Some(tag_to_find) != fragment.tag() {
+                return None;
+            }
+
+            let (content_rect, margins, padding) = match fragment {
+                Fragment::Box(ref box_fragment) | Fragment::Float(ref box_fragment) => {
+                    if style.get_box().position != Position::Static {
+                        let resolved_insets = || {
+                            box_fragment.calculate_resolved_insets_if_positioned(containing_block)
+                        };
+                        match longhand_id {
+                            LonghandId::Top => return Some(resolved_insets().top.to_css_string()),
+                            LonghandId::Right => {
+                                return Some(resolved_insets().right.to_css_string())
+                            },
+                            LonghandId::Bottom => {
+                                return Some(resolved_insets().bottom.to_css_string())
+                            },
+                            LonghandId::Left => {
+                                return Some(resolved_insets().left.to_css_string())
+                            },
+                            _ => {},
+                        }
+                    }
+                    let content_rect = box_fragment
+                        .content_rect
+                        .to_physical(box_fragment.style.writing_mode, containing_block);
+                    let margins = box_fragment
+                        .margin
+                        .to_physical(box_fragment.style.writing_mode);
+                    let padding = box_fragment
+                        .padding
+                        .to_physical(box_fragment.style.writing_mode);
+                    (content_rect, margins, padding)
+                },
+                Fragment::Positioning(positioning_fragment) => {
+                    let content_rect = positioning_fragment
+                        .rect
+                        .to_physical(positioning_fragment.writing_mode, containing_block);
+                    (content_rect, SideOffsets2D::zero(), SideOffsets2D::zero())
+                },
                 _ => return None,
             };
 
-            let positioned = style.get_box().position != Position::Static;
-            let content_rect = box_fragment
-                .content_rect
-                .to_physical(box_fragment.style.writing_mode, &containing_block);
-            let margins = box_fragment
-                .margin
-                .to_physical(box_fragment.style.writing_mode);
-            let padding = box_fragment
-                .padding
-                .to_physical(box_fragment.style.writing_mode);
+            // https://drafts.csswg.org/cssom/#resolved-value-special-case-property-like-height
+            // > If the property applies to the element or pseudo-element and the resolved value of the
+            // > display property is not none or contents, then the resolved value is the used value.
+            // > Otherwise the resolved value is the computed value.
+            //
+            // However, all browsers ignore that for margin and padding properties, and resolve to a length
+            // even if the property doesn't apply: https://github.com/w3c/csswg-drafts/issues/10391
             match longhand_id {
-                LonghandId::Width => Some(content_rect.size.width),
-                LonghandId::Height => Some(content_rect.size.height),
+                LonghandId::Width if resolved_size_should_be_used_value(fragment) => {
+                    Some(content_rect.size.width)
+                },
+                LonghandId::Height if resolved_size_should_be_used_value(fragment) => {
+                    Some(content_rect.size.height)
+                },
                 LonghandId::MarginBottom => Some(margins.bottom),
                 LonghandId::MarginTop => Some(margins.top),
                 LonghandId::MarginLeft => Some(margins.left),
@@ -326,13 +240,6 @@ pub fn process_resolved_style_request<'dom>(
                 LonghandId::PaddingTop => Some(padding.top),
                 LonghandId::PaddingLeft => Some(padding.left),
                 LonghandId::PaddingRight => Some(padding.right),
-                // TODO(mrobinson): These following values are often wrong, because these are not
-                // exactly the "used value" for the positional properties. The real used values are
-                // lost by the time the Fragment tree is constructed, so we may need to record them in
-                // the tree to properly answer this query. That said, we can return an okayish value
-                // sometimes simply by using the calculated position in the containing block.
-                LonghandId::Top if positioned => Some(content_rect.origin.y),
-                LonghandId::Left if positioned => Some(content_rect.origin.x),
                 _ => None,
             }
             .map(|value| value.to_css_string())
@@ -340,8 +247,27 @@ pub fn process_resolved_style_request<'dom>(
         .unwrap_or_else(computed_style)
 }
 
+fn resolved_size_should_be_used_value(fragment: &Fragment) -> bool {
+    // https://drafts.csswg.org/css-sizing-3/#preferred-size-properties
+    // > Applies to: all elements except non-replaced inlines
+    match fragment {
+        Fragment::Box(box_fragment) => {
+            !box_fragment.style.get_box().display.is_inline_flow() ||
+                fragment.base().map_or(false, |base| {
+                    base.flags.contains(FragmentFlags::IS_REPLACED)
+                })
+        },
+        Fragment::Float(_) |
+        Fragment::Positioning(_) |
+        Fragment::AbsoluteOrFixedPositioned(_) |
+        Fragment::Image(_) |
+        Fragment::IFrame(_) => true,
+        Fragment::Text(_) => false,
+    }
+}
+
 pub fn process_resolved_style_request_for_unstyled_node<'dom>(
-    context: &LayoutContext,
+    context: &SharedStyleContext,
     node: impl LayoutNode<'dom>,
     pseudo: &Option<PseudoElement>,
     property: &PropertyId,
@@ -351,20 +277,26 @@ pub fn process_resolved_style_request_for_unstyled_node<'dom>(
         return String::new();
     }
 
-    let mut tlc = ThreadLocalStyleContext::new(&context.style_context);
+    let mut tlc = ThreadLocalStyleContext::new();
     let mut context = StyleContext {
-        shared: &context.style_context,
+        shared: context,
         thread_local: &mut tlc,
     };
 
     let element = node.as_element().unwrap();
-    let styles = resolve_style(&mut context, element, RuleInclusion::All, pseudo.as_ref());
+    let styles = resolve_style(
+        &mut context,
+        element,
+        RuleInclusion::All,
+        pseudo.as_ref(),
+        None,
+    );
     let style = styles.primary();
     let longhand_id = match *property {
-        PropertyId::LonghandAlias(id, _) | PropertyId::Longhand(id) => id,
-        // Firefox returns blank strings for the computed value of shorthands,
-        // so this should be web-compatible.
-        PropertyId::ShorthandAlias(..) | PropertyId::Shorthand(_) => return String::new(),
+        PropertyId::NonCustom(id) => match id.longhand_or_shorthand() {
+            Ok(longhand_id) => longhand_id,
+            Err(shorthand_id) => return shorthand_to_css_string(shorthand_id, style),
+        },
         PropertyId::Custom(ref name) => {
             return style.computed_value_to_string(PropertyDeclarationId::Custom(name));
         },
@@ -375,12 +307,30 @@ pub fn process_resolved_style_request_for_unstyled_node<'dom>(
     style.computed_value_to_string(PropertyDeclarationId::Longhand(longhand_id))
 }
 
+fn shorthand_to_css_string(
+    id: style::properties::ShorthandId,
+    style: &style::properties::ComputedValues,
+) -> String {
+    use style::values::resolved::Context;
+    let mut block = PropertyDeclarationBlock::new();
+    let mut dest = String::new();
+    for longhand in id.longhands() {
+        block.push(
+            style.computed_or_resolved_declaration(longhand, Some(&Context { style })),
+            Importance::Normal,
+        );
+    }
+    match block.shorthand_to_css(id, &mut dest) {
+        Ok(_) => dest.to_owned(),
+        Err(_) => String::new(),
+    }
+}
+
 pub fn process_offset_parent_query(
     node: OpaqueNode,
     fragment_tree: Option<Arc<FragmentTree>>,
 ) -> OffsetParentResponse {
-    process_offset_parent_query_inner(node, fragment_tree)
-        .unwrap_or_else(OffsetParentResponse::empty)
+    process_offset_parent_query_inner(node, fragment_tree).unwrap_or_default()
 }
 
 #[inline]
@@ -397,13 +347,14 @@ fn process_offset_parent_query_inner(
 
     // https://www.w3.org/TR/2016/WD-cssom-view-1-20160317/#extensions-to-the-htmlelement-interface
     let mut parent_node_addresses = Vec::new();
+    let tag_to_find = Tag::new(node);
     let node_offset_box = fragment_tree.find(|fragment, level, containing_block| {
-        // FIXME: Is there a less fragile way of checking whether this
-        // fragment is the body element, rather than just checking that
-        // it's at level 1 (below the root node)?
-        let is_body_element = level == 1;
+        let base = fragment.base()?;
+        let is_body_element = base
+            .flags
+            .contains(FragmentFlags::IS_BODY_ELEMENT_OF_HTML_ELEMENT_ROOT);
 
-        if fragment.tag() == Some(Tag::Node(node)) {
+        if fragment.tag() == Some(tag_to_find) {
             // Only consider the first fragment of the node found as per a
             // possible interpretation of the specification: "[...] return the
             // y-coordinate of the top border edge of the first CSS layout box
@@ -419,38 +370,28 @@ fn process_offset_parent_query_inner(
             //
             // [1]: https://github.com/w3c/csswg-drafts/issues/4541
             let fragment_relative_rect = match fragment {
-                Fragment::Box(fragment) => fragment
+                Fragment::Box(fragment) | Fragment::Float(fragment) => fragment
                     .border_rect()
-                    .to_physical(fragment.style.writing_mode, &containing_block),
+                    .to_physical(fragment.style.writing_mode, containing_block),
                 Fragment::Text(fragment) => fragment
                     .rect
-                    .to_physical(fragment.parent_style.writing_mode, &containing_block),
+                    .to_physical(fragment.parent_style.writing_mode, containing_block),
+                Fragment::Positioning(fragment) => fragment
+                    .rect
+                    .to_physical(fragment.writing_mode, containing_block),
                 Fragment::AbsoluteOrFixedPositioned(_) |
                 Fragment::Image(_) |
-                Fragment::Anonymous(_) => unreachable!(),
+                Fragment::IFrame(_) => unreachable!(),
             };
-            let border_box = fragment_relative_rect.translate(containing_block.origin.to_vector());
 
-            let mut border_box = Rect::new(
-                Point2D::new(
-                    Au::from_f32_px(border_box.origin.x.px()),
-                    Au::from_f32_px(border_box.origin.y.px()),
-                ),
-                Size2D::new(
-                    Au::from_f32_px(border_box.size.width.px()),
-                    Au::from_f32_px(border_box.size.height.px()),
-                ),
-            );
+            let mut border_box = fragment_relative_rect.translate(containing_block.origin.to_vector()).to_untyped();
 
             // "If any of the following holds true return null and terminate
             // this algorithm: [...] The element’s computed value of the
             // `position` property is `fixed`."
-            let is_fixed = match fragment {
-                Fragment::Box(fragment) if fragment.style.get_box().position == Position::Fixed => {
-                    true
-                },
-                _ => false,
-            };
+            let is_fixed = matches!(
+                fragment, Fragment::Box(fragment) if fragment.style.get_box().position == Position::Fixed
+            );
 
             if is_body_element {
                 // "If the element is the HTML body element or [...] return zero
@@ -476,34 +417,18 @@ fn process_offset_parent_query_inner(
         } else {
             // Record the paths of the nodes being traversed.
             let parent_node_address = match fragment {
-                Fragment::Box(fragment) => {
-                    let is_eligible_parent =
-                        match (is_body_element, fragment.style.get_box().position) {
-                            // Spec says the element is eligible as `offsetParent` if any of
-                            // these are true:
-                            //  1) Is the body element
-                            //  2) Is static position *and* is a table or table cell
-                            //  3) Is not static position
-                            // TODO: Handle case 2
-                            (true, _) |
-                            (false, Position::Absolute) |
-                            (false, Position::Relative) |
-                            (false, Position::Fixed) => true,
-
-                            // Otherwise, it's not a valid parent
-                            (false, Position::Static) => false,
-                        };
-
-                    if let Tag::Node(node_address) = fragment.tag {
-                        is_eligible_parent.then(|| node_address)
-                    } else {
-                        None
+                Fragment::Box(fragment) | Fragment::Float(fragment) => {
+                    let is_eligible_parent = is_eligible_parent(fragment);
+                    match base.tag {
+                        Some(tag) if is_eligible_parent && !tag.is_pseudo() => Some(tag.node),
+                        _ => None,
                     }
                 },
                 Fragment::AbsoluteOrFixedPositioned(_) |
-                Fragment::Text(_) |
+                Fragment::IFrame(_) |
                 Fragment::Image(_) |
-                Fragment::Anonymous(_) => None,
+                Fragment::Positioning(_) |
+                Fragment::Text(_) => None,
             };
 
             while parent_node_addresses.len() <= level {
@@ -529,30 +454,30 @@ fn process_offset_parent_query_inner(
             //
             // Since we saw `offset_parent_node_address` once, we should be able
             // to find it again.
+            let offset_parent_node_tag = Tag::new(offset_parent_node_address);
             fragment_tree
                 .find(|fragment, _, containing_block| {
                     match fragment {
-                        Fragment::Box(fragment)
-                            if fragment.tag == Tag::Node(offset_parent_node_address) =>
-                        {
-                            // Again, take the *first* associated CSS layout box.
-                            let padding_box_corner = fragment
-                                .padding_rect()
-                                .to_physical(fragment.style.writing_mode, &containing_block)
-                                .origin
-                                .to_vector() +
-                                containing_block.origin.to_vector();
-                            let padding_box_corner = Vector2D::new(
-                                Au::from_f32_px(padding_box_corner.x.px()),
-                                Au::from_f32_px(padding_box_corner.y.px()),
-                            );
-                            Some(padding_box_corner)
-                        }
+                        Fragment::Box(fragment) | Fragment::Float(fragment) => {
+                            if fragment.base.tag == Some(offset_parent_node_tag) {
+                                // Again, take the *first* associated CSS layout box.
+                                let padding_box_corner = fragment
+                                    .padding_rect()
+                                    .to_physical(fragment.style.writing_mode, containing_block)
+                                    .origin
+                                    .to_vector() +
+                                    containing_block.origin.to_vector();
+                                let padding_box_corner = padding_box_corner.to_untyped();
+                                Some(padding_box_corner)
+                            } else {
+                                None
+                            }
+                        },
                         Fragment::AbsoluteOrFixedPositioned(_) |
-                        Fragment::Box(_) |
                         Fragment::Text(_) |
                         Fragment::Image(_) |
-                        Fragment::Anonymous(_) => None,
+                        Fragment::IFrame(_) |
+                        Fragment::Positioning(_) => None,
                     }
                 })
                 .unwrap()
@@ -576,19 +501,128 @@ fn process_offset_parent_query_inner(
     })
 }
 
+/// Returns whether or not the element with the given style and body element determination
+/// is eligible to be a parent element for offset* queries.
+///
+/// From <https://www.w3.org/TR/cssom-view-1/#dom-htmlelement-offsetparent>:
+/// >
+/// > Return the nearest ancestor element of the element for which at least one of the following is
+/// > true and terminate this algorithm if such an ancestor is found:
+/// >   1. The computed value of the position property is not static.
+/// >   2. It is the HTML body element.
+/// >   3. The computed value of the position property of the element is static and the ancestor is
+/// >      one of the following HTML elements: td, th, or table.
+fn is_eligible_parent(fragment: &BoxFragment) -> bool {
+    fragment
+        .base
+        .flags
+        .contains(FragmentFlags::IS_BODY_ELEMENT_OF_HTML_ELEMENT_ROOT) ||
+        fragment.style.get_box().position != Position::Static ||
+        fragment
+            .base
+            .flags
+            .contains(FragmentFlags::IS_TABLE_TH_OR_TD_ELEMENT)
+}
+
 // https://html.spec.whatwg.org/multipage/#the-innertext-idl-attribute
 pub fn process_element_inner_text_query<'dom>(_node: impl LayoutNode<'dom>) -> String {
     "".to_owned()
 }
 
-pub fn process_text_index_request(_node: OpaqueNode, _point: Point2D<Au>) -> TextIndexResponse {
-    TextIndexResponse(None)
+pub fn process_text_index_request(_node: OpaqueNode, _point: Point2D<Au>) -> Option<usize> {
+    None
 }
 
-pub fn process_resolved_font_style_query<'dom>(
-    _node: impl LayoutNode<'dom>,
-    _property: &PropertyId,
-    _value: &str,
-) -> Option<ServoArc<Font>> {
-    None
+pub fn process_resolved_font_style_query<'dom, E>(
+    context: &SharedStyleContext,
+    node: E,
+    value: &str,
+    url_data: ServoUrl,
+    shared_lock: &SharedRwLock,
+) -> Option<ServoArc<Font>>
+where
+    E: LayoutNode<'dom>,
+{
+    fn create_font_declaration(
+        value: &str,
+        url_data: &ServoUrl,
+        quirks_mode: QuirksMode,
+    ) -> Option<PropertyDeclarationBlock> {
+        let mut declarations = SourcePropertyDeclaration::default();
+        let result = parse_one_declaration_into(
+            &mut declarations,
+            PropertyId::NonCustom(ShorthandId::Font.into()),
+            value,
+            Origin::Author,
+            &UrlExtraData(url_data.get_arc()),
+            None,
+            ParsingMode::DEFAULT,
+            quirks_mode,
+            CssRuleType::Style,
+        );
+        let declarations = match result {
+            Ok(()) => {
+                let mut block = PropertyDeclarationBlock::new();
+                block.extend(declarations.drain(), Importance::Normal);
+                block
+            },
+            Err(_) => return None,
+        };
+        // TODO: Force to set line-height property to 'normal' font property.
+        Some(declarations)
+    }
+    fn resolve_for_declarations<'dom, E>(
+        context: &SharedStyleContext,
+        parent_style: Option<&ComputedValues>,
+        declarations: PropertyDeclarationBlock,
+        shared_lock: &SharedRwLock,
+    ) -> ServoArc<ComputedValues>
+    where
+        E: LayoutNode<'dom>,
+    {
+        let parent_style = match parent_style {
+            Some(parent) => parent,
+            None => context.stylist.device().default_computed_values(),
+        };
+        context
+            .stylist
+            .compute_for_declarations::<E::ConcreteElement>(
+                &context.guards,
+                parent_style,
+                ServoArc::new(shared_lock.wrap(declarations)),
+            )
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-context-2d-font
+    // 1. Parse the given font property value
+    let quirks_mode = context.quirks_mode();
+    let declarations = create_font_declaration(value, &url_data, quirks_mode)?;
+
+    // TODO: Reject 'inherit' and 'initial' values for the font property.
+
+    // 2. Get resolved styles for the parent element
+    let element = node.as_element().unwrap();
+    let parent_style = if node.is_connected() {
+        if element.has_data() {
+            node.to_threadsafe().as_element().unwrap().resolved_style()
+        } else {
+            let mut tlc = ThreadLocalStyleContext::new();
+            let mut context = StyleContext {
+                shared: context,
+                thread_local: &mut tlc,
+            };
+            let styles = resolve_style(&mut context, element, RuleInclusion::All, None, None);
+            styles.primary().clone()
+        }
+    } else {
+        let default_declarations =
+            create_font_declaration("10px sans-serif", &url_data, quirks_mode).unwrap();
+        resolve_for_declarations::<E>(context, None, default_declarations, shared_lock)
+    };
+
+    // 3. Resolve the parsed value with resolved styles of the parent element
+    let computed_values =
+        resolve_for_declarations::<E>(context, Some(&*parent_style), declarations, shared_lock);
+
+    Some(computed_values.clone_font())
 }

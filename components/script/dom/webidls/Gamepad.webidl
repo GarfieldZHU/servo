@@ -12,6 +12,7 @@ interface Gamepad {
     readonly attribute DOMString mapping;
     readonly attribute Float64Array axes;
     [SameObject] readonly attribute GamepadButtonList buttons;
+    [SameObject] readonly attribute GamepadHapticActuator vibrationActuator;
 };
 
 // https://w3c.github.io/gamepad/extensions.html#partial-gamepad-interface
@@ -26,4 +27,10 @@ enum GamepadHand {
   "",  /* unknown, both hands, or not applicable */
   "left",
   "right"
+};
+
+// https://www.w3.org/TR/gamepad/#extensions-to-the-windoweventhandlers-interface-mixin
+partial interface mixin WindowEventHandlers {
+  attribute EventHandler ongamepadconnected;
+  attribute EventHandler ongamepaddisconnected;
 };

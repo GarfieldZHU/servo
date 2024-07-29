@@ -3,26 +3,53 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use cssparser::SourceLocation;
-use euclid::Scale;
-use euclid::Size2D;
+use euclid::{Scale, Size2D};
 use selectors::parser::{AncestorHashes, Selector};
 use servo_arc::Arc;
 use servo_atoms::Atom;
 use style::context::QuirksMode;
+use style::font_metrics::FontMetrics;
 use style::media_queries::{Device, MediaType};
-use style::properties::{longhands, Importance};
-use style::properties::{PropertyDeclaration, PropertyDeclarationBlock};
+use style::properties::style_structs::Font;
+use style::properties::{
+    longhands, ComputedValues, Importance, PropertyDeclaration, PropertyDeclarationBlock,
+};
 use style::selector_map::SelectorMap;
 use style::selector_parser::{SelectorImpl, SelectorParser};
+use style::servo::media_queries::FontMetricsProvider;
 use style::shared_lock::SharedRwLock;
 use style::stylesheets::StyleRule;
-use style::stylist::needs_revalidation_for_testing;
-use style::stylist::{Rule, Stylist};
+use style::stylist::{
+    needs_revalidation_for_testing, ContainerConditionId, LayerId, Rule, ScopeConditionId, Stylist,
+};
 use style::thread_state::{self, ThreadState};
+use style::values::computed::font::GenericFontFamily;
+use style::values::computed::Length;
+use url::Url;
+
+#[derive(Debug)]
+struct DummyMetricsProvider;
+
+impl FontMetricsProvider for DummyMetricsProvider {
+    fn query_font_metrics(
+        &self,
+        _vertical: bool,
+        _font: &Font,
+        _base_size: Length,
+        _in_media_query: bool,
+        _retrieve_math_scales: bool,
+    ) -> FontMetrics {
+        Default::default()
+    }
+    fn base_size_for_generic(&self, _: GenericFontFamily) -> Length {
+        Length::new(16.)
+    }
+}
 
 /// Helper method to get some Rules from selector strings.
 /// Each sublist of the result contains the Rules for one StyleRule.
 fn get_mock_rules(css_selectors: &[&str]) -> (Vec<Vec<Rule>>, SharedRwLock) {
+    let dummy_url_data = Url::parse("about:blank").unwrap().into();
     let shared_lock = SharedRwLock::new();
     (
         css_selectors
@@ -30,21 +57,23 @@ fn get_mock_rules(css_selectors: &[&str]) -> (Vec<Vec<Rule>>, SharedRwLock) {
             .enumerate()
             .map(|(i, selectors)| {
                 let selectors =
-                    SelectorParser::parse_author_origin_no_namespace(selectors).unwrap();
+                    SelectorParser::parse_author_origin_no_namespace(selectors, &dummy_url_data)
+                        .unwrap();
 
                 let locked = Arc::new(shared_lock.wrap(StyleRule {
-                    selectors: selectors,
+                    selectors,
                     block: Arc::new(shared_lock.wrap(PropertyDeclarationBlock::with_one(
                         PropertyDeclaration::Display(longhands::display::SpecifiedValue::Block),
                         Importance::Normal,
                     ))),
+                    rules: None,
                     source_location: SourceLocation { line: 0, column: 0 },
                 }));
 
                 let guard = shared_lock.read();
                 let rule = locked.read_with(&guard);
                 rule.selectors
-                    .0
+                    .slice()
                     .iter()
                     .map(|s| {
                         Rule::new(
@@ -52,6 +81,10 @@ fn get_mock_rules(css_selectors: &[&str]) -> (Vec<Vec<Rule>>, SharedRwLock) {
                             AncestorHashes::new(s, QuirksMode::NoQuirks),
                             locked.clone(),
                             i as u32,
+                            LayerId::root(),
+                            ContainerConditionId::none(),
+                            /* in_starting_style = */ false,
+                            ScopeConditionId::none(),
                         )
                     })
                     .collect()
@@ -62,15 +95,17 @@ fn get_mock_rules(css_selectors: &[&str]) -> (Vec<Vec<Rule>>, SharedRwLock) {
 }
 
 fn parse_selectors(selectors: &[&str]) -> Vec<Selector<SelectorImpl>> {
+    let dummy_url_data = Url::parse("about:blank").unwrap().into();
     selectors
         .iter()
         .map(|x| {
-            SelectorParser::parse_author_origin_no_namespace(x)
+            SelectorParser::parse_author_origin_no_namespace(x, &dummy_url_data)
                 .unwrap()
-                .0
+                .slice()
                 .into_iter()
-                .nth(0)
+                .next()
                 .unwrap()
+                .clone()
         })
         .collect()
 }
@@ -124,7 +159,7 @@ fn test_revalidation_selectors() {
         "p:first-child span",
     ])
     .into_iter()
-    .filter(|s| needs_revalidation_for_testing(&s))
+    .filter(needs_revalidation_for_testing)
     .collect::<Vec<_>>();
 
     let reference = parse_selectors(&[
@@ -201,22 +236,25 @@ fn test_insert() {
         0,
         selector_map
             .class_hash
-            .get(&Atom::from("intro"), QuirksMode::NoQuirks)
+            .get(&Atom::from("foo"), QuirksMode::NoQuirks)
             .unwrap()[0]
             .source_order
     );
     assert!(selector_map
         .class_hash
-        .get(&Atom::from("foo"), QuirksMode::NoQuirks)
+        .get(&Atom::from("intro"), QuirksMode::NoQuirks)
         .is_none());
 }
 
 fn mock_stylist() -> Stylist {
+    let initial_style = ComputedValues::initial_values_with_font_override(Font::initial_values());
     let device = Device::new(
         MediaType::screen(),
         QuirksMode::NoQuirks,
         Size2D::new(0f32, 0f32),
         Scale::new(1.0),
+        Box::new(DummyMetricsProvider),
+        initial_style,
     );
     Stylist::new(device, QuirksMode::NoQuirks)
 }

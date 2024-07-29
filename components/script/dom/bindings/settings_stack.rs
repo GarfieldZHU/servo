@@ -2,18 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::root::{Dom, DomRoot};
-use crate::dom::bindings::trace::JSTraceable;
-use crate::dom::globalscope::GlobalScope;
-use js::jsapi::GetScriptedCallerGlobal;
-use js::jsapi::HideScriptedCaller;
-use js::jsapi::JSTracer;
-use js::jsapi::UnhideScriptedCaller;
-use js::rust::Runtime;
 use std::cell::RefCell;
 use std::thread;
 
-thread_local!(static STACK: RefCell<Vec<StackEntry>> = RefCell::new(Vec::new()));
+use js::jsapi::{GetScriptedCallerGlobal, HideScriptedCaller, JSTracer, UnhideScriptedCaller};
+use js::rust::Runtime;
+
+use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::bindings::trace::JSTraceable;
+use crate::dom::globalscope::GlobalScope;
+
+thread_local!(static STACK: RefCell<Vec<StackEntry>> = const { RefCell::new(Vec::new()) });
 
 #[derive(Debug, Eq, JSTraceable, PartialEq)]
 enum StackEntryKind {
@@ -21,7 +20,7 @@ enum StackEntryKind {
     Entry,
 }
 
-#[allow(unrooted_must_root)]
+#[allow(crown::unrooted_must_root)]
 #[derive(JSTraceable)]
 struct StackEntry {
     global: Dom<GlobalScope>,

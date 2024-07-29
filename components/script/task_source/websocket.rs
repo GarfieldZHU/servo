@@ -2,17 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use base::id::PipelineId;
+
 use crate::script_runtime::{CommonScriptMsg, ScriptChan, ScriptThreadEventCategory};
 use crate::task::{TaskCanceller, TaskOnce};
 use crate::task_source::{TaskSource, TaskSourceName};
-use msg::constellation_msg::PipelineId;
 
 #[derive(JSTraceable)]
-pub struct WebsocketTaskSource(pub Box<dyn ScriptChan + Send + 'static>, pub PipelineId);
+pub struct WebsocketTaskSource(
+    pub Box<dyn ScriptChan + Send + 'static>,
+    #[no_trace] pub PipelineId,
+);
 
 impl Clone for WebsocketTaskSource {
     fn clone(&self) -> WebsocketTaskSource {
-        WebsocketTaskSource(self.0.clone(), self.1.clone())
+        WebsocketTaskSource(self.0.clone(), self.1)
     }
 }
 

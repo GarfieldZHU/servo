@@ -4,7 +4,7 @@
 
 use serde_json::{Map, Value};
 use webdriver::capabilities::{BrowserCapabilities, Capabilities};
-use webdriver::error::WebDriverResult;
+use webdriver::error::{WebDriverError, WebDriverResult};
 
 pub struct ServoCapabilities {
     pub browser_name: String,
@@ -71,8 +71,50 @@ impl BrowserCapabilities for ServoCapabilities {
         Ok(self.accept_custom)
     }
 
-    fn validate_custom(&self, _: &str, _: &Value) -> WebDriverResult<()> {
+    fn validate_custom(&mut self, _: &str, _: &Value) -> WebDriverResult<()> {
         Ok(())
+    }
+
+    fn web_socket_url(
+        &mut self,
+        _: &serde_json::Map<std::string::String, Value>,
+    ) -> Result<bool, WebDriverError> {
+        todo!()
+    }
+
+    fn webauthn_virtual_authenticators(
+        &mut self,
+        _: &serde_json::Map<std::string::String, Value>,
+    ) -> Result<bool, WebDriverError> {
+        todo!()
+    }
+
+    fn webauthn_extension_uvm(
+        &mut self,
+        _: &serde_json::Map<std::string::String, Value>,
+    ) -> Result<bool, WebDriverError> {
+        todo!()
+    }
+
+    fn webauthn_extension_prf(
+        &mut self,
+        _: &serde_json::Map<std::string::String, Value>,
+    ) -> Result<bool, WebDriverError> {
+        todo!()
+    }
+
+    fn webauthn_extension_large_blob(
+        &mut self,
+        _: &serde_json::Map<std::string::String, Value>,
+    ) -> Result<bool, WebDriverError> {
+        todo!()
+    }
+
+    fn webauthn_extension_cred_blob(
+        &mut self,
+        _: &serde_json::Map<std::string::String, Value>,
+    ) -> Result<bool, WebDriverError> {
+        todo!()
     }
 }
 

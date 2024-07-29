@@ -2,6 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::ptr;
+
+use base64::Engine;
+use dom_struct::dom_struct;
+use encoding_rs::{Encoding, UTF_8};
+use js::jsapi::{Heap, JSObject};
+use js::jsval::{self, JSVal};
+use js::rust::HandleObject;
+use js::typedarray::{ArrayBuffer, CreateWith};
+use mime::{self, Mime};
+use servo_atoms::Atom;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BlobBinding::BlobMethods;
 use crate::dom::bindings::codegen::Bindings::FileReaderBinding::{
@@ -11,7 +24,7 @@ use crate::dom::bindings::codegen::UnionTypes::StringOrObject;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::trace::RootedTraceableBox;
@@ -25,23 +38,12 @@ use crate::realms::enter_realm;
 use crate::script_runtime::JSContext;
 use crate::task_source::file_reading::FileReadingTask;
 use crate::task_source::{TaskSource, TaskSourceName};
-use base64;
-use dom_struct::dom_struct;
-use encoding_rs::{Encoding, UTF_8};
-use js::jsapi::Heap;
-use js::jsapi::JSObject;
-use js::jsval::{self, JSVal};
-use js::typedarray::{ArrayBuffer, CreateWith};
-use mime::{self, Mime};
-use servo_atoms::Atom;
-use std::cell::Cell;
-use std::ptr;
 
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum FileReaderFunction {
-    ReadAsText,
-    ReadAsDataUrl,
-    ReadAsArrayBuffer,
+    Text,
+    DataUrl,
+    ArrayBuffer,
 }
 
 pub type TrustedFileReader = Trusted<FileReader>;
@@ -60,9 +62,9 @@ impl ReadMetaData {
         function: FileReaderFunction,
     ) -> ReadMetaData {
         ReadMetaData {
-            blobtype: blobtype,
-            label: label,
-            function: function,
+            blobtype,
+            label,
+            function,
         }
     }
 }
@@ -88,7 +90,7 @@ pub struct FileReaderSharedFunctionality;
 
 impl FileReaderSharedFunctionality {
     pub fn dataurl_format(blob_contents: &[u8], blob_type: String) -> DOMString {
-        let base64 = base64::encode(&blob_contents);
+        let base64 = base64::engine::general_purpose::STANDARD.encode(blob_contents);
 
         let dataurl = if blob_type.is_empty() {
             format!("data:base64,{}", base64)
@@ -151,13 +153,16 @@ impl FileReader {
         }
     }
 
-    pub fn new(global: &GlobalScope) -> DomRoot<FileReader> {
-        reflect_dom_object(Box::new(FileReader::new_inherited()), global)
+    fn new(global: &GlobalScope, proto: Option<HandleObject>) -> DomRoot<FileReader> {
+        reflect_dom_object_with_proto(Box::new(FileReader::new_inherited()), global, proto)
     }
 
     #[allow(non_snake_case)]
-    pub fn Constructor(global: &GlobalScope) -> Fallible<DomRoot<FileReader>> {
-        Ok(FileReader::new(global))
+    pub fn Constructor(
+        global: &GlobalScope,
+        proto: Option<HandleObject>,
+    ) -> Fallible<DomRoot<FileReader>> {
+        Ok(FileReader::new(global, proto))
     }
 
     //https://w3c.github.io/FileAPI/#dfn-error-steps
@@ -248,17 +253,17 @@ impl FileReader {
         // Step 8.2
 
         match data.function {
-            FileReaderFunction::ReadAsDataUrl => {
+            FileReaderFunction::DataUrl => {
                 FileReader::perform_readasdataurl(&fr.result, data, &blob_contents)
             },
-            FileReaderFunction::ReadAsText => {
+            FileReaderFunction::Text => {
                 FileReader::perform_readastext(&fr.result, data, &blob_contents)
             },
-            FileReaderFunction::ReadAsArrayBuffer => {
+            FileReaderFunction::ArrayBuffer => {
                 let _ac = enter_realm(&*fr);
                 FileReader::perform_readasarraybuffer(
                     &fr.result,
-                    fr.global().get_cx(),
+                    GlobalScope::get_cx(),
                     data,
                     &blob_contents,
                 )
@@ -344,17 +349,17 @@ impl FileReaderMethods for FileReader {
 
     // https://w3c.github.io/FileAPI/#dfn-readAsArrayBuffer
     fn ReadAsArrayBuffer(&self, blob: &Blob) -> ErrorResult {
-        self.read(FileReaderFunction::ReadAsArrayBuffer, blob, None)
+        self.read(FileReaderFunction::ArrayBuffer, blob, None)
     }
 
     // https://w3c.github.io/FileAPI/#dfn-readAsDataURL
     fn ReadAsDataURL(&self, blob: &Blob) -> ErrorResult {
-        self.read(FileReaderFunction::ReadAsDataUrl, blob, None)
+        self.read(FileReaderFunction::DataUrl, blob, None)
     }
 
     // https://w3c.github.io/FileAPI/#dfn-readAsText
     fn ReadAsText(&self, blob: &Blob, label: Option<DOMString>) -> ErrorResult {
-        self.read(FileReaderFunction::ReadAsText, blob, label)
+        self.read(FileReaderFunction::Text, blob, label)
     }
 
     // https://w3c.github.io/FileAPI/#dfn-abort

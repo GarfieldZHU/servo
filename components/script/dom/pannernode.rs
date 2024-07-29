@@ -2,6 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::f32;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_media::audio::node::{AudioNodeInit, AudioNodeMessage, AudioNodeType};
+use servo_media::audio::panner_node::{
+    DistanceModel, PannerNodeMessage, PannerNodeOptions, PanningModel,
+};
+use servo_media::audio::param::{ParamDir, ParamType};
+
 use crate::dom::audionode::AudioNode;
 use crate::dom::audioparam::AudioParam;
 use crate::dom::baseaudiocontext::BaseAudioContext;
@@ -12,24 +23,14 @@ use crate::dom::bindings::codegen::Bindings::AudioParamBinding::{
     AudioParamMethods, AutomationRate,
 };
 use crate::dom::bindings::codegen::Bindings::PannerNodeBinding::{
-    DistanceModelType, PanningModelType,
-};
-use crate::dom::bindings::codegen::Bindings::PannerNodeBinding::{
-    PannerNodeMethods, PannerOptions,
+    DistanceModelType, PannerNodeMethods, PannerOptions, PanningModelType,
 };
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_media::audio::node::{AudioNodeInit, AudioNodeMessage};
-use servo_media::audio::panner_node::PannerNodeMessage;
-use servo_media::audio::panner_node::{DistanceModel, PannerNodeOptions, PanningModel};
-use servo_media::audio::param::{ParamDir, ParamType};
-use std::cell::Cell;
-use std::f32;
 
 #[dom_struct]
 pub struct PannerNode {
@@ -41,8 +42,10 @@ pub struct PannerNode {
     orientation_y: Dom<AudioParam>,
     orientation_z: Dom<AudioParam>,
     #[ignore_malloc_size_of = "servo_media"]
+    #[no_trace]
     panning_model: Cell<PanningModel>,
     #[ignore_malloc_size_of = "servo_media"]
+    #[no_trace]
     distance_model: Cell<DistanceModel>,
     ref_distance: Cell<f64>,
     max_distance: Cell<f64>,
@@ -53,7 +56,7 @@ pub struct PannerNode {
 }
 
 impl PannerNode {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         window: &Window,
         context: &BaseAudioContext,
@@ -95,6 +98,7 @@ impl PannerNode {
             window,
             context,
             id,
+            AudioNodeType::PannerNode,
             ParamType::Position(ParamDir::X),
             AutomationRate::A_rate,
             options.position_x, // default value
@@ -105,6 +109,7 @@ impl PannerNode {
             window,
             context,
             id,
+            AudioNodeType::PannerNode,
             ParamType::Position(ParamDir::Y),
             AutomationRate::A_rate,
             options.position_y, // default value
@@ -115,6 +120,7 @@ impl PannerNode {
             window,
             context,
             id,
+            AudioNodeType::PannerNode,
             ParamType::Position(ParamDir::Z),
             AutomationRate::A_rate,
             options.position_z, // default value
@@ -125,6 +131,7 @@ impl PannerNode {
             window,
             context,
             id,
+            AudioNodeType::PannerNode,
             ParamType::Orientation(ParamDir::X),
             AutomationRate::A_rate,
             options.orientation_x, // default value
@@ -135,6 +142,7 @@ impl PannerNode {
             window,
             context,
             id,
+            AudioNodeType::PannerNode,
             ParamType::Orientation(ParamDir::Y),
             AutomationRate::A_rate,
             options.orientation_y, // default value
@@ -145,6 +153,7 @@ impl PannerNode {
             window,
             context,
             id,
+            AudioNodeType::PannerNode,
             ParamType::Orientation(ParamDir::Z),
             AutomationRate::A_rate,
             options.orientation_z, // default value
@@ -170,23 +179,33 @@ impl PannerNode {
         })
     }
 
-    #[allow(unrooted_must_root)]
     pub fn new(
         window: &Window,
         context: &BaseAudioContext,
         options: &PannerOptions,
     ) -> Fallible<DomRoot<PannerNode>> {
+        Self::new_with_proto(window, None, context, options)
+    }
+
+    #[allow(crown::unrooted_must_root)]
+    fn new_with_proto(
+        window: &Window,
+        proto: Option<HandleObject>,
+        context: &BaseAudioContext,
+        options: &PannerOptions,
+    ) -> Fallible<DomRoot<PannerNode>> {
         let node = PannerNode::new_inherited(window, context, options)?;
-        Ok(reflect_dom_object(Box::new(node), window))
+        Ok(reflect_dom_object_with_proto(Box::new(node), window, proto))
     }
 
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         context: &BaseAudioContext,
         options: &PannerOptions,
     ) -> Fallible<DomRoot<PannerNode>> {
-        PannerNode::new(window, context, options)
+        PannerNode::new_with_proto(window, proto, context, options)
     }
 }
 

@@ -2,11 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use bluetooth_traits::{
+    BluetoothCharacteristicMsg, BluetoothDescriptorMsg, BluetoothRequest, BluetoothResponse,
+    BluetoothServiceMsg,
+};
+use dom_struct::dom_struct;
+use ipc_channel::ipc::IpcSender;
+use profile_traits::ipc;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BluetoothDeviceBinding::BluetoothDeviceMethods;
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTServerBinding::BluetoothRemoteGATTServerMethods;
-use crate::dom::bindings::error::Error;
-use crate::dom::bindings::error::ErrorResult;
+use crate::dom::bindings::error::{Error, ErrorResult};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
@@ -21,14 +32,6 @@ use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::realms::InRealm;
-use bluetooth_traits::{BluetoothCharacteristicMsg, BluetoothDescriptorMsg};
-use bluetooth_traits::{BluetoothRequest, BluetoothResponse, BluetoothServiceMsg};
-use dom_struct::dom_struct;
-use ipc_channel::ipc::IpcSender;
-use profile_traits::ipc;
-use std::cell::Cell;
-use std::collections::HashMap;
-use std::rc::Rc;
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothdevice
 #[dom_struct]
@@ -54,8 +57,8 @@ impl BluetoothDevice {
     ) -> BluetoothDevice {
         BluetoothDevice {
             eventtarget: EventTarget::new_inherited(),
-            id: id,
-            name: name,
+            id,
+            name,
             gatt: Default::default(),
             context: Dom::from_ref(context),
             attribute_instance_map: (
@@ -96,7 +99,7 @@ impl BluetoothDevice {
         let (ref service_map_ref, _, _) = self.attribute_instance_map;
         let mut service_map = service_map_ref.borrow_mut();
         if let Some(existing_service) = service_map.get(&service.instance_id) {
-            return DomRoot::from_ref(&existing_service);
+            return DomRoot::from_ref(existing_service);
         }
         let bt_service = BluetoothRemoteGATTService::new(
             &server.global(),
@@ -106,7 +109,7 @@ impl BluetoothDevice {
             service.instance_id.clone(),
         );
         service_map.insert(service.instance_id.clone(), Dom::from_ref(&bt_service));
-        return bt_service;
+        bt_service
     }
 
     pub fn get_or_create_characteristic(
@@ -117,7 +120,7 @@ impl BluetoothDevice {
         let (_, ref characteristic_map_ref, _) = self.attribute_instance_map;
         let mut characteristic_map = characteristic_map_ref.borrow_mut();
         if let Some(existing_characteristic) = characteristic_map.get(&characteristic.instance_id) {
-            return DomRoot::from_ref(&existing_characteristic);
+            return DomRoot::from_ref(existing_characteristic);
         }
         let properties = BluetoothCharacteristicProperties::new(
             &service.global(),
@@ -142,7 +145,7 @@ impl BluetoothDevice {
             characteristic.instance_id.clone(),
             Dom::from_ref(&bt_characteristic),
         );
-        return bt_characteristic;
+        bt_characteristic
     }
 
     pub fn is_represented_device_null(&self) -> bool {
@@ -164,7 +167,7 @@ impl BluetoothDevice {
         let (_, _, ref descriptor_map_ref) = self.attribute_instance_map;
         let mut descriptor_map = descriptor_map_ref.borrow_mut();
         if let Some(existing_descriptor) = descriptor_map.get(&descriptor.instance_id) {
-            return DomRoot::from_ref(&existing_descriptor);
+            return DomRoot::from_ref(existing_descriptor);
         }
         let bt_descriptor = BluetoothRemoteGATTDescriptor::new(
             &characteristic.global(),
@@ -176,7 +179,7 @@ impl BluetoothDevice {
             descriptor.instance_id.clone(),
             Dom::from_ref(&bt_descriptor),
         );
-        return bt_descriptor;
+        bt_descriptor
     }
 
     fn get_bluetooth_thread(&self) -> IpcSender<BluetoothRequest> {
@@ -184,7 +187,7 @@ impl BluetoothDevice {
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#clean-up-the-disconnected-device
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn clean_up_disconnected_device(&self) {
         // Step 1.
         self.get_gatt().set_connected(false);
@@ -220,7 +223,7 @@ impl BluetoothDevice {
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#garbage-collect-the-connection
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn garbage_collect_the_connection(&self) -> ErrorResult {
         // Step 1: TODO: Check if other systems using this device.
 
@@ -228,11 +231,8 @@ impl BluetoothDevice {
         let context = self.get_context();
         for (id, device) in context.get_device_map().borrow().iter() {
             // Step 2.1 - 2.2.
-            if id == &self.Id().to_string() {
-                if device.get_gatt().Connected() {
-                    return Ok(());
-                }
-                // TODO: Step 2.3: Implement activeAlgorithms internal slot for BluetoothRemoteGATTServer.
+            if id == &self.Id().to_string() && device.get_gatt().Connected() {
+                return Ok(());
             }
         }
 
@@ -277,7 +277,7 @@ impl BluetoothDeviceMethods for BluetoothDevice {
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothdevice-watchadvertisements
     fn WatchAdvertisements(&self, comp: InRealm) -> Rc<Promise> {
-        let p = Promise::new_in_current_realm(&self.global(), comp);
+        let p = Promise::new_in_current_realm(comp);
         let sender = response_async(&p, self);
         // TODO: Step 1.
         // Note: Steps 2 - 3 are implemented in components/bluetooth/lib.rs in watch_advertisements function
@@ -288,7 +288,7 @@ impl BluetoothDeviceMethods for BluetoothDevice {
                 sender,
             ))
             .unwrap();
-        return p;
+        p
     }
 
     // https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothdevice-unwatchadvertisements

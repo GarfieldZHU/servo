@@ -2,10 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use script_traits::{TimerEvent, TimerEventRequest, TimerSchedulerMsg};
 use std::cmp::{self, Ord};
 use std::collections::BinaryHeap;
 use std::time::{Duration, Instant};
+
+use script_traits::{TimerEvent, TimerEventRequest, TimerSchedulerMsg};
 
 pub struct TimerScheduler(BinaryHeap<ScheduledEvent>);
 
@@ -29,7 +30,7 @@ impl PartialOrd for ScheduledEvent {
 impl Eq for ScheduledEvent {}
 impl PartialEq for ScheduledEvent {
     fn eq(&self, other: &ScheduledEvent) -> bool {
-        self as *const ScheduledEvent == other as *const ScheduledEvent
+        std::ptr::eq(self, other)
     }
 }
 

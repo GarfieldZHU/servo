@@ -2,6 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+use std::f32;
+
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_media::audio::biquad_filter_node::{
+    BiquadFilterNodeMessage, BiquadFilterNodeOptions, FilterType,
+};
+use servo_media::audio::node::{AudioNodeInit, AudioNodeMessage, AudioNodeType};
+use servo_media::audio::param::ParamType;
+
 use crate::dom::audionode::AudioNode;
 use crate::dom::audioparam::AudioParam;
 use crate::dom::baseaudiocontext::BaseAudioContext;
@@ -9,20 +20,13 @@ use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
     ChannelCountMode, ChannelInterpretation,
 };
 use crate::dom::bindings::codegen::Bindings::AudioParamBinding::AutomationRate;
-use crate::dom::bindings::codegen::Bindings::BiquadFilterNodeBinding::BiquadFilterNodeMethods;
-use crate::dom::bindings::codegen::Bindings::BiquadFilterNodeBinding::BiquadFilterOptions;
-use crate::dom::bindings::codegen::Bindings::BiquadFilterNodeBinding::BiquadFilterType;
+use crate::dom::bindings::codegen::Bindings::BiquadFilterNodeBinding::{
+    BiquadFilterNodeMethods, BiquadFilterOptions, BiquadFilterType,
+};
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_media::audio::biquad_filter_node::BiquadFilterNodeMessage;
-use servo_media::audio::biquad_filter_node::{BiquadFilterNodeOptions, FilterType};
-use servo_media::audio::node::{AudioNodeInit, AudioNodeMessage};
-use servo_media::audio::param::ParamType;
-use std::cell::Cell;
-use std::f32;
 
 #[dom_struct]
 pub struct BiquadFilterNode {
@@ -35,7 +39,7 @@ pub struct BiquadFilterNode {
 }
 
 impl BiquadFilterNode {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new_inherited(
         window: &Window,
         context: &BaseAudioContext,
@@ -58,6 +62,7 @@ impl BiquadFilterNode {
             window,
             context,
             node.node_id(),
+            AudioNodeType::BiquadFilterNode,
             ParamType::Gain,
             AutomationRate::A_rate,
             options.gain, // default value
@@ -68,6 +73,7 @@ impl BiquadFilterNode {
             window,
             context,
             node.node_id(),
+            AudioNodeType::BiquadFilterNode,
             ParamType::Q,
             AutomationRate::A_rate,
             options.q, // default value
@@ -78,6 +84,7 @@ impl BiquadFilterNode {
             window,
             context,
             node.node_id(),
+            AudioNodeType::BiquadFilterNode,
             ParamType::Frequency,
             AutomationRate::A_rate,
             options.frequency, // default value
@@ -88,6 +95,7 @@ impl BiquadFilterNode {
             window,
             context,
             node.node_id(),
+            AudioNodeType::BiquadFilterNode,
             ParamType::Detune,
             AutomationRate::A_rate,
             options.detune, // default value
@@ -104,23 +112,33 @@ impl BiquadFilterNode {
         })
     }
 
-    #[allow(unrooted_must_root)]
     pub fn new(
         window: &Window,
         context: &BaseAudioContext,
         options: &BiquadFilterOptions,
     ) -> Fallible<DomRoot<BiquadFilterNode>> {
+        Self::new_with_proto(window, None, context, options)
+    }
+
+    #[allow(crown::unrooted_must_root)]
+    fn new_with_proto(
+        window: &Window,
+        proto: Option<HandleObject>,
+        context: &BaseAudioContext,
+        options: &BiquadFilterOptions,
+    ) -> Fallible<DomRoot<BiquadFilterNode>> {
         let node = BiquadFilterNode::new_inherited(window, context, options)?;
-        Ok(reflect_dom_object(Box::new(node), window))
+        Ok(reflect_dom_object_with_proto(Box::new(node), window, proto))
     }
 
     #[allow(non_snake_case)]
     pub fn Constructor(
         window: &Window,
+        proto: Option<HandleObject>,
         context: &BaseAudioContext,
         options: &BiquadFilterOptions,
     ) -> Fallible<DomRoot<BiquadFilterNode>> {
-        BiquadFilterNode::new(window, context, options)
+        BiquadFilterNode::new_with_proto(window, proto, context, options)
     }
 }
 

@@ -4,25 +4,20 @@
 
 #![allow(unused_imports)]
 
-#[macro_use]
-extern crate lazy_static;
-
-use background_hang_monitor::HangMonitorRegister;
-use ipc_channel::ipc;
-use msg::constellation_msg::ScriptHangAnnotation;
-use msg::constellation_msg::TEST_PIPELINE_ID;
-use msg::constellation_msg::{
-    BackgroundHangMonitorControlMsg, BackgroundHangMonitorExitSignal, HangAlert, HangAnnotation,
-    HangMonitorAlert,
-};
-use msg::constellation_msg::{MonitoredComponentId, MonitoredComponentType};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-lazy_static! {
+use background_hang_monitor::HangMonitorRegister;
+use background_hang_monitor_api::{
+    BackgroundHangMonitorControlMsg, BackgroundHangMonitorExitSignal, HangAlert, HangAnnotation,
+    HangMonitorAlert, MonitoredComponentId, MonitoredComponentType, ScriptHangAnnotation,
+};
+use base::id::TEST_PIPELINE_ID;
+use ipc_channel::ipc;
+
+lazy_static::lazy_static! {
     static ref SERIAL: Mutex<()> = Mutex::new(());
 }
 

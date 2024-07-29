@@ -10,6 +10,8 @@ use std::io::{BufReader, Read};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Mutex;
 
+use lazy_static::lazy_static;
+
 lazy_static! {
     static ref HOST_TABLE: Mutex<Option<HashMap<String, IpAddr>>> = Mutex::new(create_host_table());
 }
@@ -17,7 +19,7 @@ lazy_static! {
 fn create_host_table() -> Option<HashMap<String, IpAddr>> {
     let path = env::var_os("HOST_FILE")?;
 
-    let file = File::open(&path).ok()?;
+    let file = File::open(path).ok()?;
     let mut reader = BufReader::new(file);
 
     let mut lines = String::new();

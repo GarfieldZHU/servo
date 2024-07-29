@@ -2,15 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-#[macro_use]
-extern crate malloc_size_of_derive;
+use std::f32;
 
 use app_units::{Au, MAX_AU, MIN_AU};
-use euclid::{
-    default::{Point2D, Rect, Size2D},
-    Length,
-};
-use std::f32;
+use euclid::default::{Point2D, Rect, Size2D};
+use euclid::Length;
+use malloc_size_of_derive::MallocSizeOf;
 use webrender_api::units::{FramebufferPixel, LayoutPoint, LayoutRect, LayoutSize};
 
 // Units for use with euclid::length and euclid::scale_factor.
@@ -54,7 +51,7 @@ impl MaxRect for Rect<Au> {
 impl MaxRect for LayoutRect {
     #[inline]
     fn max_rect() -> LayoutRect {
-        LayoutRect::new(
+        LayoutRect::from_origin_and_size(
             LayoutPoint::new(f32::MIN / 2.0, f32::MIN / 2.0),
             LayoutSize::new(f32::MAX, f32::MAX),
         )

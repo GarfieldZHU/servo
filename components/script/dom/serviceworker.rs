@@ -2,6 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use base::id::ServiceWorkerId;
+use dom_struct::dom_struct;
+use js::jsapi::{Heap, JSObject};
+use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
+use script_traits::{DOMMessage, ScriptMsg};
+use servo_url::ServoUrl;
+
 use crate::dom::abstractworker::SimpleWorkerErrorHandler;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::MessagePortBinding::PostMessageOptions;
@@ -20,13 +29,6 @@ use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::script_runtime::JSContext;
 use crate::task::TaskOnce;
-use dom_struct::dom_struct;
-use js::jsapi::{Heap, JSObject};
-use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
-use msg::constellation_msg::ServiceWorkerId;
-use script_traits::{DOMMessage, ScriptMsg};
-use servo_url::ServoUrl;
-use std::cell::Cell;
 
 pub type TrustedServiceWorkerAddress = Trusted<ServiceWorker>;
 
@@ -34,8 +36,10 @@ pub type TrustedServiceWorkerAddress = Trusted<ServiceWorker>;
 pub struct ServiceWorker {
     eventtarget: EventTarget,
     script_url: DomRefCell<String>,
+    #[no_trace]
     scope_url: ServoUrl,
     state: Cell<ServiceWorkerState>,
+    #[no_trace]
     worker_id: ServiceWorkerId,
 }
 
@@ -49,7 +53,7 @@ impl ServiceWorker {
             eventtarget: EventTarget::new_inherited(),
             script_url: DomRefCell::new(String::from(script_url)),
             state: Cell::new(ServiceWorkerState::Installing),
-            scope_url: scope_url,
+            scope_url,
             worker_id,
         }
     }
@@ -85,7 +89,7 @@ impl ServiceWorker {
         ServoUrl::parse(&self.script_url.borrow().clone()).unwrap()
     }
 
-    /// https://w3c.github.io/ServiceWorker/#service-worker-postmessage
+    /// <https://w3c.github.io/ServiceWorker/#service-worker-postmessage>
     fn post_message_impl(
         &self,
         cx: JSContext,
@@ -125,7 +129,7 @@ impl ServiceWorkerMethods for ServiceWorker {
         USVString(self.script_url.borrow().clone())
     }
 
-    /// https://w3c.github.io/ServiceWorker/#service-worker-postmessage
+    /// <https://w3c.github.io/ServiceWorker/#service-worker-postmessage>
     fn PostMessage(
         &self,
         cx: JSContext,
@@ -135,7 +139,7 @@ impl ServiceWorkerMethods for ServiceWorker {
         self.post_message_impl(cx, message, transfer)
     }
 
-    /// https://w3c.github.io/ServiceWorker/#service-worker-postmessage
+    /// <https://w3c.github.io/ServiceWorker/#service-worker-postmessage>
     fn PostMessage_(
         &self,
         cx: JSContext,
@@ -161,7 +165,7 @@ impl ServiceWorkerMethods for ServiceWorker {
 }
 
 impl TaskOnce for SimpleWorkerErrorHandler<ServiceWorker> {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn run_once(self) {
         ServiceWorker::dispatch_simple_error(self.addr);
     }

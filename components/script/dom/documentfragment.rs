@@ -2,6 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use js::rust::HandleObject;
+use servo_atoms::Atom;
+
+use super::bindings::trace::HashMapTracedValues;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::DocumentFragmentBinding::DocumentFragmentMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
@@ -16,16 +21,13 @@ use crate::dom::htmlcollection::HTMLCollection;
 use crate::dom::node::{window_from_node, Node};
 use crate::dom::nodelist::NodeList;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
-use servo_atoms::Atom;
-use std::collections::HashMap;
 
 // https://dom.spec.whatwg.org/#documentfragment
 #[dom_struct]
 pub struct DocumentFragment {
     node: Node,
     /// Caches for the getElement methods
-    id_map: DomRefCell<HashMap<Atom, Vec<Dom<Element>>>>,
+    id_map: DomRefCell<HashMapTracedValues<Atom, Vec<Dom<Element>>>>,
 }
 
 impl DocumentFragment {
@@ -33,25 +35,36 @@ impl DocumentFragment {
     pub fn new_inherited(document: &Document) -> DocumentFragment {
         DocumentFragment {
             node: Node::new_inherited(document),
-            id_map: DomRefCell::new(HashMap::new()),
+            id_map: DomRefCell::new(HashMapTracedValues::new()),
         }
     }
 
     pub fn new(document: &Document) -> DomRoot<DocumentFragment> {
-        Node::reflect_node(
+        Self::new_with_proto(document, None)
+    }
+
+    fn new_with_proto(
+        document: &Document,
+        proto: Option<HandleObject>,
+    ) -> DomRoot<DocumentFragment> {
+        Node::reflect_node_with_proto(
             Box::new(DocumentFragment::new_inherited(document)),
             document,
+            proto,
         )
     }
 
     #[allow(non_snake_case)]
-    pub fn Constructor(window: &Window) -> Fallible<DomRoot<DocumentFragment>> {
+    pub fn Constructor(
+        window: &Window,
+        proto: Option<HandleObject>,
+    ) -> Fallible<DomRoot<DocumentFragment>> {
         let document = window.Document();
 
-        Ok(DocumentFragment::new(&document))
+        Ok(DocumentFragment::new_with_proto(&document, proto))
     }
 
-    pub fn id_map(&self) -> &DomRefCell<HashMap<Atom, Vec<Dom<Element>>>> {
+    pub fn id_map(&self) -> &DomRefCell<HashMapTracedValues<Atom, Vec<Dom<Element>>>> {
         &self.id_map
     }
 }
@@ -69,7 +82,7 @@ impl DocumentFragmentMethods for DocumentFragment {
         self.id_map
             .borrow()
             .get(&id)
-            .map(|ref elements| DomRoot::from_ref(&*(*elements)[0]))
+            .map(|elements| DomRoot::from_ref(&*elements[0]))
     }
 
     // https://dom.spec.whatwg.org/#dom-parentnode-firstelementchild

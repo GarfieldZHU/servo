@@ -2,16 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::net::TcpStream;
+
+use serde::Serialize;
+use serde_json::{Map, Value};
+
 use crate::actor::{Actor, ActorMessageStatus, ActorRegistry};
 use crate::protocol::JsonPacketStream;
 use crate::StreamId;
-use serde_json::{Map, Value};
-use std::net::TcpStream;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GetStyleSheetsReply {
     from: String,
-    styleSheets: Vec<u32>, // TODO: real JSON structure.
+    style_sheets: Vec<u32>, // TODO: real JSON structure.
 }
 
 pub struct StyleSheetsActor {
@@ -34,7 +38,7 @@ impl Actor for StyleSheetsActor {
             "getStyleSheets" => {
                 let msg = GetStyleSheetsReply {
                     from: self.name(),
-                    styleSheets: vec![],
+                    style_sheets: vec![],
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
@@ -47,6 +51,6 @@ impl Actor for StyleSheetsActor {
 
 impl StyleSheetsActor {
     pub fn new(name: String) -> StyleSheetsActor {
-        StyleSheetsActor { name: name }
+        StyleSheetsActor { name }
     }
 }

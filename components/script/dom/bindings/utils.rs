@@ -4,9 +4,37 @@
 
 //! Various utilities to glue JavaScript and the DOM implementation together.
 
-use crate::dom::bindings::codegen::InterfaceObjectMap;
-use crate::dom::bindings::codegen::PrototypeList;
+use std::ffi::CString;
+use std::os::raw::{c_char, c_void};
+use std::{ptr, slice, str};
+
+use js::conversions::ToJSValConvertible;
+use js::glue::{
+    CallJitGetterOp, CallJitMethodOp, CallJitSetterOp, IsWrapper, JS_GetReservedSlot,
+    UnwrapObjectDynamic, UnwrapObjectStatic, RUST_FUNCTION_VALUE_TO_JITINFO,
+};
+use js::jsapi::{
+    AtomToLinearString, CallArgs, DOMCallbacks, GetLinearStringCharAt, GetLinearStringLength,
+    GetNonCCWObjectGlobal, HandleId as RawHandleId, HandleObject as RawHandleObject, Heap, JSAtom,
+    JSContext, JSJitInfo, JSObject, JSTracer, JS_DeprecatedStringHasLatin1Chars,
+    JS_EnumerateStandardClasses, JS_FreezeObject, JS_GetLatin1StringCharsAndLength,
+    JS_IsExceptionPending, JS_IsGlobalObject, JS_ResolveStandardClass,
+    MutableHandleIdVector as RawMutableHandleIdVector, ObjectOpResult, StringIsArrayIndex,
+};
+use js::jsval::{JSVal, UndefinedValue};
+use js::rust::wrappers::{
+    JS_DeletePropertyById, JS_ForwardGetPropertyTo, JS_GetProperty, JS_GetPrototype,
+    JS_HasProperty, JS_HasPropertyById, JS_SetProperty,
+};
+use js::rust::{
+    get_object_class, is_dom_class, GCMethods, Handle, HandleId, HandleObject, HandleValue,
+    MutableHandleValue, ToString,
+};
+use js::JS_CALLEE;
+use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
+
 use crate::dom::bindings::codegen::PrototypeList::{MAX_PROTO_CHAIN_LENGTH, PROTO_OR_IFACE_LENGTH};
+use crate::dom::bindings::codegen::{InterfaceObjectMap, PrototypeList};
 use crate::dom::bindings::conversions::{
     jsstring_to_str, private_from_proto_check, PrototypeCheck,
 };
@@ -16,43 +44,6 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::trace::trace_object;
 use crate::dom::windowproxy;
 use crate::script_runtime::JSContext as SafeJSContext;
-use js::conversions::ToJSValConvertible;
-use js::glue::{CallJitGetterOp, CallJitMethodOp, CallJitSetterOp, IsWrapper};
-use js::glue::{GetCrossCompartmentWrapper, JS_GetReservedSlot, WrapperNew};
-use js::glue::{UnwrapObjectDynamic, UnwrapObjectStatic, RUST_JSID_TO_INT, RUST_JSID_TO_STRING};
-use js::glue::{
-    RUST_FUNCTION_VALUE_TO_JITINFO, RUST_JSID_IS_INT, RUST_JSID_IS_STRING, RUST_JSID_IS_VOID,
-};
-use js::jsapi::HandleId as RawHandleId;
-use js::jsapi::HandleObject as RawHandleObject;
-use js::jsapi::MutableHandleIdVector as RawMutableHandleIdVector;
-use js::jsapi::MutableHandleObject as RawMutableHandleObject;
-use js::jsapi::{AtomToLinearString, GetLinearStringCharAt, GetLinearStringLength};
-use js::jsapi::{CallArgs, DOMCallbacks, GetNonCCWObjectGlobal};
-use js::jsapi::{Heap, JSAutoRealm, JSContext, JS_FreezeObject};
-use js::jsapi::{JSAtom, JS_IsExceptionPending, JS_IsGlobalObject};
-use js::jsapi::{JSJitInfo, JSObject, JSTracer, JSWrapObjectCallbacks};
-use js::jsapi::{
-    JS_DeprecatedStringHasLatin1Chars, JS_ResolveStandardClass, ObjectOpResult, StringIsArrayIndex,
-};
-use js::jsapi::{JS_EnumerateStandardClasses, JS_GetLatin1StringCharsAndLength};
-use js::jsval::{JSVal, UndefinedValue};
-use js::rust::wrappers::JS_DeletePropertyById;
-use js::rust::wrappers::JS_ForwardGetPropertyTo;
-use js::rust::wrappers::JS_GetProperty;
-use js::rust::wrappers::JS_GetPrototype;
-use js::rust::wrappers::JS_HasProperty;
-use js::rust::wrappers::JS_HasPropertyById;
-use js::rust::wrappers::JS_SetProperty;
-use js::rust::{get_object_class, is_dom_class, GCMethods, ToString, ToWindowProxyIfWindow};
-use js::rust::{Handle, HandleId, HandleObject, HandleValue, MutableHandleValue};
-use js::typedarray::{CreateWith, Float32Array};
-use js::JS_CALLEE;
-use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
-use std::ffi::CString;
-use std::os::raw::{c_char, c_void};
-use std::ptr;
-use std::slice;
 
 /// Proxy handler for a WindowProxy.
 pub struct WindowProxyHandler(pub *const libc::c_void);
@@ -101,6 +92,9 @@ pub struct DOMClass {
     /// derivedness.
     pub interface_chain: [PrototypeList::ID; MAX_PROTO_CHAIN_LENGTH],
 
+    /// The last valid index of `interface_chain`.
+    pub depth: u8,
+
     /// The type ID of that interface.
     pub type_id: TopTypeId,
 
@@ -114,6 +108,7 @@ unsafe impl Sync for DOMClass {}
 
 /// The JSClass used for DOM object reflectors.
 #[derive(Copy)]
+#[repr(C)]
 pub struct DOMJSClass {
     /// The actual JSClass.
     pub base: js::jsapi::JSClass,
@@ -135,15 +130,6 @@ pub fn to_frozen_array<T: ToJSValConvertible>(convertibles: &[T], cx: SafeJSCont
     rooted!(in(*cx) let obj = ports.to_object());
     unsafe { JS_FreezeObject(*cx, RawHandleObject::from(obj.handle())) };
     *ports
-}
-
-/// Creates a Float32 array
-pub fn create_typed_array(cx: SafeJSContext, src: &[f32], dst: &Heap<*mut JSObject>) {
-    rooted!(in (*cx) let mut array = ptr::null_mut::<JSObject>());
-    unsafe {
-        let _ = Float32Array::create(*cx, CreateWith::Slice(src), array.handle_mut());
-    }
-    (*dst).set(array.get());
 }
 
 /// Returns the ProtoOrIfaceArray for the given global object.
@@ -192,16 +178,16 @@ pub unsafe fn get_property_on_prototype(
 /// Get an array index from the given `jsid`. Returns `None` if the given
 /// `jsid` is not an integer.
 pub unsafe fn get_array_index_from_id(_cx: *mut JSContext, id: HandleId) -> Option<u32> {
-    let raw_id = id.into();
-    if RUST_JSID_IS_INT(raw_id) {
-        return Some(RUST_JSID_TO_INT(raw_id) as u32);
+    let raw_id = *id;
+    if raw_id.is_int() {
+        return Some(raw_id.to_int() as u32);
     }
 
-    if RUST_JSID_IS_VOID(raw_id) || !RUST_JSID_IS_STRING(raw_id) {
+    if raw_id.is_void() || !raw_id.is_string() {
         return None;
     }
 
-    let atom = RUST_JSID_TO_STRING(raw_id) as *mut JSAtom;
+    let atom = raw_id.to_string() as *mut JSAtom;
     let s = AtomToLinearString(atom);
     if GetLinearStringLength(s) == 0 {
         return None;
@@ -211,7 +197,7 @@ pub unsafe fn get_array_index_from_id(_cx: *mut JSContext, id: HandleId) -> Opti
     let first_char = char::decode_utf16(chars.iter().cloned())
         .next()
         .map_or('\0', |r| r.unwrap_or('\0'));
-    if first_char < 'a' || first_char > 'z' {
+    if !first_char.is_ascii_lowercase() {
         return None;
     }
 
@@ -267,16 +253,17 @@ pub unsafe fn find_enum_value<'a, T>(
         pairs
             .iter()
             .find(|&&(key, _)| search == *key)
-            .map(|&(_, ref ev)| ev),
+            .map(|(_, ev)| ev),
         search,
     ))
 }
 
 /// Returns wether `obj` is a platform object using dynamic unwrap
 /// <https://heycam.github.io/webidl/#dfn-platform-object>
+#[allow(dead_code)]
 pub fn is_platform_object_dynamic(obj: *mut JSObject, cx: *mut JSContext) -> bool {
     is_platform_object(obj, &|o| unsafe {
-        UnwrapObjectDynamic(o, cx, /* stopAtWindowProxy = */ 0)
+        UnwrapObjectDynamic(o, cx, /* stopAtWindowProxy = */ false)
     })
 }
 
@@ -451,12 +438,12 @@ pub unsafe extern "C" fn resolve_global(
     if *rval {
         return true;
     }
-    if !RUST_JSID_IS_STRING(id) {
+    if !id.is_string() {
         *rval = false;
         return true;
     }
 
-    let string = RUST_JSID_TO_STRING(id);
+    let string = id.to_string();
     if !JS_DeprecatedStringHasLatin1Chars(string) {
         *rval = false;
         return true;
@@ -464,7 +451,7 @@ pub unsafe extern "C" fn resolve_global(
     let mut length = 0;
     let ptr = JS_GetLatin1StringCharsAndLength(cx, ptr::null(), string, &mut length);
     assert!(!ptr.is_null());
-    let bytes = slice::from_raw_parts(ptr, length as usize);
+    let bytes = slice::from_raw_parts(ptr, length);
 
     if let Some(init_fun) = InterfaceObjectMap::MAP.get(bytes) {
         init_fun(SafeJSContext::from_ptr(cx), Handle::from_raw(obj));
@@ -474,36 +461,6 @@ pub unsafe extern "C" fn resolve_global(
     }
     true
 }
-
-unsafe extern "C" fn wrap(
-    cx: *mut JSContext,
-    _existing: RawHandleObject,
-    obj: RawHandleObject,
-) -> *mut JSObject {
-    // FIXME terrible idea. need security wrappers
-    // https://github.com/servo/servo/issues/2382
-    WrapperNew(cx, obj, GetCrossCompartmentWrapper(), ptr::null(), false)
-}
-
-unsafe extern "C" fn pre_wrap(
-    cx: *mut JSContext,
-    _scope: RawHandleObject,
-    _orig_obj: RawHandleObject,
-    obj: RawHandleObject,
-    _object_passed_to_wrap: RawHandleObject,
-    rval: RawMutableHandleObject,
-) {
-    let _ac = JSAutoRealm::new(cx, obj.get());
-    let obj = ToWindowProxyIfWindow(obj.get());
-    assert!(!obj.is_null());
-    rval.set(obj)
-}
-
-/// Callback table for use with JS_SetWrapObjectCallbacks
-pub static WRAP_CALLBACKS: JSWrapObjectCallbacks = JSWrapObjectCallbacks {
-    wrap: Some(wrap),
-    preWrap: Some(pre_wrap),
-};
 
 /// Deletes the property `id` from `object`.
 pub unsafe fn delete_property_by_id(
@@ -664,4 +621,8 @@ impl AsCCharPtrPtr for [u8] {
     fn as_c_char_ptr(&self) -> *const c_char {
         self as *const [u8] as *const c_char
     }
+}
+
+pub unsafe fn callargs_is_constructing(args: &CallArgs) -> bool {
+    (*args.argv_.offset(-1)).is_magic()
 }

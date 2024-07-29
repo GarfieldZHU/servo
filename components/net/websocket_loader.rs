@@ -11,47 +11,38 @@
 //! over events from the network and events from the DOM, using async/await to avoid
 //! the need for a dedicated thread per websocket.
 
-use crate::connector::{create_tls_config, ALPN_H1};
-use crate::cookie::Cookie;
-use crate::fetch::methods::should_be_blocked_due_to_bad_port;
-use crate::hosts::replace_host;
-use crate::http_loader::HttpState;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use async_tungstenite::tokio::{client_async_tls_with_connector_and_config, ConnectStream};
 use async_tungstenite::WebSocketStream;
-use embedder_traits::resources::{self, Resource};
-use futures03::future::TryFutureExt;
-use futures03::sink::SinkExt;
-use futures03::stream::StreamExt;
-use http::header::{HeaderMap, HeaderName, HeaderValue};
+use base64::Engine;
+use futures::future::TryFutureExt;
+use futures::sink::SinkExt;
+use futures::stream::StreamExt;
+use http::header::{self, HeaderName, HeaderValue};
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
+use log::{debug, trace, warn};
 use net_traits::request::{RequestBuilder, RequestMode};
-use net_traits::{CookieSource, MessageData};
-use net_traits::{WebSocketDomAction, WebSocketNetworkEvent};
-use openssl::ssl::ConnectConfiguration;
+use net_traits::{CookieSource, MessageData, WebSocketDomAction, WebSocketNetworkEvent};
 use servo_url::ServoUrl;
-use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio2::net::TcpStream;
-use tokio2::runtime::Runtime;
-use tokio2::select;
-use tokio2::sync::mpsc::{unbounded_channel, UnboundedReceiver};
-use tungstenite::error::Error;
-use tungstenite::error::Result as WebSocketResult;
+use tokio::net::TcpStream;
+use tokio::select;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio_rustls::TlsConnector;
+use tungstenite::error::{Error, ProtocolError, Result as WebSocketResult, UrlError};
 use tungstenite::handshake::client::{Request, Response};
-use tungstenite::http::header::{self as WSHeader, HeaderValue as WSHeaderValue};
 use tungstenite::protocol::CloseFrame;
 use tungstenite::Message;
 use url::Url;
 
-// Websockets get their own tokio runtime that's independent of the one used for
-// HTTP connections, otherwise a large number of websockets could occupy all workers
-// and starve other network traffic.
-lazy_static! {
-    pub static ref HANDLE: Mutex<Option<Runtime>> = Mutex::new(Some(Runtime::new().unwrap()));
-}
-
+use crate::async_runtime::HANDLE;
+use crate::connector::{create_tls_config, CACertificates, TlsConfig};
+use crate::cookie::ServoCookie;
+use crate::fetch::methods::should_be_blocked_due_to_bad_port;
+use crate::hosts::replace_host;
+use crate::http_loader::HttpState;
 /// Create a tungstenite Request object for the initial HTTP request.
 /// This request contains `Origin`, `Sec-WebSocket-Protocol`, `Authorization`,
 /// and `Cookie` headers as appropriate.
@@ -65,31 +56,43 @@ fn create_request(
 ) -> WebSocketResult<Request> {
     let mut builder = Request::get(resource_url.as_str());
     let headers = builder.headers_mut().unwrap();
-    headers.insert("Origin", WSHeaderValue::from_str(origin)?);
+    headers.insert("Origin", HeaderValue::from_str(origin)?);
+
+    let origin = resource_url.origin();
+    let host = format!(
+        "{}",
+        origin
+            .host()
+            .ok_or_else(|| Error::Url(UrlError::NoHostName))?
+    );
+    headers.insert("Host", HeaderValue::from_str(&host)?);
+    headers.insert("Connection", HeaderValue::from_static("upgrade"));
+    headers.insert("Upgrade", HeaderValue::from_static("websocket"));
+    headers.insert("Sec-Websocket-Version", HeaderValue::from_static("13"));
+
+    let key = HeaderValue::from_str(&tungstenite::handshake::client::generate_key()).unwrap();
+    headers.insert("Sec-WebSocket-Key", key);
 
     if !protocols.is_empty() {
         let protocols = protocols.join(",");
-        headers.insert(
-            "Sec-WebSocket-Protocol",
-            WSHeaderValue::from_str(&protocols)?,
-        );
+        headers.insert("Sec-WebSocket-Protocol", HeaderValue::from_str(&protocols)?);
     }
 
     let mut cookie_jar = http_state.cookie_jar.write().unwrap();
     cookie_jar.remove_expired_cookies_for_url(resource_url);
     if let Some(cookie_list) = cookie_jar.cookies_for_url(resource_url, CookieSource::HTTP) {
-        headers.insert("Cookie", WSHeaderValue::from_str(&cookie_list)?);
+        headers.insert("Cookie", HeaderValue::from_str(&cookie_list)?);
     }
 
     if resource_url.password().is_some() || resource_url.username() != "" {
-        let basic = base64::encode(&format!(
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!(
             "{}:{}",
             resource_url.username(),
             resource_url.password().unwrap_or("")
         ));
         headers.insert(
             "Authorization",
-            WSHeaderValue::from_str(&format!("Basic {}", basic))?,
+            HeaderValue::from_str(&format!("Basic {}", basic))?,
         );
     }
 
@@ -110,44 +113,32 @@ fn process_ws_response(
     trace!("processing websocket http response for {}", resource_url);
     let mut protocol_in_use = None;
     if let Some(protocol_name) = response.headers().get("Sec-WebSocket-Protocol") {
-        let protocol_name = protocol_name.to_str().unwrap();
+        let protocol_name = protocol_name.to_str().unwrap_or("");
         if !protocols.is_empty() && !protocols.iter().any(|p| protocol_name == (*p)) {
-            return Err(Error::Protocol(
-                "Protocol in use not in client-supplied protocol list".into(),
-            ));
+            return Err(Error::Protocol(ProtocolError::InvalidHeader(
+                HeaderName::from_static("sec-websocket-protocol"),
+            )));
         }
         protocol_in_use = Some(protocol_name.to_string());
     }
 
     let mut jar = http_state.cookie_jar.write().unwrap();
     // TODO(eijebong): Replace thise once typed headers settled on a cookie impl
-    for cookie in response.headers().get_all(WSHeader::SET_COOKIE) {
+    for cookie in response.headers().get_all(header::SET_COOKIE) {
         if let Ok(s) = std::str::from_utf8(cookie.as_bytes()) {
             if let Some(cookie) =
-                Cookie::from_cookie_string(s.into(), resource_url, CookieSource::HTTP)
+                ServoCookie::from_cookie_string(s.into(), resource_url, CookieSource::HTTP)
             {
                 jar.push(cookie, resource_url, CookieSource::HTTP);
             }
         }
     }
 
-    // We need to make a new header map here because tungstenite depends on
-    // a more recent version of http than the rest of the network stack, so the
-    // HeaderMap types are incompatible.
-    let mut headers = HeaderMap::new();
-    for (key, value) in response.headers().iter() {
-        if let (Ok(key), Ok(value)) = (
-            HeaderName::from_bytes(key.as_ref()),
-            HeaderValue::from_bytes(value.as_ref()),
-        ) {
-            headers.insert(key, value);
-        }
-    }
     http_state
         .hsts_list
         .write()
         .unwrap()
-        .update_hsts_list_from_response(resource_url, &headers);
+        .update_hsts_list_from_response(resource_url, response.headers());
 
     Ok(protocol_in_use)
 }
@@ -283,6 +274,10 @@ async fn run_ws_loop(
                         ));
                         break;
                     }
+
+                    Message::Frame(_) => {
+                        warn!("Unexpected websocket frame message");
+                    }
                 }
             }
         }
@@ -298,7 +293,7 @@ async fn start_websocket(
     resource_event_sender: IpcSender<WebSocketNetworkEvent>,
     protocols: Vec<String>,
     client: Request,
-    tls_config: ConnectConfiguration,
+    tls_config: TlsConfig,
     dom_action_receiver: IpcReceiver<WebSocketDomAction>,
 ) -> Result<(), Error> {
     trace!("starting WS connection to {}", url);
@@ -309,25 +304,27 @@ async fn start_websocket(
     let host_str = client
         .uri()
         .host()
-        .ok_or_else(|| Error::Url("No host string".into()))?;
+        .ok_or_else(|| Error::Url(UrlError::NoHostName))?;
     let host = replace_host(host_str);
-    let mut net_url =
-        Url::parse(&client.uri().to_string()).map_err(|e| Error::Url(e.to_string().into()))?;
+    let mut net_url = Url::parse(&client.uri().to_string())
+        .map_err(|e| Error::Url(UrlError::UnableToConnect(e.to_string())))?;
     net_url
         .set_host(Some(&host))
-        .map_err(|e| Error::Url(e.to_string().into()))?;
+        .map_err(|e| Error::Url(UrlError::UnableToConnect(e.to_string())))?;
 
     let domain = net_url
         .host()
-        .ok_or_else(|| Error::Url("No host string".into()))?;
+        .ok_or_else(|| Error::Url(UrlError::NoHostName))?;
     let port = net_url
         .port_or_known_default()
-        .ok_or_else(|| Error::Url("Unknown port".into()))?;
+        .ok_or_else(|| Error::Url(UrlError::UnableToConnect("Unknown port".into())))?;
 
     let try_socket = TcpStream::connect((&*domain.to_string(), port)).await;
     let socket = try_socket.map_err(Error::Io)?;
+    let connector = TlsConnector::from(Arc::new(tls_config));
+
     let (stream, response) =
-        client_async_tls_with_connector_and_config(client, socket, Some(tls_config), None).await?;
+        client_async_tls_with_connector_and_config(client, socket, Some(connector), None).await?;
 
     let protocol_in_use = process_ws_response(&http_state, &response, &url, &protocols)?;
 
@@ -353,7 +350,8 @@ fn connect(
     resource_event_sender: IpcSender<WebSocketNetworkEvent>,
     dom_action_receiver: IpcReceiver<WebSocketDomAction>,
     http_state: Arc<HttpState>,
-    certificate_path: Option<String>,
+    ca_certificates: CACertificates,
+    ignore_certificate_errors: bool,
 ) -> Result<(), String> {
     let protocols = match req_builder.mode {
         RequestMode::WebSocket { protocols } => protocols,
@@ -366,62 +364,34 @@ fn connect(
     };
 
     // https://fetch.spec.whatwg.org/#websocket-opening-handshake
-    // By standard, we should work with an http(s):// URL (req_url),
-    // but as ws-rs expects to be called with a ws(s):// URL (net_url)
-    // we upgrade ws to wss, so we don't have to convert http(s) back to ws(s).
     http_state
         .hsts_list
         .read()
         .unwrap()
         .apply_hsts_rules(&mut req_builder.url);
 
-    let scheme = req_builder.url.scheme();
-    let mut req_url = req_builder.url.clone();
-    match scheme {
-        "ws" => {
-            req_url
-                .as_mut_url()
-                .set_scheme("http")
-                .map_err(|()| "couldn't replace scheme".to_string())?;
-        },
-        "wss" => {
-            req_url
-                .as_mut_url()
-                .set_scheme("https")
-                .map_err(|()| "couldn't replace scheme".to_string())?;
-        },
-        _ => {},
-    }
+    let req_url = req_builder.url.clone();
 
     if should_be_blocked_due_to_bad_port(&req_url) {
         return Err("Port blocked".to_string());
     }
 
-    let certs = match certificate_path {
-        Some(ref path) => fs::read_to_string(path).map_err(|e| e.to_string())?,
-        None => resources::read_string(Resource::SSLCertificates),
-    };
-
     let client = match create_request(
-        &req_builder.url,
+        &req_url,
         &req_builder.origin.ascii_serialization(),
         &protocols,
-        &*http_state,
+        &http_state,
     ) {
         Ok(c) => c,
         Err(e) => return Err(e.to_string()),
     };
 
-    let tls_config = create_tls_config(
-        &certs,
-        ALPN_H1,
-        http_state.extra_certs.clone(),
-        http_state.connection_certs.clone(),
+    let mut tls_config = create_tls_config(
+        ca_certificates,
+        ignore_certificate_errors,
+        http_state.override_manager.clone(),
     );
-    let tls_config = match tls_config.build().configure() {
-        Ok(c) => c,
-        Err(e) => return Err(e.to_string()),
-    };
+    tls_config.alpn_protocols = vec!["h2".to_string().into(), "http/1.1".to_string().into()];
 
     let resource_event_sender2 = resource_event_sender.clone();
     match HANDLE.lock().unwrap().as_mut() {
@@ -451,7 +421,8 @@ pub fn init(
     resource_event_sender: IpcSender<WebSocketNetworkEvent>,
     dom_action_receiver: IpcReceiver<WebSocketDomAction>,
     http_state: Arc<HttpState>,
-    certificate_path: Option<String>,
+    ca_certificates: CACertificates,
+    ignore_certificate_errors: bool,
 ) {
     let resource_event_sender2 = resource_event_sender.clone();
     if let Err(e) = connect(
@@ -459,7 +430,8 @@ pub fn init(
         resource_event_sender,
         dom_action_receiver,
         http_state,
-        certificate_path,
+        ca_certificates,
+        ignore_certificate_errors,
     ) {
         warn!("Error starting websocket: {}", e);
         let _ = resource_event_sender2.send(WebSocketNetworkEvent::Fail);

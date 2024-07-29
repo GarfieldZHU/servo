@@ -1,18 +1,22 @@
-apply plugin: 'com.android.application'
+plugins {
+    id 'com.android.application'
+}
 
 import java.util.regex.Matcher
 import java.util.regex.Pattern
 
 android {
-    compileSdkVersion 27
-    buildToolsVersion '27.0.3'
+    compileSdk 33
+    buildToolsVersion = "33.0.2"
+
+    namespace 'org.servo.servoshell'
 
     buildDir = rootDir.absolutePath + "/../../../target/android/gradle/servoapp"
 
     defaultConfig {
-        applicationId "org.mozilla.servo"
-        minSdkVersion 21
-        targetSdkVersion 27
+        applicationId "org.servo.servoshell"
+        minSdk 30
+        targetSdk 30
         versionCode 1
         versionName "1.0.0"
     }
@@ -23,14 +27,10 @@ android {
     }
 
     // Share all of that with servoview
-    flavorDimensions "default"
+    flavorDimensions = ["default"]
 
     productFlavors {
-        main {
-        }
-        googlevr {
-        }
-        oculusvr {
+        basic {
         }
     }
 
@@ -50,30 +50,30 @@ android {
     }
 
 
+    def signingKeyInfo = getSigningKeyInfo()
+
+    if (signingKeyInfo) {
+        signingConfigs {
+            release {
+               storeFile signingKeyInfo.storeFile
+               storePassword signingKeyInfo.storePassword
+               keyAlias signingKeyInfo.keyAlias
+               keyPassword signingKeyInfo.keyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
         }
 
         release {
-            signingConfig signingConfigs.debug // Change this to sign with a production key
+            signingConfig signingKeyInfo ? signingConfigs.release : signingConfigs.debug
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
 
         // Custom build types
-        armDebug {
-            initWith(debug)
-            ndk {
-                abiFilters getNDKAbi('arm')
-            }
-        }
-
-        armRelease {
-            initWith(release)
-            ndk {
-                abiFilters getNDKAbi('arm')
-            }
-        }
         armv7Debug {
             initWith(debug)
             ndk {
@@ -110,12 +110,24 @@ android {
                 abiFilters getNDKAbi('x86')
             }
         }
+        x64Debug {
+            initWith(debug)
+            ndk {
+                abiFilters getNDKAbi('x64')
+            }
+        }
+        x64Release {
+            initWith(release)
+            ndk {
+                abiFilters getNDKAbi('x64')
+            }
+        }
     }
 
     // Ignore default 'debug' and 'release' build types
     variantFilter { variant ->
-        if(variant.buildType.name.equals('release') || variant.buildType.name.equals('debug')) {
-            variant.setIgnore(true);
+        if(variant.buildType.name == 'release' || variant.buildType.name == 'debug') {
+            variant.setIgnore(true)
         }
     }
 
@@ -144,7 +156,6 @@ android {
 }
 
 dependencies {
-    implementation 'com.android.support.constraint:constraint-layout:1.1.2'
     if (findProject(':servoview-local')) {
       implementation project(':servoview-local')
     } else {

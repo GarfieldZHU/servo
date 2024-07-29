@@ -2,6 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::fmt;
+use std::result::Result;
+
+use base::id::PipelineId;
+use servo_atoms::Atom;
+
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::event::{EventBubbles, EventCancelable, EventTask, SimpleEventTask};
@@ -10,17 +16,13 @@ use crate::dom::window::Window;
 use crate::script_runtime::{CommonScriptMsg, ScriptChan, ScriptThreadEventCategory};
 use crate::task::{TaskCanceller, TaskOnce};
 use crate::task_source::{TaskSource, TaskSourceName};
-use msg::constellation_msg::PipelineId;
-use servo_atoms::Atom;
-use std::fmt;
-use std::result::Result;
 
 #[derive(JSTraceable)]
-pub struct DOMManipulationTaskSource(pub Box<dyn ScriptChan + Send>, pub PipelineId);
+pub struct DOMManipulationTaskSource(pub Box<dyn ScriptChan + Send>, #[no_trace] pub PipelineId);
 
 impl Clone for DOMManipulationTaskSource {
     fn clone(&self) -> DOMManipulationTaskSource {
-        DOMManipulationTaskSource(self.0.clone(), self.1.clone())
+        DOMManipulationTaskSource(self.0.clone(), self.1)
     }
 }
 
@@ -59,10 +61,10 @@ impl DOMManipulationTaskSource {
     ) {
         let target = Trusted::new(target);
         let task = EventTask {
-            target: target,
-            name: name,
-            bubbles: bubbles,
-            cancelable: cancelable,
+            target,
+            name,
+            bubbles,
+            cancelable,
         };
         let _ = self.queue(task, window.upcast());
     }

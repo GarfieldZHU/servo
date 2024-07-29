@@ -2,21 +2,24 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use canvas_traits::webgl::{
+    ActiveAttribInfo, WebGLCommand, WebGLError, WebGLResult, WebGLVersion, WebGLVertexArrayId,
+};
+
 use crate::dom::bindings::cell::{ref_filter_map, DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::root::{Dom, MutNullableDom};
 use crate::dom::webglbuffer::WebGLBuffer;
 use crate::dom::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use canvas_traits::webgl::{
-    ActiveAttribInfo, WebGLCommand, WebGLError, WebGLResult, WebGLVersion, WebGLVertexArrayId,
-};
-use std::cell::Cell;
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct VertexArrayObject {
     context: Dom<WebGLRenderingContext>,
+    #[no_trace]
     id: Option<WebGLVertexArrayId>,
     ever_bound: Cell<bool>,
     is_deleted: Cell<bool>,
@@ -68,7 +71,7 @@ impl VertexArrayObject {
     }
 
     pub fn ever_bound(&self) -> bool {
-        return self.ever_bound.get();
+        self.ever_bound.get()
     }
 
     pub fn set_ever_bound(&self) {
@@ -103,20 +106,17 @@ impl VertexArrayObject {
             .get_mut(index as usize)
             .ok_or(WebGLError::InvalidValue)?;
 
-        if size < 1 || size > 4 {
+        if !(1..=4).contains(&size) {
             return Err(WebGLError::InvalidValue);
         }
 
         // https://www.khronos.org/registry/webgl/specs/latest/1.0/#BUFFER_OFFSET_AND_STRIDE
         // https://www.khronos.org/registry/webgl/specs/latest/1.0/#VERTEX_STRIDE
-        if stride < 0 || stride > 255 || offset < 0 {
+        if !(0..=255).contains(&stride) || offset < 0 {
             return Err(WebGLError::InvalidValue);
         }
 
-        let is_webgl2 = match self.context.webgl_version() {
-            WebGLVersion::WebGL2 => true,
-            _ => false,
-        };
+        let is_webgl2 = matches!(self.context.webgl_version(), WebGLVersion::WebGL2);
 
         let bytes_per_component: i32 = match type_ {
             constants::BYTE | constants::UNSIGNED_BYTE => 1,
@@ -261,7 +261,7 @@ impl Drop for VertexArrayObject {
 }
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 pub struct VertexAttribData {
     pub enabled_as_array: bool,
     pub size: u8,
@@ -275,7 +275,7 @@ pub struct VertexAttribData {
 }
 
 impl Default for VertexAttribData {
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn default() -> Self {
         Self {
             enabled_as_array: false,
@@ -293,7 +293,7 @@ impl Default for VertexAttribData {
 
 impl VertexAttribData {
     pub fn buffer(&self) -> Option<&WebGLBuffer> {
-        self.buffer.as_ref().map(|b| &**b)
+        self.buffer.as_deref()
     }
 
     pub fn max_vertices(&self) -> u32 {

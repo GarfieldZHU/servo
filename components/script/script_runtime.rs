@@ -7,22 +7,67 @@
 
 #![allow(dead_code)]
 
+use core::ffi::c_char;
+use std::cell::Cell;
+use std::ffi::CString;
+use std::io::{stdout, Write};
+use std::ops::Deref;
+use std::os::raw::c_void;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::{fmt, os, ptr, thread};
+
+use base::id::PipelineId;
+use js::glue::{
+    CollectServoSizes, CreateJobQueue, DeleteJobQueue, DispatchableRun, JobQueueTraps,
+    RUST_js_GetErrorMessage, SetBuildId, StreamConsumerConsumeChunk,
+    StreamConsumerNoteResponseURLs, StreamConsumerStreamEnd, StreamConsumerStreamError,
+};
+use js::jsapi::{
+    BuildIdCharVector, ContextOptionsRef, DisableIncrementalGC, Dispatchable as JSRunnable,
+    Dispatchable_MaybeShuttingDown, GCDescription, GCOptions, GCProgress, GCReason,
+    GetPromiseUserInputEventHandlingState, HandleObject, Heap, InitConsumeStreamCallback,
+    InitDispatchToEventLoop, JSContext as RawJSContext, JSGCParamKey, JSGCStatus,
+    JSJitCompilerOption, JSObject, JSSecurityCallbacks, JSTracer, JS_AddExtraGCRootsTracer,
+    JS_InitDestroyPrincipalsCallback, JS_InitReadPrincipalsCallback, JS_RequestInterruptCallback,
+    JS_SetGCCallback, JS_SetGCParameter, JS_SetGlobalJitCompilerOption,
+    JS_SetOffthreadIonCompilationEnabled, JS_SetParallelParsingEnabled, JS_SetSecurityCallbacks,
+    JobQueue, MimeType, PromiseRejectionHandlingState, PromiseUserInputEventHandlingState,
+    SetDOMCallbacks, SetGCSliceCallback, SetJobQueue, SetPreserveWrapperCallbacks,
+    SetProcessBuildIdOp, SetPromiseRejectionTrackerCallback, StreamConsumer as JSStreamConsumer,
+};
+use js::jsval::UndefinedValue;
+use js::panic::wrap_panic;
+use js::rust::wrappers::{GetPromiseIsHandled, JS_GetPromiseResult};
+use js::rust::{
+    Handle, HandleObject as RustHandleObject, IntoHandle, JSEngine, JSEngineHandle, ParentRuntime,
+    Runtime as RustRuntime,
+};
+use lazy_static::lazy_static;
+use malloc_size_of::MallocSizeOfOps;
+use profile_traits::mem::{Report, ReportKind, ReportsChan};
+use profile_traits::path;
+use servo_config::{opts, pref};
+use style::thread_state::{self, ThreadState};
+
 use crate::body::BodyMixin;
 use crate::dom::bindings::codegen::Bindings::PromiseBinding::PromiseJobCallback;
-use crate::dom::bindings::codegen::Bindings::ResponseBinding::ResponseBinding::ResponseMethods;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::ResponseType as DOMResponseType;
-use crate::dom::bindings::conversions::get_dom_class;
-use crate::dom::bindings::conversions::private_from_object;
-use crate::dom::bindings::conversions::root_from_handleobject;
+use crate::dom::bindings::codegen::Bindings::ResponseBinding::Response_Binding::ResponseMethods;
+use crate::dom::bindings::conversions::{
+    get_dom_class, private_from_object, root_from_handleobject,
+};
 use crate::dom::bindings::error::{throw_dom_exception, Error};
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::refcounted::{trace_refcounted_objects, LiveDOMReferences};
-use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
+use crate::dom::bindings::refcounted::{
+    trace_refcounted_objects, LiveDOMReferences, Trusted, TrustedPromise,
+};
 use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::trace_roots;
-use crate::dom::bindings::settings_stack;
-use crate::dom::bindings::trace::{trace_traceables, JSTraceable};
+use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::bindings::utils::DOM_CALLBACKS;
+use crate::dom::bindings::{principals, settings_stack};
 use crate::dom::event::{Event, EventBubbles, EventCancelable, EventStatus};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
@@ -36,65 +81,17 @@ use crate::script_thread::trace_thread;
 use crate::task::TaskBox;
 use crate::task_source::networking::NetworkingTaskSource;
 use crate::task_source::{TaskSource, TaskSourceName};
-use js::glue::{CollectServoSizes, CreateJobQueue, DeleteJobQueue, DispatchableRun};
-use js::glue::{JobQueueTraps, RUST_js_GetErrorMessage, SetBuildId, StreamConsumerConsumeChunk};
-use js::glue::{
-    StreamConsumerNoteResponseURLs, StreamConsumerStreamEnd, StreamConsumerStreamError,
-};
-use js::jsapi::ContextOptionsRef;
-use js::jsapi::GetPromiseUserInputEventHandlingState;
-use js::jsapi::InitConsumeStreamCallback;
-use js::jsapi::InitDispatchToEventLoop;
-use js::jsapi::MimeType;
-use js::jsapi::PromiseUserInputEventHandlingState;
-use js::jsapi::StreamConsumer as JSStreamConsumer;
-use js::jsapi::{BuildIdCharVector, DisableIncrementalGC, GCDescription, GCProgress};
-use js::jsapi::{Dispatchable as JSRunnable, Dispatchable_MaybeShuttingDown};
-use js::jsapi::{
-    GCReason, JSGCInvocationKind, JSGCStatus, JS_AddExtraGCRootsTracer,
-    JS_RequestInterruptCallback, JS_SetGCCallback,
-};
-use js::jsapi::{HandleObject, Heap, JobQueue};
-use js::jsapi::{JSContext as RawJSContext, JSTracer, SetDOMCallbacks, SetGCSliceCallback};
-use js::jsapi::{JSGCParamKey, JS_SetGCParameter, JS_SetGlobalJitCompilerOption};
-use js::jsapi::{
-    JSJitCompilerOption, JS_SetOffthreadIonCompilationEnabled, JS_SetParallelParsingEnabled,
-};
-use js::jsapi::{JSObject, PromiseRejectionHandlingState, SetPreserveWrapperCallbacks};
-use js::jsapi::{SetJobQueue, SetProcessBuildIdOp, SetPromiseRejectionTrackerCallback};
-use js::jsval::UndefinedValue;
-use js::panic::wrap_panic;
-use js::rust::wrappers::{GetPromiseIsHandled, JS_GetPromiseResult};
-use js::rust::Handle;
-use js::rust::HandleObject as RustHandleObject;
-use js::rust::IntoHandle;
-use js::rust::ParentRuntime;
-use js::rust::Runtime as RustRuntime;
-use js::rust::{JSEngine, JSEngineHandle};
-use malloc_size_of::MallocSizeOfOps;
-use msg::constellation_msg::PipelineId;
-use profile_traits::mem::{Report, ReportKind, ReportsChan};
-use servo_config::opts;
-use servo_config::pref;
-use std::cell::Cell;
-use std::ffi::CString;
-use std::fmt;
-use std::io::{stdout, Write};
-use std::ops::Deref;
-use std::os;
-use std::os::raw::c_void;
-use std::ptr;
-use std::rc::Rc;
-use std::sync::Mutex;
-use std::thread;
-use std::time::Duration;
-use style::thread_state::{self, ThreadState};
-use time::{now, Tm};
 
 static JOB_QUEUE_TRAPS: JobQueueTraps = JobQueueTraps {
     getIncumbentGlobal: Some(get_incumbent_global),
     enqueuePromiseJob: Some(enqueue_promise_job),
     empty: Some(empty),
+};
+
+static SECURITY_CALLBACKS: JSSecurityCallbacks = JSSecurityCallbacks {
+    // TODO: Content Security Policy <https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP>
+    contentSecurityPolicyAllows: None,
+    subsumes: Some(principals::subsumes),
 };
 
 /// Common messages used to control the event loops in both the script and the worker
@@ -212,7 +209,7 @@ unsafe extern "C" fn enqueue_promise_job(
             GlobalScope::from_object(incumbent_global.get())
         } else {
             let realm = AlreadyInRealm::assert_for_cx(cx);
-            GlobalScope::from_context(*cx, InRealm::in_realm(&realm))
+            GlobalScope::from_context(*cx, InRealm::already(&realm))
         };
         let pipeline = global.pipeline_id();
         let interaction = if promise.get().is_null() {
@@ -235,8 +232,8 @@ unsafe extern "C" fn enqueue_promise_job(
     result
 }
 
-#[allow(unsafe_code, unrooted_must_root)]
-/// https://html.spec.whatwg.org/multipage/#the-hostpromiserejectiontracker-implementation
+#[allow(unsafe_code, crown::unrooted_must_root)]
+/// <https://html.spec.whatwg.org/multipage/#the-hostpromiserejectiontracker-implementation>
 unsafe extern "C" fn promise_rejection_tracker(
     cx: *mut RawJSContext,
     _muted_errors: bool,
@@ -289,7 +286,7 @@ unsafe extern "C" fn promise_rejection_tracker(
                 global.dom_manipulation_task_source().queue(
                 task!(rejection_handled_event: move || {
                     let target = target.root();
-                    let cx = target.global().get_cx();
+                    let cx = GlobalScope::get_cx();
                     let root_promise = trusted_promise.root();
 
                     rooted!(in(*cx) let mut reason = UndefinedValue());
@@ -313,10 +310,10 @@ unsafe extern "C" fn promise_rejection_tracker(
     })
 }
 
-#[allow(unsafe_code, unrooted_must_root)]
-/// https://html.spec.whatwg.org/multipage/#notify-about-rejected-promises
+#[allow(unsafe_code, crown::unrooted_must_root)]
+/// <https://html.spec.whatwg.org/multipage/#notify-about-rejected-promises>
 pub fn notify_about_rejected_promises(global: &GlobalScope) {
-    let cx = global.get_cx();
+    let cx = GlobalScope::get_cx();
     unsafe {
         // Step 2.
         if global.get_uncaught_rejections().borrow().len() > 0 {
@@ -342,7 +339,7 @@ pub fn notify_about_rejected_promises(global: &GlobalScope) {
             global.dom_manipulation_task_source().queue(
                 task!(unhandled_rejection_event: move || {
                     let target = target.root();
-                    let cx = target.global().get_cx();
+                    let cx = GlobalScope::get_cx();
 
                     for promise in uncaught_rejections {
                         let promise = promise.root();
@@ -414,8 +411,8 @@ impl Deref for Runtime {
 
 pub struct JSEngineSetup(JSEngine);
 
-impl JSEngineSetup {
-    pub fn new() -> Self {
+impl Default for JSEngineSetup {
+    fn default() -> Self {
         let engine = JSEngine::init().unwrap();
         *JS_ENGINE.lock().unwrap() = Some(engine.handle());
         Self(engine)
@@ -466,12 +463,17 @@ unsafe fn new_rt_and_cx_with_parent(
 
     JS_AddExtraGCRootsTracer(cx, Some(trace_rust_roots), ptr::null_mut());
 
+    JS_SetSecurityCallbacks(cx, &SECURITY_CALLBACKS);
+
+    JS_InitDestroyPrincipalsCallback(cx, Some(principals::destroy_servo_jsprincipal));
+    JS_InitReadPrincipalsCallback(cx, Some(principals::read_jsprincipal));
+
     // Needed for debug assertions about whether GC is running.
     if cfg!(debug_assertions) {
         JS_SetGCCallback(cx, Some(debug_gc_callback), ptr::null_mut());
     }
 
-    if opts::get().gc_profile {
+    if opts::get().debug.gc_profile {
         SetGCSliceCallback(cx, Some(gc_slice_callback));
     }
 
@@ -531,8 +533,13 @@ unsafe fn new_rt_and_cx_with_parent(
     let cx_opts = &mut *ContextOptionsRef(cx);
     JS_SetGlobalJitCompilerOption(
         cx,
+        JSJitCompilerOption::JSJITCOMPILER_BASELINE_INTERPRETER_ENABLE,
+        pref!(js.baseline_interpreter.enabled) as u32,
+    );
+    JS_SetGlobalJitCompilerOption(
+        cx,
         JSJitCompilerOption::JSJITCOMPILER_BASELINE_ENABLE,
-        pref!(js.baseline.enabled) as u32,
+        pref!(js.baseline_jit.enabled) as u32,
     );
     JS_SetGlobalJitCompilerOption(
         cx,
@@ -563,7 +570,7 @@ unsafe fn new_rt_and_cx_with_parent(
     JS_SetGlobalJitCompilerOption(
         cx,
         JSJitCompilerOption::JSJITCOMPILER_BASELINE_WARMUP_TRIGGER,
-        if pref!(js.baseline.unsafe_eager_compilation.enabled) {
+        if pref!(js.baseline_jit.unsafe_eager_compilation.enabled) {
             0
         } else {
             u32::max_value()
@@ -680,76 +687,69 @@ unsafe extern "C" fn get_size(obj: *mut JSObject) -> usize {
             let mut ops = MallocSizeOfOps::new(servo_allocator::usable_size, None, None);
             (v.malloc_size_of)(&mut ops, dom_object)
         },
-        Err(_e) => {
-            return 0;
-        },
+        Err(_e) => 0,
     }
 }
 
 #[allow(unsafe_code)]
-pub fn get_reports(cx: *mut RawJSContext, path_seg: String) -> Vec<Report> {
+pub unsafe fn get_reports(cx: *mut RawJSContext, path_seg: String) -> Vec<Report> {
     let mut reports = vec![];
 
-    unsafe {
-        let mut stats = ::std::mem::zeroed();
-        if CollectServoSizes(cx, &mut stats, Some(get_size)) {
-            let mut report = |mut path_suffix, kind, size| {
-                let mut path = path![path_seg, "js"];
-                path.append(&mut path_suffix);
-                reports.push(Report {
-                    path: path,
-                    kind: kind,
-                    size: size as usize,
-                })
-            };
+    let mut stats = ::std::mem::zeroed();
+    if CollectServoSizes(cx, &mut stats, Some(get_size)) {
+        let mut report = |mut path_suffix, kind, size| {
+            let mut path = path![path_seg, "js"];
+            path.append(&mut path_suffix);
+            reports.push(Report { path, kind, size })
+        };
 
-            // A note about possibly confusing terminology: the JS GC "heap" is allocated via
-            // mmap/VirtualAlloc, which means it's not on the malloc "heap", so we use
-            // `ExplicitNonHeapSize` as its kind.
+        // A note about possibly confusing terminology: the JS GC "heap" is allocated via
+        // mmap/VirtualAlloc, which means it's not on the malloc "heap", so we use
+        // `ExplicitNonHeapSize` as its kind.
 
-            report(
-                path!["gc-heap", "used"],
-                ReportKind::ExplicitNonHeapSize,
-                stats.gcHeapUsed,
-            );
+        report(
+            path!["gc-heap", "used"],
+            ReportKind::ExplicitNonHeapSize,
+            stats.gcHeapUsed,
+        );
 
-            report(
-                path!["gc-heap", "unused"],
-                ReportKind::ExplicitNonHeapSize,
-                stats.gcHeapUnused,
-            );
+        report(
+            path!["gc-heap", "unused"],
+            ReportKind::ExplicitNonHeapSize,
+            stats.gcHeapUnused,
+        );
 
-            report(
-                path!["gc-heap", "admin"],
-                ReportKind::ExplicitNonHeapSize,
-                stats.gcHeapAdmin,
-            );
+        report(
+            path!["gc-heap", "admin"],
+            ReportKind::ExplicitNonHeapSize,
+            stats.gcHeapAdmin,
+        );
 
-            report(
-                path!["gc-heap", "decommitted"],
-                ReportKind::ExplicitNonHeapSize,
-                stats.gcHeapDecommitted,
-            );
+        report(
+            path!["gc-heap", "decommitted"],
+            ReportKind::ExplicitNonHeapSize,
+            stats.gcHeapDecommitted,
+        );
 
-            // SpiderMonkey uses the system heap, not jemalloc.
-            report(
-                path!["malloc-heap"],
-                ReportKind::ExplicitSystemHeapSize,
-                stats.mallocHeap,
-            );
+        // SpiderMonkey uses the system heap, not jemalloc.
+        report(
+            path!["malloc-heap"],
+            ReportKind::ExplicitSystemHeapSize,
+            stats.mallocHeap,
+        );
 
-            report(
-                path!["non-heap"],
-                ReportKind::ExplicitNonHeapSize,
-                stats.nonHeap,
-            );
-        }
+        report(
+            path!["non-heap"],
+            ReportKind::ExplicitNonHeapSize,
+            stats.nonHeap,
+        );
     }
+
     reports
 }
 
-thread_local!(static GC_CYCLE_START: Cell<Option<Tm>> = Cell::new(None));
-thread_local!(static GC_SLICE_START: Cell<Option<Tm>> = Cell::new(None));
+thread_local!(static GC_CYCLE_START: Cell<Option<Instant>> = const { Cell::new(None) });
+thread_local!(static GC_SLICE_START: Cell<Option<Instant>> = const { Cell::new(None) });
 
 #[allow(unsafe_code)]
 unsafe extern "C" fn gc_slice_callback(
@@ -759,34 +759,32 @@ unsafe extern "C" fn gc_slice_callback(
 ) {
     match progress {
         GCProgress::GC_CYCLE_BEGIN => GC_CYCLE_START.with(|start| {
-            start.set(Some(now()));
+            start.set(Some(Instant::now()));
             println!("GC cycle began");
         }),
         GCProgress::GC_SLICE_BEGIN => GC_SLICE_START.with(|start| {
-            start.set(Some(now()));
+            start.set(Some(Instant::now()));
             println!("GC slice began");
         }),
         GCProgress::GC_SLICE_END => GC_SLICE_START.with(|start| {
-            let dur = now() - start.get().unwrap();
+            let duration = start.get().unwrap().elapsed();
             start.set(None);
-            println!("GC slice ended: duration={}", dur);
+            println!("GC slice ended: duration={:?}", duration);
         }),
         GCProgress::GC_CYCLE_END => GC_CYCLE_START.with(|start| {
-            let dur = now() - start.get().unwrap();
+            let duration = start.get().unwrap().elapsed();
             start.set(None);
-            println!("GC cycle ended: duration={}", dur);
+            println!("GC cycle ended: duration={:?}", duration);
         }),
     };
     if !desc.is_null() {
         let desc: &GCDescription = &*desc;
-        let invocation_kind = match desc.invocationKind_ {
-            JSGCInvocationKind::GC_NORMAL => "GC_NORMAL",
-            JSGCInvocationKind::GC_SHRINK => "GC_SHRINK",
+        let options = match desc.options_ {
+            GCOptions::Normal => "Normal",
+            GCOptions::Shrink => "Shrink",
+            GCOptions::Shutdown => "Shutdown",
         };
-        println!(
-            "  isZone={}, invocation_kind={}",
-            desc.isZone_, invocation_kind
-        );
+        println!("  isZone={}, options={}", desc.isZone_, options);
     }
     let _ = stdout().flush();
 }
@@ -805,8 +803,12 @@ unsafe extern "C" fn debug_gc_callback(
 }
 
 thread_local!(
-    static THREAD_ACTIVE: Cell<bool> = Cell::new(true);
+    static THREAD_ACTIVE: Cell<bool> = const { Cell::new(true) };
 );
+
+pub(crate) fn runtime_is_alive() -> bool {
+    THREAD_ACTIVE.with(|t| t.get())
+}
 
 #[allow(unsafe_code)]
 unsafe extern "C" fn trace_rust_roots(tr: *mut JSTracer, _data: *mut os::raw::c_void) {
@@ -815,7 +817,6 @@ unsafe extern "C" fn trace_rust_roots(tr: *mut JSTracer, _data: *mut os::raw::c_
     }
     debug!("starting custom root handler");
     trace_thread(tr);
-    trace_traceables(tr);
     trace_roots(tr);
     trace_refcounted_objects(tr);
     settings_stack::trace(tr);
@@ -825,7 +826,7 @@ unsafe extern "C" fn trace_rust_roots(tr: *mut JSTracer, _data: *mut os::raw::c_
 #[allow(unsafe_code)]
 unsafe extern "C" fn servo_build_id(build_id: *mut BuildIdCharVector) -> bool {
     let servo_id = b"Servo\0";
-    SetBuildId(build_id, &servo_id[0], servo_id.len())
+    SetBuildId(build_id, servo_id[0] as *const c_char, servo_id.len())
 }
 
 #[allow(unsafe_code)]
@@ -848,24 +849,34 @@ unsafe fn set_gc_zeal_options(cx: *mut RawJSContext) {
 #[cfg(not(feature = "debugmozjs"))]
 unsafe fn set_gc_zeal_options(_: *mut RawJSContext) {}
 
-#[repr(transparent)]
 /// A wrapper around a JSContext that is Send,
 /// enabling an interrupt to be requested
 /// from a thread other than the one running JS using that context.
-pub struct ContextForRequestInterrupt(*mut RawJSContext);
+#[derive(Clone)]
+pub struct ContextForRequestInterrupt(Arc<Mutex<Option<*mut RawJSContext>>>);
 
 impl ContextForRequestInterrupt {
     pub fn new(context: *mut RawJSContext) -> ContextForRequestInterrupt {
-        ContextForRequestInterrupt(context)
+        ContextForRequestInterrupt(Arc::new(Mutex::new(Some(context))))
+    }
+
+    pub fn revoke(&self) {
+        self.0.lock().unwrap().take();
     }
 
     #[allow(unsafe_code)]
     /// Can be called from any thread, to request the callback set by
-    /// JS_AddInterruptCallback to be called
-    /// on the thread where that context is running.
+    /// JS_AddInterruptCallback to be called on the thread
+    /// where that context is running.
+    /// The lock is held when calling JS_RequestInterruptCallback
+    /// because it is possible for the JSContext to be destroyed
+    /// on the other thread in the case of Worker shutdown
     pub fn request_interrupt(&self) {
-        unsafe {
-            JS_RequestInterruptCallback(self.0);
+        let maybe_cx = self.0.lock().unwrap();
+        if let Some(cx) = *maybe_cx {
+            unsafe {
+                JS_RequestInterruptCallback(cx);
+            }
         }
     }
 }
@@ -903,7 +914,7 @@ impl StreamConsumer {
     pub fn consume_chunk(&self, stream: &[u8]) -> bool {
         unsafe {
             let stream_ptr = stream.as_ptr();
-            return StreamConsumerConsumeChunk(self.0, stream_ptr, stream.len());
+            StreamConsumerConsumeChunk(self.0, stream_ptr, stream.len())
         }
     }
 
@@ -1024,7 +1035,7 @@ unsafe extern "C" fn consume_stream(
         );
         return false;
     }
-    return true;
+    true
 }
 
 #[allow(unsafe_code)]

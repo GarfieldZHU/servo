@@ -2,8 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::GPUBinding::GPURequestAdapterOptions;
-use crate::dom::bindings::codegen::Bindings::GPUBinding::{GPUMethods, GPUPowerPreference};
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use ipc_channel::ipc::{self, IpcSender};
+use ipc_channel::router::ROUTER;
+use js::jsapi::Heap;
+use script_traits::ScriptMsg;
+use webgpu::wgt::PowerPreference;
+use webgpu::{wgc, WebGPUResponse};
+
+use super::bindings::codegen::Bindings::WebGPUBinding::GPUTextureFormat;
+use crate::dom::bindings::codegen::Bindings::WebGPUBinding::{
+    GPUMethods, GPUPowerPreference, GPURequestAdapterOptions,
+};
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::refcounted::{Trusted, TrustedPromise};
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
@@ -14,14 +26,6 @@ use crate::dom::gpuadapter::GPUAdapter;
 use crate::dom::promise::Promise;
 use crate::realms::InRealm;
 use crate::task_source::{TaskSource, TaskSourceName};
-use dom_struct::dom_struct;
-use ipc_channel::ipc::{self, IpcSender};
-use ipc_channel::router::ROUTER;
-use js::jsapi::Heap;
-use script_traits::ScriptMsg;
-use std::rc::Rc;
-use webgpu::wgt::PowerPreference;
-use webgpu::{wgpu, WebGPUResponse, WebGPUResponseResult};
 
 #[dom_struct]
 pub struct GPU {
@@ -41,7 +45,7 @@ impl GPU {
 }
 
 pub trait AsyncWGPUListener {
-    fn handle_response(&self, response: WebGPUResponseResult, promise: &Rc<Promise>);
+    fn handle_response(&self, response: WebGPUResponse, promise: &Rc<Promise>);
 }
 
 struct WGPUResponse<T: AsyncWGPUListener + DomObject> {
@@ -50,8 +54,8 @@ struct WGPUResponse<T: AsyncWGPUListener + DomObject> {
 }
 
 impl<T: AsyncWGPUListener + DomObject> WGPUResponse<T> {
-    #[allow(unrooted_must_root)]
-    fn response(self, response: WebGPUResponseResult) {
+    #[allow(crown::unrooted_must_root)]
+    fn response(self, response: WebGPUResponse) {
         let promise = self.trusted.root();
         self.receiver.root().handle_response(response, &promise);
     }
@@ -60,13 +64,13 @@ impl<T: AsyncWGPUListener + DomObject> WGPUResponse<T> {
 pub fn response_async<T: AsyncWGPUListener + DomObject + 'static>(
     promise: &Rc<Promise>,
     receiver: &T,
-) -> IpcSender<WebGPUResponseResult> {
+) -> IpcSender<WebGPUResponse> {
     let (action_sender, action_receiver) = ipc::channel().unwrap();
     let task_source = receiver.global().dom_manipulation_task_source();
     let canceller = receiver
         .global()
         .task_canceller(TaskSourceName::DOMManipulation);
-    let mut trusted = Some(TrustedPromise::new(promise.clone()));
+    let mut trusted: Option<TrustedPromise> = Some(TrustedPromise::new(promise.clone()));
     let trusted_receiver = Trusted::new(receiver);
     ROUTER.add_route(
         action_receiver.to_opaque(),
@@ -100,22 +104,23 @@ impl GPUMethods for GPU {
     // https://gpuweb.github.io/gpuweb/#dom-gpu-requestadapter
     fn RequestAdapter(&self, options: &GPURequestAdapterOptions, comp: InRealm) -> Rc<Promise> {
         let global = &self.global();
-        let promise = Promise::new_in_current_realm(global, comp);
+        let promise = Promise::new_in_current_realm(comp);
         let sender = response_async(&promise, self);
         let power_preference = match options.powerPreference {
             Some(GPUPowerPreference::Low_power) => PowerPreference::LowPower,
             Some(GPUPowerPreference::High_performance) => PowerPreference::HighPerformance,
-            None => PowerPreference::Default,
+            None => PowerPreference::default(),
         };
-        let ids = global.wgpu_id_hub().lock().create_adapter_ids();
+        let ids = global.wgpu_id_hub().create_adapter_ids();
 
         let script_to_constellation_chan = global.script_to_constellation_chan();
         if script_to_constellation_chan
             .send(ScriptMsg::RequestAdapter(
                 sender,
-                wgpu::instance::RequestAdapterOptions {
+                wgc::instance::RequestAdapterOptions {
                     power_preference,
                     compatible_surface: None,
+                    force_fallback_adapter: options.forceFallbackAdapter,
                 },
                 ids,
             ))
@@ -125,33 +130,43 @@ impl GPUMethods for GPU {
         }
         promise
     }
+
+    // https://gpuweb.github.io/gpuweb/#dom-gpu-getpreferredcanvasformat
+    fn GetPreferredCanvasFormat(&self) -> GPUTextureFormat {
+        // TODO: real implementation
+        GPUTextureFormat::Rgba8unorm
+    }
 }
 
 impl AsyncWGPUListener for GPU {
-    fn handle_response(&self, response: WebGPUResponseResult, promise: &Rc<Promise>) {
+    fn handle_response(&self, response: WebGPUResponse, promise: &Rc<Promise>) {
         match response {
-            Ok(WebGPUResponse::RequestAdapter {
-                adapter_name,
-                adapter_id,
-                channel,
-            }) => {
+            WebGPUResponse::Adapter(Ok(adapter)) => {
                 let adapter = GPUAdapter::new(
                     &self.global(),
-                    channel,
-                    DOMString::from(format!("{} ({:?})", adapter_name, adapter_id.0.backend())),
+                    adapter.channel,
+                    DOMString::from(format!(
+                        "{} ({:?})",
+                        adapter.adapter_info.name,
+                        adapter.adapter_id.0.backend()
+                    )),
                     Heap::default(),
-                    adapter_id,
+                    adapter.features,
+                    adapter.limits,
+                    adapter.adapter_info,
+                    adapter.adapter_id,
                 );
                 promise.resolve_native(&adapter);
             },
-            Err(e) => {
+            WebGPUResponse::Adapter(Err(e)) => {
                 warn!("Could not get GPUAdapter ({:?})", e);
                 promise.resolve_native(&None::<GPUAdapter>);
             },
-            _ => {
-                warn!("GPU received wrong WebGPUResponse");
-                promise.reject_error(Error::Operation);
+            WebGPUResponse::None => {
+                warn!("Couldn't get a response, because WebGPU is disabled");
+                promise.resolve_native(&None::<GPUAdapter>);
             },
+            _ => unreachable!("GPU received wrong WebGPUResponse"),
         }
     }
 }

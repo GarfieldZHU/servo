@@ -2,10 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionDescriptor;
-use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionStatusMethods;
+use std::rc::Rc;
+
+use dom_struct::dom_struct;
+use embedder_traits::{self, EmbedderMsg, PermissionPrompt, PermissionRequest};
+use ipc_channel::ipc;
+use js::conversions::ConversionResult;
+use js::jsapi::JSObject;
+use js::jsval::{ObjectValue, UndefinedValue};
+use servo_config::pref;
+
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::{
-    PermissionName, PermissionState,
+    PermissionDescriptor, PermissionName, PermissionState, PermissionStatusMethods,
 };
 use crate::dom::bindings::codegen::Bindings::PermissionsBinding::PermissionsMethods;
 use crate::dom::bindings::error::Error;
@@ -18,14 +26,6 @@ use crate::dom::permissionstatus::PermissionStatus;
 use crate::dom::promise::Promise;
 use crate::realms::{AlreadyInRealm, InRealm};
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use embedder_traits::{self, EmbedderMsg, PermissionPrompt, PermissionRequest};
-use ipc_channel::ipc;
-use js::conversions::ConversionResult;
-use js::jsapi::JSObject;
-use js::jsval::{ObjectValue, UndefinedValue};
-use servo_config::pref;
-use std::rc::Rc;
 
 pub trait PermissionAlgorithm {
     type Descriptor;
@@ -87,8 +87,8 @@ impl Permissions {
         let p = match promise {
             Some(promise) => promise,
             None => {
-                let in_realm_proof = AlreadyInRealm::assert(&self.global());
-                Promise::new_in_current_realm(&self.global(), InRealm::Already(&in_realm_proof))
+                let in_realm_proof = AlreadyInRealm::assert();
+                Promise::new_in_current_realm(InRealm::Already(&in_realm_proof))
             },
         };
 
@@ -118,18 +118,18 @@ impl Permissions {
                 // (Query, Request) Step 5.
                 let result = BluetoothPermissionResult::new(&self.global(), &status);
 
-                match &op {
+                match op {
                     // (Request) Step 6 - 8.
-                    &Operation::Request => {
+                    Operation::Request => {
                         Bluetooth::permission_request(cx, &p, &bluetooth_desc, &result)
                     },
 
                     // (Query) Step 6 - 7.
-                    &Operation::Query => {
+                    Operation::Query => {
                         Bluetooth::permission_query(cx, &p, &bluetooth_desc, &result)
                     },
 
-                    &Operation::Revoke => {
+                    Operation::Revoke => {
                         // (Revoke) Step 3.
                         let globalscope = self.global();
                         globalscope
@@ -143,8 +143,8 @@ impl Permissions {
                 }
             },
             _ => {
-                match &op {
-                    &Operation::Request => {
+                match op {
+                    Operation::Request => {
                         // (Request) Step 6.
                         Permissions::permission_request(cx, &p, &root_desc, &status);
 
@@ -153,7 +153,7 @@ impl Permissions {
                         // (Request) Step 8.
                         p.resolve_native(&status);
                     },
-                    &Operation::Query => {
+                    Operation::Query => {
                         // (Query) Step 6.
                         Permissions::permission_query(cx, &p, &root_desc, &status);
 
@@ -161,7 +161,7 @@ impl Permissions {
                         p.resolve_native(&status);
                     },
 
-                    &Operation::Revoke => {
+                    Operation::Revoke => {
                         // (Revoke) Step 3.
                         let globalscope = self.global();
                         globalscope
@@ -288,20 +288,17 @@ pub fn get_descriptor_permission_state(
     // and let the user decide to grant the permission or not.
     let state = if allowed_in_nonsecure_contexts(&permission_name) {
         PermissionState::Prompt
+    } else if pref!(dom.permissions.testing.allowed_in_nonsecure_contexts) {
+        PermissionState::Granted
     } else {
-        if pref!(dom.permissions.testing.allowed_in_nonsecure_contexts) {
-            PermissionState::Granted
-        } else {
-            globalscope
-                .permission_state_invocation_results()
-                .borrow_mut()
-                .remove(&permission_name.to_string());
-
-            prompt_user_from_embedder(
-                PermissionPrompt::Insecure(embedder_traits::PermissionName::from(permission_name)),
-                &globalscope,
-            )
-        }
+        globalscope
+            .permission_state_invocation_results()
+            .borrow_mut()
+            .remove(&permission_name.to_string());
+        prompt_user_from_embedder(
+            PermissionPrompt::Insecure(embedder_traits::PermissionName::from(permission_name)),
+            &globalscope,
+        )
     };
 
     // Step 3.
@@ -310,7 +307,7 @@ pub fn get_descriptor_permission_state(
         .borrow()
         .get(&permission_name.to_string())
     {
-        return prev_result.clone();
+        return *prev_result;
     }
 
     // Store the invocation result

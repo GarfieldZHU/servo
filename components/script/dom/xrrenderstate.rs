@@ -2,21 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use dom_struct::dom_struct;
+use js::jsval::JSVal;
+use webxr_api::SubImages;
+
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::XRRenderStateBinding::XRRenderStateMethods;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
-use crate::dom::bindings::root::Dom;
-use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::utils::to_frozen_array;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::xrlayer::XRLayer;
 use crate::dom::xrwebgllayer::XRWebGLLayer;
 use crate::script_runtime::JSContext;
-use dom_struct::dom_struct;
-use js::jsval::JSVal;
-use std::cell::Cell;
-use webxr_api::SubImages;
 
 #[dom_struct]
 pub struct XRRenderState {
@@ -43,12 +44,7 @@ impl XRRenderState {
             depth_far: Cell::new(depth_far),
             inline_vertical_fov: Cell::new(inline_vertical_fov),
             base_layer: MutNullableDom::new(layer),
-            layers: DomRefCell::new(
-                layers
-                    .into_iter()
-                    .map(|layer| Dom::from_ref(layer))
-                    .collect(),
-            ),
+            layers: DomRefCell::new(layers.into_iter().map(Dom::from_ref).collect()),
         }
     }
 
@@ -78,7 +74,7 @@ impl XRRenderState {
             self.depth_near.get(),
             self.depth_far.get(),
             self.inline_vertical_fov.get(),
-            self.base_layer.get().as_ref().map(|x| &**x),
+            self.base_layer.get().as_deref(),
             self.layers.borrow().iter().map(|x| &**x).collect(),
         )
     }
@@ -97,23 +93,20 @@ impl XRRenderState {
         self.base_layer.set(layer)
     }
     pub fn set_layers(&self, layers: Vec<&XRLayer>) {
-        *self.layers.borrow_mut() = layers
-            .into_iter()
-            .map(|layer| Dom::from_ref(layer))
-            .collect();
+        *self.layers.borrow_mut() = layers.into_iter().map(Dom::from_ref).collect();
     }
     pub fn with_layers<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&[Dom<XRLayer>]) -> R,
     {
         let layers = self.layers.borrow();
-        f(&*layers)
+        f(&layers)
     }
     pub fn has_sub_images(&self, sub_images: &[SubImages]) -> bool {
         if let Some(base_layer) = self.base_layer.get() {
             match sub_images.len() {
                 // For inline sessions, there may be a base layer, but it won't have a framebuffer
-                0 => base_layer.layer_id() == None,
+                0 => base_layer.layer_id().is_none(),
                 // For immersive sessions, the base layer will have a framebuffer,
                 // so we make sure the layer id's match up
                 1 => base_layer.layer_id() == Some(sub_images[0].layer_id),
@@ -132,27 +125,27 @@ impl XRRenderState {
 }
 
 impl XRRenderStateMethods for XRRenderState {
-    /// https://immersive-web.github.io/webxr/#dom-xrrenderstate-depthnear
+    /// <https://immersive-web.github.io/webxr/#dom-xrrenderstate-depthnear>
     fn DepthNear(&self) -> Finite<f64> {
         Finite::wrap(self.depth_near.get())
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrrenderstate-depthfar
+    /// <https://immersive-web.github.io/webxr/#dom-xrrenderstate-depthfar>
     fn DepthFar(&self) -> Finite<f64> {
         Finite::wrap(self.depth_far.get())
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrrenderstate-inlineverticalfieldofview
+    /// <https://immersive-web.github.io/webxr/#dom-xrrenderstate-inlineverticalfieldofview>
     fn GetInlineVerticalFieldOfView(&self) -> Option<Finite<f64>> {
         self.inline_vertical_fov.get().map(Finite::wrap)
     }
 
-    /// https://immersive-web.github.io/webxr/#dom-xrrenderstate-baselayer
+    /// <https://immersive-web.github.io/webxr/#dom-xrrenderstate-baselayer>
     fn GetBaseLayer(&self) -> Option<DomRoot<XRWebGLLayer>> {
         self.base_layer.get()
     }
 
-    /// https://immersive-web.github.io/layers/#dom-xrrenderstate-layers
+    /// <https://immersive-web.github.io/layers/#dom-xrrenderstate-layers>
     fn Layers(&self, cx: JSContext) -> JSVal {
         // TODO: cache this array?
         let layers = self.layers.borrow();

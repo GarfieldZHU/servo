@@ -2,20 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
+use cssparser::{serialize_identifier, Parser, ParserInput};
+use dom_struct::dom_struct;
+use style::context::QuirksMode;
+use style::parser::ParserContext;
+use style::stylesheets::supports_rule::{parse_condition_or_declaration, Declaration};
+use style::stylesheets::{CssRuleType, Origin, UrlExtraData};
+use style_traits::ParsingMode;
+
+use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::reflector::Reflector;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::window::Window;
 use crate::dom::worklet::Worklet;
-use cssparser::{serialize_identifier, Parser, ParserInput};
-use dom_struct::dom_struct;
-use style::context::QuirksMode;
-use style::parser::ParserContext;
-use style::stylesheets::supports_rule::{parse_condition_or_declaration, Declaration};
-use style::stylesheets::{CssRuleType, Origin};
-use style_traits::ParsingMode;
 
 #[dom_struct]
 pub struct CSS {
@@ -38,13 +39,14 @@ impl CSS {
         decl.push_str(": ");
         decl.push_str(&value);
         let decl = Declaration(decl);
-        let url = win.Document().url();
+        let url_data = UrlExtraData(win.Document().url().get_arc());
         let context = ParserContext::new(
             Origin::Author,
-            &url,
+            &url_data,
             Some(CssRuleType::Style),
             ParsingMode::DEFAULT,
             QuirksMode::NoQuirks,
+            /* namespaces = */ Default::default(),
             None,
             None,
         );
@@ -60,17 +62,18 @@ impl CSS {
             Err(..) => return false,
         };
 
-        let url = win.Document().url();
+        let url_data = UrlExtraData(win.Document().url().get_arc());
         let context = ParserContext::new(
             Origin::Author,
-            &url,
+            &url_data,
             Some(CssRuleType::Style),
             ParsingMode::DEFAULT,
             QuirksMode::NoQuirks,
+            /* namespaces = */ Default::default(),
             None,
             None,
         );
-        cond.eval(&context, &Default::default())
+        cond.eval(&context)
     }
 
     /// <https://drafts.css-houdini.org/css-paint-api-1/#paint-worklet>

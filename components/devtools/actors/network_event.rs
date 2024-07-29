@@ -2,29 +2,30 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Liberally derived from the [Firefox JS implementation]
-//! (http://mxr.mozilla.org/mozilla-central/source/toolkit/devtools/server/actors/webconsole.js).
+//! Liberally derived from the [Firefox JS implementation](http://mxr.mozilla.org/mozilla-central/source/toolkit/devtools/server/actors/webconsole.js).
 //! Handles interaction with the remote web console on network events (HTTP requests, responses) in Servo.
+
+use std::net::TcpStream;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use chrono::{Local, LocalResult, TimeZone};
+use devtools_traits::{HttpRequest as DevtoolsHttpRequest, HttpResponse as DevtoolsHttpResponse};
+use headers::{ContentType, Cookie, HeaderMapExt};
+use http::{header, HeaderMap, Method, StatusCode};
+use serde::Serialize;
+use serde_json::{Map, Value};
 
 use crate::actor::{Actor, ActorMessageStatus, ActorRegistry};
 use crate::protocol::JsonPacketStream;
 use crate::StreamId;
-use devtools_traits::HttpRequest as DevtoolsHttpRequest;
-use devtools_traits::HttpResponse as DevtoolsHttpResponse;
-use headers::{ContentType, Cookie, HeaderMapExt};
-use http::{header, HeaderMap};
-use hyper::{Method, StatusCode};
-use serde_json::{Map, Value};
-use std::net::TcpStream;
-use time::Tm;
 
 struct HttpRequest {
     url: String,
     method: Method,
     headers: HeaderMap,
     body: Option<Vec<u8>>,
-    startedDateTime: Tm,
-    timeStamp: i64,
+    started_date_time: SystemTime,
+    time_stamp: i64,
     connect_time: u64,
     send_time: u64,
 }
@@ -43,13 +44,15 @@ pub struct NetworkEventActor {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EventActor {
     pub actor: String,
     pub url: String,
     pub method: String,
-    pub startedDateTime: String,
-    pub timeStamp: i64,
-    pub isXHR: bool,
+    pub started_date_time: String,
+    pub time_stamp: i64,
+    #[serde(rename = "isXHR")]
+    pub is_xhr: bool,
     pub private: bool,
 }
 
@@ -59,28 +62,31 @@ pub struct ResponseCookiesMsg {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResponseStartMsg {
-    pub httpVersion: String,
-    pub remoteAddress: String,
-    pub remotePort: u32,
+    pub http_version: String,
+    pub remote_address: String,
+    pub remote_port: u32,
     pub status: String,
-    pub statusText: String,
-    pub headersSize: usize,
-    pub discardResponseBody: bool,
+    pub status_text: String,
+    pub headers_size: usize,
+    pub discard_response_body: bool,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResponseContentMsg {
-    pub mimeType: String,
-    pub contentSize: u32,
-    pub transferredSize: u32,
-    pub discardResponseBody: bool,
+    pub mime_type: String,
+    pub content_size: u32,
+    pub transferred_size: u32,
+    pub discard_response_body: bool,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResponseHeadersMsg {
     pub headers: usize,
-    pub headersSize: usize,
+    pub headers_size: usize,
 }
 
 #[derive(Serialize)]
@@ -89,17 +95,19 @@ pub struct RequestCookiesMsg {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RequestHeadersMsg {
     headers: usize,
-    headersSize: usize,
+    headers_size: usize,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GetRequestHeadersReply {
     from: String,
     headers: Vec<Header>,
-    headerSize: usize,
-    rawHeaders: String,
+    header_size: usize,
+    raw_headers: String,
 }
 
 #[derive(Serialize)]
@@ -109,25 +117,28 @@ struct Header {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GetResponseHeadersReply {
     from: String,
     headers: Vec<Header>,
-    headerSize: usize,
-    rawHeaders: String,
+    header_size: usize,
+    raw_headers: String,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GetResponseContentReply {
     from: String,
     content: Option<Vec<u8>>,
-    contentDiscarded: bool,
+    content_discarded: bool,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GetRequestPostDataReply {
     from: String,
-    postData: Option<Vec<u8>>,
-    postDataDiscarded: bool,
+    post_data: Option<Vec<u8>>,
+    post_data_discarded: bool,
 }
 
 #[derive(Serialize)]
@@ -153,10 +164,11 @@ struct Timings {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GetEventTimingsReply {
     from: String,
     timings: Timings,
-    totalTime: u64,
+    total_time: u64,
 }
 
 #[derive(Serialize)]
@@ -165,9 +177,10 @@ struct SecurityInfo {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GetSecurityInfoReply {
     from: String,
-    securityInfo: SecurityInfo,
+    security_info: SecurityInfo,
 }
 
 impl Actor for NetworkEventActor {
@@ -186,12 +199,12 @@ impl Actor for NetworkEventActor {
         Ok(match msg_type {
             "getRequestHeaders" => {
                 let mut headers = Vec::new();
-                let mut rawHeadersString = "".to_owned();
-                let mut headersSize = 0;
+                let mut raw_headers_string = "".to_owned();
+                let mut headers_size = 0;
                 for (name, value) in self.request.headers.iter() {
                     let value = &value.to_str().unwrap().to_string();
-                    rawHeadersString = rawHeadersString + name.as_str() + ":" + &value + "\r\n";
-                    headersSize += name.as_str().len() + value.len();
+                    raw_headers_string = raw_headers_string + name.as_str() + ":" + value + "\r\n";
+                    headers_size += name.as_str().len() + value.len();
                     headers.push(Header {
                         name: name.as_str().to_owned(),
                         value: value.to_owned(),
@@ -199,9 +212,9 @@ impl Actor for NetworkEventActor {
                 }
                 let msg = GetRequestHeadersReply {
                     from: self.name(),
-                    headers: headers,
-                    headerSize: headersSize,
-                    rawHeaders: rawHeadersString,
+                    headers,
+                    header_size: headers_size,
+                    raw_headers: raw_headers_string,
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
@@ -217,7 +230,7 @@ impl Actor for NetworkEventActor {
 
                 let msg = GetRequestCookiesReply {
                     from: self.name(),
-                    cookies: cookies,
+                    cookies,
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
@@ -225,8 +238,8 @@ impl Actor for NetworkEventActor {
             "getRequestPostData" => {
                 let msg = GetRequestPostDataReply {
                     from: self.name(),
-                    postData: self.request.body.clone(),
-                    postDataDiscarded: false,
+                    post_data: self.request.body.clone(),
+                    post_data_discarded: false,
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
@@ -234,24 +247,24 @@ impl Actor for NetworkEventActor {
             "getResponseHeaders" => {
                 if let Some(ref response_headers) = self.response.headers {
                     let mut headers = vec![];
-                    let mut rawHeadersString = "".to_owned();
-                    let mut headersSize = 0;
+                    let mut raw_headers_string = "".to_owned();
+                    let mut headers_size = 0;
                     for (name, value) in response_headers.iter() {
                         headers.push(Header {
                             name: name.as_str().to_owned(),
                             value: value.to_str().unwrap().to_owned(),
                         });
-                        headersSize += name.as_str().len() + value.len();
-                        rawHeadersString.push_str(name.as_str());
-                        rawHeadersString.push_str(":");
-                        rawHeadersString.push_str(value.to_str().unwrap());
-                        rawHeadersString.push_str("\r\n");
+                        headers_size += name.as_str().len() + value.len();
+                        raw_headers_string.push_str(name.as_str());
+                        raw_headers_string.push(':');
+                        raw_headers_string.push_str(value.to_str().unwrap());
+                        raw_headers_string.push_str("\r\n");
                     }
                     let msg = GetResponseHeadersReply {
                         from: self.name(),
-                        headers: headers,
-                        headerSize: headersSize,
-                        rawHeaders: rawHeadersString,
+                        headers,
+                        header_size: headers_size,
+                        raw_headers: raw_headers_string,
                     };
                     let _ = stream.write_json_packet(&msg);
                 }
@@ -268,7 +281,7 @@ impl Actor for NetworkEventActor {
 
                 let msg = GetResponseCookiesReply {
                     from: self.name(),
-                    cookies: cookies,
+                    cookies,
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
@@ -277,14 +290,14 @@ impl Actor for NetworkEventActor {
                 let msg = GetResponseContentReply {
                     from: self.name(),
                     content: self.response.body.clone(),
-                    contentDiscarded: self.response.body.is_none(),
+                    content_discarded: self.response.body.is_none(),
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
             },
             "getEventTimings" => {
                 // TODO: This is a fake timings msg
-                let timingsObj = Timings {
+                let timings_obj = Timings {
                     blocked: 0,
                     dns: 0,
                     connect: self.request.connect_time,
@@ -292,12 +305,12 @@ impl Actor for NetworkEventActor {
                     wait: 0,
                     receive: 0,
                 };
-                let total = timingsObj.connect + timingsObj.send;
+                let total = timings_obj.connect + timings_obj.send;
                 // TODO: Send the correct values for all these fields.
                 let msg = GetEventTimingsReply {
                     from: self.name(),
-                    timings: timingsObj,
-                    totalTime: total,
+                    timings: timings_obj,
+                    total_time: total,
                 };
                 let _ = stream.write_json_packet(&msg);
                 ActorMessageStatus::Processed
@@ -306,7 +319,7 @@ impl Actor for NetworkEventActor {
                 // TODO: Send the correct values for securityInfo.
                 let msg = GetSecurityInfoReply {
                     from: self.name(),
-                    securityInfo: SecurityInfo {
+                    security_info: SecurityInfo {
                         state: "insecure".to_owned(),
                     },
                 };
@@ -321,14 +334,17 @@ impl Actor for NetworkEventActor {
 impl NetworkEventActor {
     pub fn new(name: String) -> NetworkEventActor {
         NetworkEventActor {
-            name: name,
+            name,
             request: HttpRequest {
                 url: String::new(),
                 method: Method::GET,
                 headers: HeaderMap::new(),
                 body: None,
-                startedDateTime: time::now(),
-                timeStamp: time::get_time().sec,
+                started_date_time: SystemTime::now(),
+                time_stamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
                 send_time: 0,
                 connect_time: 0,
             },
@@ -342,19 +358,20 @@ impl NetworkEventActor {
     }
 
     pub fn add_request(&mut self, request: DevtoolsHttpRequest) {
-        self.request.url = request.url.as_str().to_owned();
+        request.url.as_str().clone_into(&mut self.request.url);
+
         self.request.method = request.method.clone();
         self.request.headers = request.headers.clone();
         self.request.body = request.body;
-        self.request.startedDateTime = request.startedDateTime;
-        self.request.timeStamp = request.timeStamp;
+        self.request.started_date_time = request.started_date_time;
+        self.request.time_stamp = request.time_stamp;
         self.request.connect_time = request.connect_time;
         self.request.send_time = request.send_time;
         self.is_xhr = request.is_xhr;
     }
 
     pub fn add_response(&mut self, response: DevtoolsHttpResponse) {
-        self.response.headers = response.headers.clone();
+        self.response.headers.clone_from(&response.headers);
         self.response.status = response.status.as_ref().map(|&(s, ref st)| {
             let status_text = String::from_utf8_lossy(st).into_owned();
             (StatusCode::from_u16(s).unwrap(), status_text)
@@ -364,21 +381,34 @@ impl NetworkEventActor {
 
     pub fn event_actor(&self) -> EventActor {
         // TODO: Send the correct values for startedDateTime, isXHR, private
+
+        let started_datetime_rfc3339 = match Local.timestamp_millis_opt(
+            self.request
+                .started_date_time
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+        ) {
+            LocalResult::None => "".to_owned(),
+            LocalResult::Single(date_time) => date_time.to_rfc3339().to_string(),
+            LocalResult::Ambiguous(date_time, _) => date_time.to_rfc3339().to_string(),
+        };
+
         EventActor {
             actor: self.name(),
             url: self.request.url.clone(),
             method: format!("{}", self.request.method),
-            startedDateTime: format!("{}", self.request.startedDateTime.rfc3339()),
-            timeStamp: self.request.timeStamp,
-            isXHR: self.is_xhr,
+            started_date_time: started_datetime_rfc3339,
+            time_stamp: self.request.time_stamp,
+            is_xhr: self.is_xhr,
             private: false,
         }
     }
 
     pub fn response_start(&self) -> ResponseStartMsg {
         // TODO: Send the correct values for all these fields.
-        let hSizeOption = self.response.headers.as_ref().map(|headers| headers.len());
-        let hSize = hSizeOption.unwrap_or(0);
+        let h_size_option = self.response.headers.as_ref().map(|headers| headers.len());
+        let h_size = h_size_option.unwrap_or(0);
         let (status_code, status_message) = self
             .response
             .status
@@ -388,30 +418,30 @@ impl NetworkEventActor {
             });
         // TODO: Send the correct values for remoteAddress and remotePort and http_version.
         ResponseStartMsg {
-            httpVersion: "HTTP/1.1".to_owned(),
-            remoteAddress: "63.245.217.43".to_owned(),
-            remotePort: 443,
+            http_version: "HTTP/1.1".to_owned(),
+            remote_address: "63.245.217.43".to_owned(),
+            remote_port: 443,
             status: status_code.to_string(),
-            statusText: status_message,
-            headersSize: hSize,
-            discardResponseBody: false,
+            status_text: status_message,
+            headers_size: h_size,
+            discard_response_body: false,
         }
     }
 
     pub fn response_content(&self) -> ResponseContentMsg {
-        let mut mString = "".to_owned();
+        let mut m_string = "".to_owned();
         if let Some(ref headers) = self.response.headers {
-            mString = match headers.typed_get::<ContentType>() {
+            m_string = match headers.typed_get::<ContentType>() {
                 Some(ct) => ct.to_string(),
                 _ => "".to_owned(),
             };
         }
         // TODO: Set correct values when response's body is sent to the devtools in http_loader.
         ResponseContentMsg {
-            mimeType: mString,
-            contentSize: 0,
-            transferredSize: 0,
-            discardResponseBody: true,
+            mime_type: m_string,
+            content_size: 0,
+            transferred_size: 0,
+            discard_response_body: true,
         }
     }
 
@@ -439,7 +469,7 @@ impl NetworkEventActor {
         }
         ResponseHeadersMsg {
             headers: headers_size,
-            headersSize: headers_byte_count,
+            headers_size: headers_byte_count,
         }
     }
 
@@ -449,7 +479,7 @@ impl NetworkEventActor {
         });
         RequestHeadersMsg {
             headers: self.request.headers.len(),
-            headersSize: size,
+            headers_size: size,
         }
     }
 

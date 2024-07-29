@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::display_list::border;
 use app_units::Au;
 use euclid::default::{Point2D, Rect, SideOffsets2D, Size2D};
 use style::computed_values::background_attachment::single_value::T as BackgroundAttachment;
@@ -12,6 +11,8 @@ use style::properties::style_structs::Background;
 use style::values::computed::{BackgroundSize, NonNegativeLengthPercentageOrAuto};
 use style::values::specified::background::BackgroundRepeatKeyword;
 use webrender_api::BorderRadius;
+
+use crate::display_list::border;
 
 /// Placment information for both image and gradient backgrounds.
 #[derive(Clone, Copy, Debug)]
@@ -39,7 +40,7 @@ pub struct BackgroundPlacement {
 /// Obviously it does not work with empty arrays.
 ///
 /// This is used for multiple layered background images.
-/// See: https://drafts.csswg.org/css-backgrounds-3/#layering
+/// See: <https://drafts.csswg.org/css-backgrounds-3/#layering>
 pub fn get_cyclic<T>(arr: &[T], index: usize) -> &T {
     &arr[index % arr.len()]
 }
@@ -138,8 +139,11 @@ pub fn clip(
 
 /// Determines where to place an element background image or gradient.
 ///
-/// Photos have their resolution as intrinsic size while gradients have
+/// Images have their resolution as intrinsic size while gradients have
 /// no intrinsic size.
+///
+/// Return `None` if the background size is zero, otherwise a [`BackgroundPlacement`].
+#[allow(clippy::too_many_arguments)]
 pub fn placement(
     bg: &Background,
     viewport_size: Size2D<Au>,
@@ -149,7 +153,7 @@ pub fn placement(
     border_padding: SideOffsets2D<Au>,
     border_radii: BorderRadius,
     index: usize,
-) -> BackgroundPlacement {
+) -> Option<BackgroundPlacement> {
     let bg_attachment = *get_cyclic(&bg.background_attachment.0, index);
     let bg_clip = *get_cyclic(&bg.background_clip.0, index);
     let bg_origin = *get_cyclic(&bg.background_origin.0, index);
@@ -180,6 +184,9 @@ pub fn placement(
     };
 
     let mut tile_size = compute_background_image_size(bg_size, bounds.size, intrinsic_size);
+    if tile_size.is_empty() {
+        return None;
+    }
 
     let mut tile_spacing = Size2D::zero();
     let own_position = bounds.size - tile_size;
@@ -206,14 +213,18 @@ pub fn placement(
         clip_rect.size.height,
     );
 
-    BackgroundPlacement {
+    if tile_size.is_empty() {
+        return None;
+    }
+
+    Some(BackgroundPlacement {
         bounds,
         tile_size,
         tile_spacing,
         clip_rect,
         clip_radii,
         fixed,
-    }
+    })
 }
 
 fn tile_image_round(
@@ -289,9 +300,10 @@ fn tile_image(position: &mut Au, size: &mut Au, absolute_anchor_origin: Au, imag
     *position = new_position;
 }
 
-/// For either the x or the y axis ajust various values to account for tiling.
+/// For either the x or the y axis adjust various values to account for tiling.
 ///
 /// This is done separately for both axes because the repeat keywords may differ.
+#[allow(clippy::too_many_arguments)]
 fn tile_image_axis(
     repeat: BackgroundRepeatKeyword,
     position: &mut Au,

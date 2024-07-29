@@ -14,6 +14,7 @@ interface Event {
   readonly attribute EventTarget? target;
   readonly attribute EventTarget? srcElement;
   readonly attribute EventTarget? currentTarget;
+  sequence<EventTarget> composedPath();
 
   const unsigned short NONE = 0;
   const unsigned short CAPTURING_PHASE = 1;
@@ -21,25 +22,25 @@ interface Event {
   const unsigned short BUBBLING_PHASE = 3;
   readonly attribute unsigned short eventPhase;
 
-  void stopPropagation();
+  undefined stopPropagation();
   attribute boolean cancelBubble;
-  void stopImmediatePropagation();
+  undefined stopImmediatePropagation();
 
   [Pure]
   readonly attribute boolean bubbles;
   [Pure]
   readonly attribute boolean cancelable;
   attribute boolean returnValue;  // historical
-  void preventDefault();
+  undefined preventDefault();
   [Pure]
   readonly attribute boolean defaultPrevented;
 
-  [Unforgeable]
+  [LegacyUnforgeable]
   readonly attribute boolean isTrusted;
   [Constant]
   readonly attribute DOMHighResTimeStamp timeStamp;
 
-  void initEvent(DOMString type, optional boolean bubbles = false, optional boolean cancelable = false);
+  undefined initEvent(DOMString type, optional boolean bubbles = false, optional boolean cancelable = false);
 };
 
 dictionary EventInit {

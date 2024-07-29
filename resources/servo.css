@@ -5,29 +5,19 @@ button {
 button,
 input {
   background: white;
-  min-height: 1.0em;
-  padding: 0em;
-  padding-left: 0.25em;
-  padding-right: 0.25em;
   border: solid lightgrey 1px;
   color: black;
   font-family: sans-serif;
   font-size: 0.8333em;
   text-align: left;
-  line-height: 1.8;
 }
 
 textarea {
   background: white;
-  min-height: 1.0em;
-  padding: 0em;
-  padding-left: 0.25em;
-  padding-right: 0.25em;
   border: solid lightgrey 1px;
   color: black;
   font-family: sans-serif;
   font-size: 0.8333em;
-  white-space: pre-wrap;
 }
 
 input::selection,
@@ -45,7 +35,6 @@ input[type="reset"] {
   border-left: solid 1px #CCCCCC;
   border-right: solid 1px #999999;
   border-bottom: solid 1px #999999;
-  text-align: center;
   color: black;
 }
 
@@ -123,7 +112,7 @@ td[align="left"]    { text-align: left; }
 td[align="center"]  { text-align: center; }
 td[align="right"]   { text-align: right; }
 
-center { text-align: -servo-center; }
+center { text-align: -moz-center; }
 
 label { cursor: default; }
 
@@ -190,27 +179,27 @@ svg > * {
  * broken for stuff like table backgrounds and such. Gecko explicitly inherits
  * what it wants, which seems a bit better off-hand.
  */
-*|*::-servo-anonymous-table,
-*|*::-servo-anonymous-table-wrapper,
-*|*::-servo-table-wrapper,
-*|*::-servo-anonymous-block,
-*|*::-servo-inline-block-wrapper,
-*|*::-servo-inline-absolute {
+*|*::-servo-legacy-anonymous-table,
+*|*::-servo-legacy-anonymous-table-wrapper,
+*|*::-servo-legacy-table-wrapper,
+*|*::-servo-legacy-anonymous-block,
+*|*::-servo-legacy-inline-block-wrapper,
+*|*::-servo-legacy-inline-absolute {
     all: inherit;
 }
 
 /* style for text node. */
-*|*::-servo-text {
+*|*::-servo-legacy-text {
     text-overflow: inherit;
     overflow: inherit;
 }
 
-*|*::-servo-table-wrapper {
+*|*::-servo-legacy-table-wrapper {
     display: table;
     border: none;
 }
 
-*|*::-servo-anonymous-table-wrapper {
+*|*::-servo-legacy-anonymous-table-wrapper {
     position: static;
     margin: 0;
     counter-increment: none;
@@ -221,7 +210,7 @@ svg > * {
     overflow: visible;
 }
 
-*|*::-servo-anonymous-table {
+*|*::-servo-legacy-anonymous-table {
     display: table;
     position: static;
     border: none;
@@ -230,23 +219,54 @@ svg > * {
     overflow: visible;
 }
 
+*|*::-servo-anonymous-table {
+    display: table;
+}
+
 *|*::-servo-anonymous-table-row {
     display: table-row;
-    position: static;
-    border: none;
-    counter-increment: none;
-    overflow: visible;
 }
 
 *|*::-servo-anonymous-table-cell {
     display: table-cell;
-    position: static;
-    border: none;
-    counter-increment: none;
-    overflow: visible;
 }
 
-*|*::-servo-anonymous-block {
+*|*::-servo-table-grid {
+  all: inherit;
+  margin: unset;
+  float: unset;
+  clear: unset;
+  position: unset;
+  z-index: unset;
+  page-break-before: unset;
+  page-break-after: unset;
+  page-break-inside: unset;
+  vertical-align: unset;
+  line-height: unset;
+  transform: unset;
+  transform-origin: unset;
+  backface-visibility: unset;
+  clip: unset;
+  transform-style: unset;
+  rotate: unset;
+  scale: unset;
+  translate: unset;
+  align-self: unset;
+  justify-self: unset;
+  grid-column-start: unset;
+  grid-column-end: unset;
+  grid-row-start: unset;
+  grid-row-end: unset;
+  order: unset;
+  outline: unset;
+  outline-offset: unset;
+  column-span: unset;
+  contain: unset;
+  container: unset;
+  scroll-margin: unset;
+}
+
+*|*::-servo-legacy-anonymous-block {
     display: block;
     position: static;
     border: none;
@@ -257,7 +277,7 @@ svg > * {
 }
 
 /* The outer fragment wrapper of an inline-block. */
-*|*::-servo-inline-block-wrapper {
+*|*::-servo-legacy-inline-block-wrapper {
     position: static;
     border: none;
     padding: 0;
@@ -265,7 +285,7 @@ svg > * {
 }
 
 /* The outer fragment wrapper of an inline absolute hypothetical fragment. */
-*|*::-servo-inline-absolute {
+*|*::-servo-legacy-inline-absolute {
     clip: auto;
     border: none;
     padding: 0;

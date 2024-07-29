@@ -2,14 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use webxr_api::{FingerJoint, Hand, Joint};
+
 use crate::dom::bindings::codegen::Bindings::XRHandBinding::{XRHandConstants, XRHandMethods};
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::xrinputsource::XRInputSource;
 use crate::dom::xrjointspace::XRJointSpace;
-use dom_struct::dom_struct;
-use webxr_api::{FingerJoint, Hand, Joint};
 
 #[dom_struct]
 pub struct XRHand {
@@ -17,6 +18,7 @@ pub struct XRHand {
     #[ignore_malloc_size_of = "defined in webxr"]
     source: Dom<XRInputSource>,
     #[ignore_malloc_size_of = "partially defind in webxr"]
+    #[custom_trace]
     spaces: Hand<Dom<XRJointSpace>>,
 }
 
@@ -39,12 +41,12 @@ impl XRHand {
 }
 
 impl XRHandMethods for XRHand {
-    /// https://github.com/immersive-web/webxr-hands-input/blob/master/explainer.md
+    /// <https://github.com/immersive-web/webxr-hands-input/blob/master/explainer.md>
     fn Length(&self) -> i32 {
         XRHandConstants::LITTLE_PHALANX_TIP as i32 + 1
     }
 
-    /// https://github.com/immersive-web/webxr-hands-input/blob/master/explainer.md
+    /// <https://github.com/immersive-web/webxr-hands-input/blob/master/explainer.md>
     fn IndexedGetter(&self, joint_index: u32) -> Option<DomRoot<XRJointSpace>> {
         let joint = match joint_index {
             XRHandConstants::WRIST => Joint::Wrist,

@@ -2,29 +2,34 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::ToOwned;
+use std::cell::{Cell, RefCell};
+
+use dom_struct::dom_struct;
+use encoding_rs::{Decoder, DecoderResult, Encoding};
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::TextDecoderBinding;
 use crate::dom::bindings::codegen::Bindings::TextDecoderBinding::{
     TextDecodeOptions, TextDecoderMethods,
 };
 use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
-use encoding_rs::{Decoder, DecoderResult, Encoding};
-use std::borrow::ToOwned;
-use std::cell::{Cell, RefCell};
 
 #[dom_struct]
 #[allow(non_snake_case)]
 pub struct TextDecoder {
     reflector_: Reflector,
+    #[no_trace]
     encoding: &'static Encoding,
     fatal: bool,
     ignoreBOM: bool,
     #[ignore_malloc_size_of = "defined in encoding_rs"]
+    #[no_trace]
     decoder: RefCell<Decoder>,
     in_stream: RefCell<Vec<u8>>,
     do_not_flush: Cell<bool>,
@@ -35,9 +40,9 @@ impl TextDecoder {
     fn new_inherited(encoding: &'static Encoding, fatal: bool, ignoreBOM: bool) -> TextDecoder {
         TextDecoder {
             reflector_: Reflector::new(),
-            encoding: encoding,
-            fatal: fatal,
-            ignoreBOM: ignoreBOM,
+            encoding,
+            fatal,
+            ignoreBOM,
             decoder: RefCell::new(if ignoreBOM {
                 encoding.new_decoder()
             } else {
@@ -54,21 +59,24 @@ impl TextDecoder {
         ))
     }
 
-    pub fn new(
+    fn new(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         encoding: &'static Encoding,
         fatal: bool,
         ignoreBOM: bool,
     ) -> DomRoot<TextDecoder> {
-        reflect_dom_object(
+        reflect_dom_object_with_proto(
             Box::new(TextDecoder::new_inherited(encoding, fatal, ignoreBOM)),
             global,
+            proto,
         )
     }
 
     /// <https://encoding.spec.whatwg.org/#dom-textdecoder>
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         label: DOMString,
         options: &TextDecoderBinding::TextDecoderOptions,
     ) -> Fallible<DomRoot<TextDecoder>> {
@@ -78,6 +86,7 @@ impl TextDecoder {
         };
         Ok(TextDecoder::new(
             global,
+            proto,
             encoding,
             options.fatal,
             options.ignoreBOM,

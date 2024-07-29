@@ -2,6 +2,37 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::ops::Range;
+use std::ptr::NonNull;
+use std::{f64, ptr};
+
+use chrono::naive::{NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Datelike, Weekday};
+use dom_struct::dom_struct;
+use embedder_traits::{FilterPattern, InputMethodType};
+use encoding_rs::Encoding;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::jsapi::{
+    ClippedTime, DateGetMsecSinceEpoch, Handle, JSObject, JS_ClearPendingException, NewDateObject,
+    NewUCRegExpObject, ObjectIsDate, RegExpFlag_Unicode, RegExpFlags,
+};
+use js::jsval::UndefinedValue;
+use js::rust::jsapi_wrapped::{ExecuteRegExpNoStatics, ObjectIsRegExp};
+use js::rust::{HandleObject, MutableHandleObject};
+use net_traits::blob_url_store::get_blob_origin;
+use net_traits::filemanager_thread::FileManagerThreadMsg;
+use net_traits::{CoreResourceMsg, IpcSend};
+use profile_traits::ipc;
+use script_traits::ScriptToConstellationChan;
+use servo_atoms::Atom;
+use style::attr::AttrValue;
+use style::str::{split_commas, str_join};
+use style_dom::ElementState;
+use unicode_bidi::{bidi_class, BidiClass};
+use url::Url;
+
 use crate::dom::activation::Activatable;
 use crate::dom::attr::Attr;
 use crate::dom::bindings::cell::DomRefCell;
@@ -28,14 +59,14 @@ use crate::dom::htmldatalistelement::HTMLDataListElement;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::htmlformelement::{
-    FormControl, FormDatum, FormDatumValue, FormSubmitter, HTMLFormElement,
+    FormControl, FormDatum, FormDatumValue, FormSubmitterElement, HTMLFormElement, ResetFrom,
+    SubmittedFrom,
 };
-use crate::dom::htmlformelement::{ResetFrom, SubmittedFrom};
 use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::mouseevent::MouseEvent;
-use crate::dom::node::{document_from_node, window_from_node};
 use crate::dom::node::{
-    BindContext, CloneChildrenFlag, Node, NodeDamage, ShadowIncluding, UnbindContext,
+    document_from_node, window_from_node, BindContext, CloneChildrenFlag, Node, NodeDamage,
+    ShadowIncluding, UnbindContext,
 };
 use crate::dom::nodelist::NodeList;
 use crate::dom::textcontrol::{TextControlElement, TextControlSelection};
@@ -49,44 +80,12 @@ use crate::textinput::KeyReaction::{
 };
 use crate::textinput::Lines::Single;
 use crate::textinput::{Direction, SelectionDirection, TextInput, UTF16CodeUnits, UTF8Bytes};
-use chrono::naive::{NaiveDate, NaiveDateTime};
-use chrono::{Datelike, Weekday};
-use dom_struct::dom_struct;
-use embedder_traits::FilterPattern;
-use encoding_rs::Encoding;
-use html5ever::{LocalName, Prefix};
-use js::jsapi::{
-    ClippedTime, DateGetMsecSinceEpoch, Handle, JSObject, JS_ClearPendingException, NewDateObject,
-    NewUCRegExpObject, ObjectIsDate, RegExpFlag_Unicode, RegExpFlags,
-};
-use js::jsval::UndefinedValue;
-use js::rust::jsapi_wrapped::{ExecuteRegExpNoStatics, ObjectIsRegExp};
-use js::rust::{HandleObject, MutableHandleObject};
-use msg::constellation_msg::InputMethodType;
-use net_traits::blob_url_store::get_blob_origin;
-use net_traits::filemanager_thread::FileManagerThreadMsg;
-use net_traits::{CoreResourceMsg, IpcSend};
-use profile_traits::ipc;
-use script_layout_interface::rpc::TextIndexResponse;
-use script_traits::ScriptToConstellationChan;
-use servo_atoms::Atom;
-use std::borrow::Cow;
-use std::cell::Cell;
-use std::f64;
-use std::ops::Range;
-use std::ptr;
-use std::ptr::NonNull;
-use style::attr::AttrValue;
-use style::element_state::ElementState;
-use style::str::{split_commas, str_join};
-use unicode_bidi::{bidi_class, BidiClass};
-use url::Url;
 
-const DEFAULT_SUBMIT_VALUE: &'static str = "Submit";
-const DEFAULT_RESET_VALUE: &'static str = "Reset";
+const DEFAULT_SUBMIT_VALUE: &str = "Submit";
+const DEFAULT_RESET_VALUE: &str = "Reset";
 const PASSWORD_REPLACEMENT_CHAR: char = '●';
 
-#[derive(Clone, Copy, JSTraceable, PartialEq)]
+#[derive(Clone, Copy, Default, JSTraceable, PartialEq)]
 #[allow(dead_code)]
 #[derive(MallocSizeOf)]
 pub enum InputType {
@@ -108,6 +107,7 @@ pub enum InputType {
     Search,
     Submit,
     Tel,
+    #[default]
     Text,
     Time,
     Url,
@@ -119,24 +119,23 @@ impl InputType {
     // slightly differently, with placeholder characters shown rather
     // than the underlying value.
     fn is_textual(&self) -> bool {
-        match *self {
+        matches!(
+            *self,
             InputType::Color |
-            InputType::Date |
-            InputType::DatetimeLocal |
-            InputType::Email |
-            InputType::Hidden |
-            InputType::Month |
-            InputType::Number |
-            InputType::Range |
-            InputType::Search |
-            InputType::Tel |
-            InputType::Text |
-            InputType::Time |
-            InputType::Url |
-            InputType::Week => true,
-
-            _ => false,
-        }
+                InputType::Date |
+                InputType::DatetimeLocal |
+                InputType::Email |
+                InputType::Hidden |
+                InputType::Month |
+                InputType::Number |
+                InputType::Range |
+                InputType::Search |
+                InputType::Tel |
+                InputType::Text |
+                InputType::Time |
+                InputType::Url |
+                InputType::Week
+        )
     }
 
     fn is_textual_or_password(&self) -> bool {
@@ -225,12 +224,6 @@ impl<'a> From<&'a Atom> for InputType {
     }
 }
 
-impl Default for InputType {
-    fn default() -> InputType {
-        InputType::Text
-    }
-}
-
 #[derive(Debug, PartialEq)]
 enum ValueMode {
     Value,
@@ -255,6 +248,7 @@ pub struct HTMLInputElement {
     maxlength: Cell<i32>,
     minlength: Cell<i32>,
     #[ignore_malloc_size_of = "#7193"]
+    #[no_trace]
     textinput: DomRefCell<TextInput<ScriptToConstellationChan>>,
     // https://html.spec.whatwg.org/multipage/#concept-input-value-dirty-flag
     value_dirty: Cell<bool>,
@@ -297,7 +291,7 @@ impl HTMLInputElement {
             .clone();
         HTMLInputElement {
             htmlelement: HTMLElement::new_inherited_with_state(
-                ElementState::IN_ENABLED_STATE | ElementState::IN_READ_WRITE_STATE,
+                ElementState::ENABLED | ElementState::READWRITE,
                 local_name,
                 prefix,
                 document,
@@ -325,17 +319,19 @@ impl HTMLInputElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLInputElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLInputElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 
@@ -424,45 +420,45 @@ impl HTMLInputElement {
     }
 
     fn does_readonly_apply(&self) -> bool {
-        match self.input_type() {
+        matches!(
+            self.input_type(),
             InputType::Text |
-            InputType::Search |
-            InputType::Url |
-            InputType::Tel |
-            InputType::Email |
-            InputType::Password |
-            InputType::Date |
-            InputType::Month |
-            InputType::Week |
-            InputType::Time |
-            InputType::DatetimeLocal |
-            InputType::Number => true,
-            _ => false,
-        }
+                InputType::Search |
+                InputType::Url |
+                InputType::Tel |
+                InputType::Email |
+                InputType::Password |
+                InputType::Date |
+                InputType::Month |
+                InputType::Week |
+                InputType::Time |
+                InputType::DatetimeLocal |
+                InputType::Number
+        )
     }
 
     fn does_minmaxlength_apply(&self) -> bool {
-        match self.input_type() {
+        matches!(
+            self.input_type(),
             InputType::Text |
-            InputType::Search |
-            InputType::Url |
-            InputType::Tel |
-            InputType::Email |
-            InputType::Password => true,
-            _ => false,
-        }
+                InputType::Search |
+                InputType::Url |
+                InputType::Tel |
+                InputType::Email |
+                InputType::Password
+        )
     }
 
     fn does_pattern_apply(&self) -> bool {
-        match self.input_type() {
+        matches!(
+            self.input_type(),
             InputType::Text |
-            InputType::Search |
-            InputType::Url |
-            InputType::Tel |
-            InputType::Email |
-            InputType::Password => true,
-            _ => false,
-        }
+                InputType::Search |
+                InputType::Url |
+                InputType::Tel |
+                InputType::Email |
+                InputType::Password
+        )
     }
 
     fn does_multiple_apply(&self) -> bool {
@@ -472,24 +468,23 @@ impl HTMLInputElement {
     // valueAsNumber, step, min, and max all share the same set of
     // input types they apply to
     fn does_value_as_number_apply(&self) -> bool {
-        match self.input_type() {
+        matches!(
+            self.input_type(),
             InputType::Date |
-            InputType::Month |
-            InputType::Week |
-            InputType::Time |
-            InputType::DatetimeLocal |
-            InputType::Number |
-            InputType::Range => true,
-            _ => false,
-        }
+                InputType::Month |
+                InputType::Week |
+                InputType::Time |
+                InputType::DatetimeLocal |
+                InputType::Number |
+                InputType::Range
+        )
     }
 
     fn does_value_as_date_apply(&self) -> bool {
-        match self.input_type() {
-            InputType::Date | InputType::Month | InputType::Week | InputType::Time => true,
-            // surprisingly, spec says false for DateTimeLocal!
-            _ => false,
-        }
+        matches!(
+            self.input_type(),
+            InputType::Date | InputType::Month | InputType::Week | InputType::Time
+        )
     }
 
     // https://html.spec.whatwg.org/multipage#concept-input-step
@@ -498,7 +493,8 @@ impl HTMLInputElement {
             .upcast::<Element>()
             .get_attribute(&ns!(), &local_name!("step"))
         {
-            if let Ok(step) = DOMString::from(attr.summarize().value).parse_floating_point_number()
+            if let Some(step) =
+                DOMString::from(attr.summarize().value).parse_floating_point_number()
             {
                 if step > 0.0 {
                     return Some(step * self.step_scale_factor());
@@ -515,12 +511,13 @@ impl HTMLInputElement {
             .upcast::<Element>()
             .get_attribute(&ns!(), &local_name!("min"))
         {
-            if let Ok(min) = self.convert_string_to_number(&DOMString::from(attr.summarize().value))
+            if let Some(min) =
+                self.convert_string_to_number(&DOMString::from(attr.summarize().value))
             {
                 return Some(min);
             }
         }
-        return self.default_minimum();
+        self.default_minimum()
     }
 
     // https://html.spec.whatwg.org/multipage#concept-input-max
@@ -529,12 +526,13 @@ impl HTMLInputElement {
             .upcast::<Element>()
             .get_attribute(&ns!(), &local_name!("max"))
         {
-            if let Ok(max) = self.convert_string_to_number(&DOMString::from(attr.summarize().value))
+            if let Some(max) =
+                self.convert_string_to_number(&DOMString::from(attr.summarize().value))
             {
                 return Some(max);
             }
         }
-        return self.default_maximum();
+        self.default_maximum()
     }
 
     // when allowed_value_step and minumum both exist, this is the smallest
@@ -629,7 +627,7 @@ impl HTMLInputElement {
             .get_attribute(&ns!(), &local_name!("min"))
         {
             let minstr = &DOMString::from(attr.summarize().value);
-            if let Ok(min) = self.convert_string_to_number(minstr) {
+            if let Some(min) = self.convert_string_to_number(minstr) {
                 return min;
             }
         }
@@ -637,7 +635,7 @@ impl HTMLInputElement {
             .upcast::<Element>()
             .get_attribute(&ns!(), &local_name!("value"))
         {
-            if let Ok(value) =
+            if let Some(value) =
                 self.convert_string_to_number(&DOMString::from(attr.summarize().value))
             {
                 return value;
@@ -695,20 +693,19 @@ impl HTMLInputElement {
                 {
                     let intervals_from_base = ((value - step_base) / allowed_value_step).floor();
                     intervals_from_base * allowed_value_step + step_base
-                }
+                },
                 StepDirection::Up =>
                 // step up a fractional step to be on a step multiple
                 {
                     let intervals_from_base = ((value - step_base) / allowed_value_step).ceil();
                     intervals_from_base * allowed_value_step + step_base
-                }
+                },
             };
         } else {
-            value = value +
-                match dir {
-                    StepDirection::Down => -f64::from(n) * allowed_value_step,
-                    StepDirection::Up => f64::from(n) * allowed_value_step,
-                };
+            value += match dir {
+                StepDirection::Down => -f64::from(n) * allowed_value_step,
+                StepDirection::Up => f64::from(n) * allowed_value_step,
+            };
         }
 
         // Step 8
@@ -744,7 +741,7 @@ impl HTMLInputElement {
     }
 
     // https://html.spec.whatwg.org/multipage/#concept-input-list
-    fn suggestions_source_element(&self) -> Option<DomRoot<HTMLElement>> {
+    fn suggestions_source_element(&self) -> Option<DomRoot<HTMLDataListElement>> {
         let list_string = self
             .upcast::<Element>()
             .get_string_attribute(&local_name!("list"));
@@ -762,11 +759,8 @@ impl HTMLInputElement {
             });
         first_with_id
             .as_ref()
-            .and_then(|el| {
-                el.downcast::<HTMLDataListElement>()
-                    .map(|data_el| data_el.upcast::<HTMLElement>())
-            })
-            .map(|el| DomRoot::from_ref(&*el))
+            .and_then(|el| el.downcast::<HTMLDataListElement>())
+            .map(DomRoot::from_ref)
     }
 
     // https://html.spec.whatwg.org/multipage/#suffering-from-being-missing
@@ -809,12 +803,12 @@ impl HTMLInputElement {
 
         match self.input_type() {
             // https://html.spec.whatwg.org/multipage/#url-state-(type%3Durl)%3Asuffering-from-a-type-mismatch
-            InputType::Url => Url::parse(&value).is_err(),
+            InputType::Url => Url::parse(value).is_err(),
             // https://html.spec.whatwg.org/multipage/#e-mail-state-(type%3Demail)%3Asuffering-from-a-type-mismatch
             // https://html.spec.whatwg.org/multipage/#e-mail-state-(type%3Demail)%3Asuffering-from-a-type-mismatch-2
             InputType::Email => {
                 if self.Multiple() {
-                    !split_commas(&value).all(|s| {
+                    !split_commas(value).all(|s| {
                         DOMString::from_string(s.to_string()).is_valid_email_address_string()
                     })
                 } else {
@@ -836,16 +830,16 @@ impl HTMLInputElement {
         }
 
         // Rust's regex is not compatible, we need to use mozjs RegExp.
-        let cx = self.global().get_cx();
+        let cx = GlobalScope::get_cx();
         let _ac = enter_realm(self);
         rooted!(in(*cx) let mut pattern = ptr::null_mut::<JSObject>());
 
         if compile_pattern(cx, &pattern_str, pattern.handle_mut()) {
             if self.Multiple() && self.does_multiple_apply() {
-                !split_commas(&value)
+                !split_commas(value)
                     .all(|s| matches_js_regex(cx, pattern.handle(), s).unwrap_or(true))
             } else {
-                !matches_js_regex(cx, pattern.handle(), &value).unwrap_or(true)
+                !matches_js_regex(cx, pattern.handle(), value).unwrap_or(true)
             }
         } else {
             // Element doesn't suffer from pattern mismatch if pattern is invalid.
@@ -877,7 +871,7 @@ impl HTMLInputElement {
             // https://html.spec.whatwg.org/multipage/#time-state-(type%3Dtime)%3Asuffering-from-bad-input
             InputType::Time => !value.is_valid_time_string(),
             // https://html.spec.whatwg.org/multipage/#local-date-and-time-state-(type%3Ddatetime-local)%3Asuffering-from-bad-input
-            InputType::DatetimeLocal => value.parse_local_date_and_time_string().is_err(),
+            InputType::DatetimeLocal => value.parse_local_date_and_time_string().is_none(),
             // https://html.spec.whatwg.org/multipage/#number-state-(type%3Dnumber)%3Asuffering-from-bad-input
             // https://html.spec.whatwg.org/multipage/#range-state-(type%3Drange)%3Asuffering-from-bad-input
             InputType::Number | InputType::Range => !value.is_valid_floating_point_number_string(),
@@ -925,9 +919,8 @@ impl HTMLInputElement {
             return ValidationFlags::empty();
         }
 
-        let value_as_number = match self.convert_string_to_number(&value) {
-            Ok(num) => num,
-            Err(()) => return ValidationFlags::empty(),
+        let Some(value_as_number) = self.convert_string_to_number(value) else {
+            return ValidationFlags::empty();
         };
 
         let mut failed_flags = ValidationFlags::empty();
@@ -980,8 +973,6 @@ pub trait LayoutHTMLInputElementHelpers<'dom> {
     fn value_for_layout(self) -> Cow<'dom, str>;
     fn size_for_layout(self) -> u32;
     fn selection_for_layout(self) -> Option<Range<usize>>;
-    fn checked_state_for_layout(self) -> bool;
-    fn indeterminate_state_for_layout(self) -> bool;
 }
 
 #[allow(unsafe_code)]
@@ -1000,7 +991,7 @@ impl<'dom> LayoutDom<'dom, HTMLInputElement> {
     }
 
     fn input_type(self) -> InputType {
-        unsafe { self.unsafe_get().input_type.get() }
+        self.unsafe_get().input_type.get()
     }
 
     fn textinput_sorted_selection_offsets_range(self) -> Range<UTF8Bytes> {
@@ -1054,9 +1045,8 @@ impl<'dom> LayoutHTMLInputElementHelpers<'dom> for LayoutDom<'dom, HTMLInputElem
         }
     }
 
-    #[allow(unsafe_code)]
     fn size_for_layout(self) -> u32 {
-        unsafe { self.unsafe_get().size.get() }
+        self.unsafe_get().size.get()
     }
 
     fn selection_for_layout(self) -> Option<Range<usize>> {
@@ -1084,32 +1074,19 @@ impl<'dom> LayoutHTMLInputElementHelpers<'dom> for LayoutDom<'dom, HTMLInputElem
             _ => None,
         }
     }
-
-    fn checked_state_for_layout(self) -> bool {
-        self.upcast::<Element>()
-            .get_state_for_layout()
-            .contains(ElementState::IN_CHECKED_STATE)
-    }
-
-    fn indeterminate_state_for_layout(self) -> bool {
-        self.upcast::<Element>()
-            .get_state_for_layout()
-            .contains(ElementState::IN_INDETERMINATE_STATE)
-    }
 }
 
 impl TextControlElement for HTMLInputElement {
     // https://html.spec.whatwg.org/multipage/#concept-input-apply
     fn selection_api_applies(&self) -> bool {
-        match self.input_type() {
+        matches!(
+            self.input_type(),
             InputType::Text |
-            InputType::Search |
-            InputType::Url |
-            InputType::Tel |
-            InputType::Password => true,
-
-            _ => false,
-        }
+                InputType::Search |
+                InputType::Url |
+                InputType::Tel |
+                InputType::Password
+        )
     }
 
     // https://html.spec.whatwg.org/multipage/#concept-input-apply
@@ -1184,9 +1161,13 @@ impl HTMLInputElementMethods for HTMLInputElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-input-files
     fn GetFiles(&self) -> Option<DomRoot<FileList>> {
-        match self.filelist.get() {
-            Some(ref fl) => Some(fl.clone()),
-            None => None,
+        self.filelist.get().as_ref().cloned()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-input-files>
+    fn SetFiles(&self, files: Option<&FileList>) {
+        if self.input_type() == InputType::File && files.is_some() {
+            self.filelist.set(files);
         }
     }
 
@@ -1200,7 +1181,7 @@ impl HTMLInputElementMethods for HTMLInputElement {
     fn Checked(&self) -> bool {
         self.upcast::<Element>()
             .state()
-            .contains(ElementState::IN_CHECKED_STATE)
+            .contains(ElementState::CHECKED)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-input-checked
@@ -1297,6 +1278,8 @@ impl HTMLInputElementMethods for HTMLInputElement {
             },
         }
 
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
         self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
         Ok(())
     }
@@ -1314,7 +1297,7 @@ impl HTMLInputElementMethods for HTMLInputElement {
     make_setter!(SetMin, "min");
 
     // https://html.spec.whatwg.org/multipage/#dom-input-list
-    fn GetList(&self) -> Option<DomRoot<HTMLElement>> {
+    fn GetList(&self) -> Option<DomRoot<HTMLDataListElement>> {
         self.suggestions_source_element()
     }
 
@@ -1324,11 +1307,10 @@ impl HTMLInputElementMethods for HTMLInputElement {
         self.convert_string_to_naive_datetime(self.Value())
             .map(|dt| unsafe {
                 let time = ClippedTime {
-                    t: dt.timestamp_millis() as f64,
+                    t: dt.and_utc().timestamp_millis() as f64,
                 };
                 NonNull::new_unchecked(NewDateObject(*cx, time))
             })
-            .ok()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-input-valueasdate
@@ -1496,13 +1478,13 @@ impl HTMLInputElementMethods for HTMLInputElement {
     fn Indeterminate(&self) -> bool {
         self.upcast::<Element>()
             .state()
-            .contains(ElementState::IN_INDETERMINATE_STATE)
+            .contains(ElementState::INDETERMINATE)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-input-indeterminate
     fn SetIndeterminate(&self, val: bool) {
         self.upcast::<Element>()
-            .set_state(ElementState::IN_INDETERMINATE_STATE, val)
+            .set_state(ElementState::INDETERMINATE, val)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-lfe-labels
@@ -1641,8 +1623,8 @@ fn radio_group_iter<'a>(
 
     // If group is None, in_same_group always fails, but we need to always return elem.
     root.traverse_preorder(ShadowIncluding::No)
-        .filter_map(|r| DomRoot::downcast::<HTMLInputElement>(r))
-        .filter(move |r| &**r == elem || in_same_group(&r, owner.as_deref(), group, None))
+        .filter_map(DomRoot::downcast::<HTMLInputElement>)
+        .filter(move |r| &**r == elem || in_same_group(r, owner.as_deref(), group, None))
 }
 
 fn broadcast_radio_checked(broadcaster: &HTMLInputElement, group: Option<&Atom>) {
@@ -1697,7 +1679,7 @@ impl HTMLInputElement {
     /// Steps range from 5.1 to 5.10 (specific to HTMLInputElement)
     pub fn form_datums(
         &self,
-        submitter: Option<FormSubmitter>,
+        submitter: Option<FormSubmitterElement>,
         encoding: Option<&'static Encoding>,
     ) -> Vec<FormDatum> {
         // 3.1: disabled state check is in get_unclean_dataset
@@ -1708,7 +1690,7 @@ impl HTMLInputElement {
         // Step 5.4
         let name = self.Name();
         let is_submitter = match submitter {
-            Some(FormSubmitter::InputElement(s)) => self == s,
+            Some(FormSubmitterElement::Input(s)) => self == s,
             _ => false,
         };
 
@@ -1737,7 +1719,7 @@ impl HTMLInputElement {
                             datums.push(FormDatum {
                                 ty: ty.clone(),
                                 name: name.clone(),
-                                value: FormDatumValue::File(DomRoot::from_ref(&f)),
+                                value: FormDatumValue::File(DomRoot::from_ref(f)),
                             });
                         }
                     },
@@ -1762,7 +1744,7 @@ impl HTMLInputElement {
                 if name.to_ascii_lowercase() == "_charset_" {
                     return vec![FormDatum {
                         ty: ty.clone(),
-                        name: name,
+                        name,
                         value: FormDatumValue::String(match encoding {
                             None => DOMString::from("UTF-8"),
                             Some(enc) => DOMString::from(enc.name()),
@@ -1782,7 +1764,7 @@ impl HTMLInputElement {
         // Step 5.12
         vec![FormDatum {
             ty: ty.clone(),
-            name: name,
+            name,
             value: FormDatumValue::String(self.Value()),
         }]
     }
@@ -1800,7 +1782,7 @@ impl HTMLInputElement {
 
     fn update_checked_state(&self, checked: bool, dirty: bool) {
         self.upcast::<Element>()
-            .set_state(ElementState::IN_CHECKED_STATE, checked);
+            .set_state(ElementState::CHECKED, checked);
 
         if dirty {
             self.checked_changed.set(true);
@@ -1868,7 +1850,7 @@ impl HTMLInputElement {
             let (chan, recv) = ipc::channel(self.global().time_profiler_chan().clone())
                 .expect("Error initializing channel");
             let msg = FileManagerThreadMsg::SelectFiles(filter, chan, origin, opt_test_paths);
-            let _ = resource_threads
+            resource_threads
                 .send(CoreResourceMsg::ToFileManager(msg))
                 .unwrap();
 
@@ -1883,7 +1865,7 @@ impl HTMLInputElement {
         } else {
             let opt_test_path = match opt_test_paths {
                 Some(paths) => {
-                    if paths.len() == 0 {
+                    if paths.is_empty() {
                         return;
                     } else {
                         Some(paths[0].to_string()) // neglect other paths
@@ -1895,7 +1877,7 @@ impl HTMLInputElement {
             let (chan, recv) = ipc::channel(self.global().time_profiler_chan().clone())
                 .expect("Error initializing channel");
             let msg = FileManagerThreadMsg::SelectFile(filter, chan, origin, opt_test_path);
-            let _ = resource_threads
+            resource_threads
                 .send(CoreResourceMsg::ToFileManager(msg))
                 .unwrap();
 
@@ -1965,7 +1947,7 @@ impl HTMLInputElement {
             InputType::DatetimeLocal => {
                 if value
                     .convert_valid_normalized_local_date_and_time_string()
-                    .is_err()
+                    .is_none()
                 {
                     value.clear();
                 }
@@ -2063,9 +2045,9 @@ impl HTMLInputElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     fn selection(&self) -> TextControlSelection<Self> {
-        TextControlSelection::new(&self, &self.textinput)
+        TextControlSelection::new(self, &self.textinput)
     }
 
     // https://html.spec.whatwg.org/multipage/#implicit-submission
@@ -2082,8 +2064,7 @@ impl HTMLInputElement {
         if self.upcast::<Element>().click_in_progress() {
             return;
         }
-        let submit_button;
-        submit_button = node
+        let submit_button = node
             .query_selector_iter(DOMString::from("input[type=submit]"))
             .unwrap()
             .filter_map(DomRoot::downcast::<HTMLInputElement>)
@@ -2099,89 +2080,82 @@ impl HTMLInputElement {
                 }
             },
             None => {
-                let inputs = node
+                let mut inputs = node
                     .query_selector_iter(DOMString::from("input"))
                     .unwrap()
                     .filter_map(DomRoot::downcast::<HTMLInputElement>)
                     .filter(|input| {
                         input.form_owner() == owner &&
-                            match input.input_type() {
+                            matches!(
+                                input.input_type(),
                                 InputType::Text |
-                                InputType::Search |
-                                InputType::Url |
-                                InputType::Tel |
-                                InputType::Email |
-                                InputType::Password |
-                                InputType::Date |
-                                InputType::Month |
-                                InputType::Week |
-                                InputType::Time |
-                                InputType::DatetimeLocal |
-                                InputType::Number => true,
-                                _ => false,
-                            }
+                                    InputType::Search |
+                                    InputType::Url |
+                                    InputType::Tel |
+                                    InputType::Email |
+                                    InputType::Password |
+                                    InputType::Date |
+                                    InputType::Month |
+                                    InputType::Week |
+                                    InputType::Time |
+                                    InputType::DatetimeLocal |
+                                    InputType::Number
+                            )
                     });
 
-                if inputs.skip(1).next().is_some() {
+                if inputs.nth(1).is_some() {
                     // lazily test for > 1 submission-blocking inputs
                     return;
                 }
-                form.submit(
-                    SubmittedFrom::NotFromForm,
-                    FormSubmitter::FormElement(&form),
-                );
+                form.submit(SubmittedFrom::NotFromForm, FormSubmitterElement::Form(form));
             },
         }
     }
 
     // https://html.spec.whatwg.org/multipage/#concept-input-value-string-number
-    fn convert_string_to_number(&self, value: &DOMString) -> Result<f64, ()> {
+    fn convert_string_to_number(&self, value: &DOMString) -> Option<f64> {
         match self.input_type() {
-            InputType::Date => match value.parse_date_string() {
-                Ok((year, month, day)) => {
-                    let d = NaiveDate::from_ymd(year, month, day);
-                    let duration = d.signed_duration_since(NaiveDate::from_ymd(1970, 1, 1));
-                    Ok(duration.num_milliseconds() as f64)
-                },
-                _ => Err(()),
-            },
+            InputType::Date => value
+                .parse_date_string()
+                .and_then(|(year, month, day)| NaiveDate::from_ymd_opt(year, month, day))
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|time| time.and_utc().timestamp_millis() as f64),
             InputType::Month => match value.parse_month_string() {
                 // This one returns number of months, not milliseconds
                 // (specification requires this, presumably because number of
                 // milliseconds is not consistent across months)
                 // the - 1.0 is because january is 1, not 0
-                Ok((year, month)) => Ok(((year - 1970) * 12) as f64 + (month as f64 - 1.0)),
-                _ => Err(()),
+                Some((year, month)) => Some(((year - 1970) * 12) as f64 + (month as f64 - 1.0)),
+                _ => None,
             },
-            InputType::Week => match value.parse_week_string() {
-                Ok((year, weeknum)) => {
-                    let d = NaiveDate::from_isoywd(year, weeknum, Weekday::Mon);
-                    let duration = d.signed_duration_since(NaiveDate::from_ymd(1970, 1, 1));
-                    Ok(duration.num_milliseconds() as f64)
-                },
-                _ => Err(()),
-            },
+            InputType::Week => value
+                .parse_week_string()
+                .and_then(|(year, weeknum)| NaiveDate::from_isoywd_opt(year, weeknum, Weekday::Mon))
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|time| time.and_utc().timestamp_millis() as f64),
             InputType::Time => match value.parse_time_string() {
-                Ok((hours, minutes, seconds)) => {
-                    Ok((seconds as f64 + 60.0 * minutes as f64 + 3600.0 * hours as f64) * 1000.0)
+                Some((hours, minutes, seconds)) => {
+                    Some((seconds + 60.0 * minutes as f64 + 3600.0 * hours as f64) * 1000.0)
                 },
-                _ => Err(()),
+                _ => None,
             },
-            InputType::DatetimeLocal => match value.parse_local_date_and_time_string() {
+            InputType::DatetimeLocal => {
                 // Is this supposed to know the locale's daylight-savings-time rules?
-                Ok(((year, month, day), (hours, minutes, seconds))) => {
-                    let d = NaiveDate::from_ymd(year, month, day);
-                    let ymd_duration = d.signed_duration_since(NaiveDate::from_ymd(1970, 1, 1));
-                    let hms_millis =
-                        (seconds + 60.0 * minutes as f64 + 3600.0 * hours as f64) * 1000.0;
-                    Ok(ymd_duration.num_milliseconds() as f64 + hms_millis)
-                },
-                _ => Err(()),
+                value.parse_local_date_and_time_string().and_then(|date| {
+                    let seconds = date.seconds as u32;
+                    let milliseconds = ((date.seconds - seconds as f64) * 1000.) as u32;
+                    Some(
+                        NaiveDate::from_ymd_opt(date.year, date.month, date.day)?
+                            .and_hms_milli_opt(date.hour, date.minute, seconds, milliseconds)?
+                            .and_utc()
+                            .timestamp_millis() as f64,
+                    )
+                })
             },
             InputType::Number | InputType::Range => value.parse_floating_point_number(),
             // min/max/valueAsNumber/stepDown/stepUp do not apply to
             // the remaining types
-            _ => Err(()),
+            _ => None,
         }
     }
 
@@ -2215,7 +2189,13 @@ impl HTMLInputElement {
                     datetime.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
                 ))
             },
-            InputType::Number | InputType::Range => Ok(DOMString::from(value.to_string())),
+            InputType::Number | InputType::Range => {
+                let mut value = DOMString::from(value.to_string());
+
+                value.set_best_representation_of_the_floating_point_number();
+
+                Ok(value)
+            },
             // this won't be called from other input types
             _ => unreachable!(),
         }
@@ -2224,31 +2204,30 @@ impl HTMLInputElement {
     // https://html.spec.whatwg.org/multipage/#concept-input-value-string-date
     // This does the safe Rust part of conversion; the unsafe JS Date part
     // is in GetValueAsDate
-    fn convert_string_to_naive_datetime(&self, value: DOMString) -> Result<NaiveDateTime, ()> {
+    fn convert_string_to_naive_datetime(&self, value: DOMString) -> Option<NaiveDateTime> {
         match self.input_type() {
             InputType::Date => value
                 .parse_date_string()
-                .and_then(|(y, m, d)| NaiveDate::from_ymd_opt(y, m, d).ok_or(()))
-                .map(|date| date.and_hms(0, 0, 0)),
+                .and_then(|(y, m, d)| NaiveDate::from_ymd_opt(y, m, d))
+                .and_then(|date| date.and_hms_opt(0, 0, 0)),
             InputType::Time => value.parse_time_string().and_then(|(h, m, s)| {
                 let whole_seconds = s.floor();
                 let nanos = ((s - whole_seconds) * 1e9).floor() as u32;
-                NaiveDate::from_ymd(1970, 1, 1)
-                    .and_hms_nano_opt(h, m, whole_seconds as u32, nanos)
-                    .ok_or(())
+                NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .and_then(|date| date.and_hms_nano_opt(h, m, whole_seconds as u32, nanos))
             }),
             InputType::Week => value
                 .parse_week_string()
                 .and_then(|(iso_year, week)| {
-                    NaiveDate::from_isoywd_opt(iso_year, week, Weekday::Mon).ok_or(())
+                    NaiveDate::from_isoywd_opt(iso_year, week, Weekday::Mon)
                 })
-                .map(|date| date.and_hms(0, 0, 0)),
+                .and_then(|date| date.and_hms_opt(0, 0, 0)),
             InputType::Month => value
                 .parse_month_string()
-                .and_then(|(y, m)| NaiveDate::from_ymd_opt(y, m, 1).ok_or(()))
-                .map(|date| date.and_hms(0, 0, 0)),
+                .and_then(|(y, m)| NaiveDate::from_ymd_opt(y, m, 1))
+                .and_then(|date| date.and_hms_opt(0, 0, 0)),
             // does not apply to other types
-            _ => Err(()),
+            _ => None,
         }
     }
 
@@ -2278,8 +2257,8 @@ impl VirtualMethods for HTMLInputElement {
 
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
-        match attr.local_name() {
-            &local_name!("disabled") => {
+        match *attr.local_name() {
+            local_name!("disabled") => {
                 let disabled_state = match mutation {
                     AttributeMutation::Set(None) => true,
                     AttributeMutation::Set(Some(_)) => {
@@ -2300,7 +2279,7 @@ impl VirtualMethods for HTMLInputElement {
 
                 el.update_sequentially_focusable_status();
             },
-            &local_name!("checked") if !self.checked_changed.get() => {
+            local_name!("checked") if !self.checked_changed.get() => {
                 let checked_state = match mutation {
                     AttributeMutation::Set(None) => true,
                     AttributeMutation::Set(Some(_)) => {
@@ -2311,11 +2290,11 @@ impl VirtualMethods for HTMLInputElement {
                 };
                 self.update_checked_state(checked_state, false);
             },
-            &local_name!("size") => {
+            local_name!("size") => {
                 let size = mutation.new_value(attr).map(|value| value.as_uint());
                 self.size.set(size.unwrap_or(DEFAULT_INPUT_SIZE));
             },
-            &local_name!("type") => {
+            local_name!("type") => {
                 let el = self.upcast::<Element>();
                 match mutation {
                     AttributeMutation::Set(_) => {
@@ -2341,7 +2320,6 @@ impl VirtualMethods for HTMLInputElement {
                         }
 
                         let new_value_mode = self.value_mode();
-
                         match (&old_value_mode, old_idl_value.is_empty(), new_value_mode) {
                             // Step 1
                             (&ValueMode::Value, false, ValueMode::Default) |
@@ -2371,7 +2349,7 @@ impl VirtualMethods for HTMLInputElement {
                             {
                                 self.SetValue(DOMString::from(""))
                                     .expect("Failed to set input value on type change to ValueMode::Filename.");
-                            }
+                            },
                             _ => {},
                         }
 
@@ -2405,7 +2383,7 @@ impl VirtualMethods for HTMLInputElement {
 
                 self.update_placeholder_shown_state();
             },
-            &local_name!("value") if !self.value_dirty.get() => {
+            local_name!("value") if !self.value_dirty.get() => {
                 let value = mutation.new_value(attr).map(|value| (**value).to_owned());
                 let mut value = value.map_or(DOMString::new(), DOMString::from);
 
@@ -2413,12 +2391,12 @@ impl VirtualMethods for HTMLInputElement {
                 self.textinput.borrow_mut().set_content(value);
                 self.update_placeholder_shown_state();
             },
-            &local_name!("name") if self.input_type() == InputType::Radio => {
+            local_name!("name") if self.input_type() == InputType::Radio => {
                 self.radio_group_updated(
                     mutation.new_value(attr).as_ref().map(|name| name.as_atom()),
                 );
             },
-            &local_name!("maxlength") => match *attr.value() {
+            local_name!("maxlength") => match *attr.value() {
                 AttrValue::Int(_, value) => {
                     let mut textinput = self.textinput.borrow_mut();
 
@@ -2430,7 +2408,7 @@ impl VirtualMethods for HTMLInputElement {
                 },
                 _ => panic!("Expected an AttrValue::Int"),
             },
-            &local_name!("minlength") => match *attr.value() {
+            local_name!("minlength") => match *attr.value() {
                 AttrValue::Int(_, value) => {
                     let mut textinput = self.textinput.borrow_mut();
 
@@ -2442,7 +2420,7 @@ impl VirtualMethods for HTMLInputElement {
                 },
                 _ => panic!("Expected an AttrValue::Int"),
             },
-            &local_name!("placeholder") => {
+            local_name!("placeholder") => {
                 {
                     let mut placeholder = self.placeholder.borrow_mut();
                     placeholder.clear();
@@ -2453,33 +2431,38 @@ impl VirtualMethods for HTMLInputElement {
                 }
                 self.update_placeholder_shown_state();
             },
-            &local_name!("readonly") if self.input_type().is_textual() => {
-                let el = self.upcast::<Element>();
-                match mutation {
-                    AttributeMutation::Set(_) => {
-                        el.set_read_write_state(false);
-                    },
-                    AttributeMutation::Removed => {
-                        el.set_read_write_state(!el.disabled_state());
-                    },
+            local_name!("readonly") => {
+                if self.input_type().is_textual() {
+                    let el = self.upcast::<Element>();
+                    match mutation {
+                        AttributeMutation::Set(_) => {
+                            el.set_read_write_state(false);
+                        },
+                        AttributeMutation::Removed => {
+                            el.set_read_write_state(!el.disabled_state());
+                        },
+                    }
                 }
             },
-            &local_name!("form") => {
+            local_name!("form") => {
                 self.form_attribute_mutated(mutation);
             },
             _ => {},
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
-        match name {
-            &local_name!("accept") => AttrValue::from_comma_separated_tokenlist(value.into()),
-            &local_name!("size") => AttrValue::from_limited_u32(value.into(), DEFAULT_INPUT_SIZE),
-            &local_name!("type") => AttrValue::from_atomic(value.into()),
-            &local_name!("maxlength") => {
+        match *name {
+            local_name!("accept") => AttrValue::from_comma_separated_tokenlist(value.into()),
+            local_name!("size") => AttrValue::from_limited_u32(value.into(), DEFAULT_INPUT_SIZE),
+            local_name!("type") => AttrValue::from_atomic(value.into()),
+            local_name!("maxlength") => {
                 AttrValue::from_limited_i32(value.into(), DEFAULT_MAX_LENGTH)
             },
-            &local_name!("minlength") => {
+            local_name!("minlength") => {
                 AttrValue::from_limited_i32(value.into(), DEFAULT_MIN_LENGTH)
             },
             _ => self
@@ -2490,11 +2473,14 @@ impl VirtualMethods for HTMLInputElement {
     }
 
     fn bind_to_tree(&self, context: &BindContext) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.bind_to_tree(context);
         }
         self.upcast::<Element>()
             .check_ancestors_disabled_state_for_form_control();
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     fn unbind_from_tree(&self, context: &UnbindContext) {
@@ -2510,6 +2496,9 @@ impl VirtualMethods for HTMLInputElement {
         } else {
             el.check_disabled_attribute();
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     // This represents behavior for which the UIEvents spec and the
@@ -2538,10 +2527,9 @@ impl VirtualMethods for HTMLInputElement {
                     // now.
                     if let Some(point_in_target) = mouse_event.point_in_target() {
                         let window = window_from_node(self);
-                        let TextIndexResponse(index) =
-                            window.text_index_query(self.upcast::<Node>(), point_in_target);
+                        let index = window.text_index_query(self.upcast::<Node>(), point_in_target);
                         if let Some(i) = index {
-                            self.textinput.borrow_mut().set_edit_point_index(i as usize);
+                            self.textinput.borrow_mut().set_edit_point_index(i);
                             // trigger redraw
                             self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
                             event.PreventDefault();
@@ -2580,11 +2568,11 @@ impl VirtualMethods for HTMLInputElement {
         {
             if event.IsTrusted() {
                 let window = window_from_node(self);
-                let _ = window
+                window
                     .task_manager()
                     .user_interaction_task_source()
                     .queue_event(
-                        &self.upcast(),
+                        self.upcast(),
                         atom!("input"),
                         EventBubbles::Bubbles,
                         EventCancelable::NotCancelable,
@@ -2609,6 +2597,9 @@ impl VirtualMethods for HTMLInputElement {
                 event.mark_as_handled();
             }
         }
+
+        self.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 
     // https://html.spec.whatwg.org/multipage/#the-input-element%3Aconcept-node-clone-ext
@@ -2618,17 +2609,19 @@ impl VirtualMethods for HTMLInputElement {
         maybe_doc: Option<&Document>,
         clone_children: CloneChildrenFlag,
     ) {
-        if let Some(ref s) = self.super_type() {
+        if let Some(s) = self.super_type() {
             s.cloning_steps(copy, maybe_doc, clone_children);
         }
         let elem = copy.downcast::<HTMLInputElement>().unwrap();
         elem.value_dirty.set(self.value_dirty.get());
         elem.checked_changed.set(self.checked_changed.get());
         elem.upcast::<Element>()
-            .set_state(ElementState::IN_CHECKED_STATE, self.Checked());
+            .set_state(ElementState::CHECKED, self.Checked());
         elem.textinput
             .borrow_mut()
             .set_content(self.textinput.borrow().get_content());
+        elem.validity_state()
+            .perform_validation_and_update(ValidationFlags::all());
     }
 }
 
@@ -2641,7 +2634,7 @@ impl FormControl for HTMLInputElement {
         self.form_owner.set(form);
     }
 
-    fn to_element<'a>(&'a self) -> &'a Element {
+    fn to_element(&self) -> &Element {
         self.upcast::<Element>()
     }
 }
@@ -2677,28 +2670,28 @@ impl Validatable for HTMLInputElement {
         let mut failed_flags = ValidationFlags::empty();
         let value = self.Value();
 
-        if validate_flags.contains(ValidationFlags::VALUE_MISSING) {
-            if self.suffers_from_being_missing(&value) {
-                failed_flags.insert(ValidationFlags::VALUE_MISSING);
-            }
+        if validate_flags.contains(ValidationFlags::VALUE_MISSING) &&
+            self.suffers_from_being_missing(&value)
+        {
+            failed_flags.insert(ValidationFlags::VALUE_MISSING);
         }
 
-        if validate_flags.contains(ValidationFlags::TYPE_MISMATCH) {
-            if self.suffers_from_type_mismatch(&value) {
-                failed_flags.insert(ValidationFlags::TYPE_MISMATCH);
-            }
+        if validate_flags.contains(ValidationFlags::TYPE_MISMATCH) &&
+            self.suffers_from_type_mismatch(&value)
+        {
+            failed_flags.insert(ValidationFlags::TYPE_MISMATCH);
         }
 
-        if validate_flags.contains(ValidationFlags::PATTERN_MISMATCH) {
-            if self.suffers_from_pattern_mismatch(&value) {
-                failed_flags.insert(ValidationFlags::PATTERN_MISMATCH);
-            }
+        if validate_flags.contains(ValidationFlags::PATTERN_MISMATCH) &&
+            self.suffers_from_pattern_mismatch(&value)
+        {
+            failed_flags.insert(ValidationFlags::PATTERN_MISMATCH);
         }
 
-        if validate_flags.contains(ValidationFlags::BAD_INPUT) {
-            if self.suffers_from_bad_input(&value) {
-                failed_flags.insert(ValidationFlags::BAD_INPUT);
-            }
+        if validate_flags.contains(ValidationFlags::BAD_INPUT) &&
+            self.suffers_from_bad_input(&value)
+        {
+            failed_flags.insert(ValidationFlags::BAD_INPUT);
         }
 
         if validate_flags.intersects(ValidationFlags::TOO_LONG | ValidationFlags::TOO_SHORT) {
@@ -2764,7 +2757,7 @@ impl Activatable for HTMLInputElement {
             },
             _ => (),
         }
-        return None;
+        None
     }
 
     // https://dom.spec.whatwg.org/#eventtarget-legacy-canceled-activation-behavior
@@ -2800,7 +2793,7 @@ impl Activatable for HTMLInputElement {
                     // Avoiding iterating through the whole tree here, instead
                     // we can check if the conditions for radio group siblings apply
                     if in_same_group(
-                        &o,
+                        o,
                         self.form_owner().as_deref(),
                         self.radio_group_name().as_ref(),
                         Some(&*tree_root),
@@ -2825,25 +2818,27 @@ impl Activatable for HTMLInputElement {
                 // https://html.spec.whatwg.org/multipage/#submit-button-state-(type=submit):activation-behavior
                 // FIXME (Manishearth): support document owners (needs ability to get parent browsing context)
                 // Check if document owner is fully active
-                self.form_owner().map(|o| {
+                if let Some(o) = self.form_owner() {
                     o.submit(
                         SubmittedFrom::NotFromForm,
-                        FormSubmitter::InputElement(self),
+                        FormSubmitterElement::Input(self),
                     )
-                });
+                }
             },
             InputType::Reset => {
                 // https://html.spec.whatwg.org/multipage/#reset-button-state-(type=reset):activation-behavior
                 // FIXME (Manishearth): support document owners (needs ability to get parent browsing context)
                 // Check if document owner is fully active
-                self.form_owner().map(|o| o.reset(ResetFrom::NotFromForm));
+                if let Some(o) = self.form_owner() {
+                    o.reset(ResetFrom::NotFromForm)
+                }
             },
             InputType::Checkbox | InputType::Radio => {
                 // https://html.spec.whatwg.org/multipage/#checkbox-state-(type=checkbox):activation-behavior
                 // https://html.spec.whatwg.org/multipage/#radio-button-state-(type=radio):activation-behavior
                 // Check if document owner is fully active
                 if !self.upcast::<Node>().is_connected() {
-                    return ();
+                    return;
                 }
                 let target = self.upcast::<EventTarget>();
                 target.fire_bubbling_event(atom!("input"));
@@ -2859,13 +2854,11 @@ impl Activatable for HTMLInputElement {
 fn filter_from_accept(s: &DOMString) -> Vec<FilterPattern> {
     let mut filter = vec![];
     for p in split_commas(s) {
-        if let Some('.') = p.chars().nth(0) {
+        if let Some('.') = p.chars().next() {
             filter.push(FilterPattern(p[1..].to_string()));
-        } else {
-            if let Some(exts) = mime_guess::get_mime_extensions_str(p) {
-                for ext in exts {
-                    filter.push(FilterPattern(ext.to_string()));
-                }
+        } else if let Some(exts) = mime_guess::get_mime_extensions_str(p) {
+            for ext in exts {
+                filter.push(FilterPattern(ext.to_string()));
             }
         }
     }
@@ -2888,7 +2881,10 @@ fn milliseconds_to_datetime(value: f64) -> Result<NaiveDateTime, ()> {
     let seconds = (value / 1000.0).floor();
     let milliseconds = value - (seconds * 1000.0);
     let nanoseconds = milliseconds * 1e6;
-    NaiveDateTime::from_timestamp_opt(seconds as i64, nanoseconds as u32).ok_or(())
+    match DateTime::from_timestamp(seconds as i64, nanoseconds as u32) {
+        Some(datetime) => Ok(datetime.naive_utc()),
+        None => Err(()),
+    }
 }
 
 // This is used to compile JS-compatible regex provided in pattern attribute

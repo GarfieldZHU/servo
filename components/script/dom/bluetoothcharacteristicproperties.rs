@@ -2,11 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::BluetoothCharacteristicPropertiesBinding::BluetoothCharacteristicPropertiesMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
 
 // https://webbluetoothcg.github.io/web-bluetooth/#characteristicproperties
 #[dom_struct]
@@ -25,6 +26,7 @@ pub struct BluetoothCharacteristicProperties {
 
 #[allow(non_snake_case)]
 impl BluetoothCharacteristicProperties {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_inherited(
         broadcast: bool,
         read: bool,
@@ -38,18 +40,19 @@ impl BluetoothCharacteristicProperties {
     ) -> BluetoothCharacteristicProperties {
         BluetoothCharacteristicProperties {
             reflector_: Reflector::new(),
-            broadcast: broadcast,
-            read: read,
-            write_without_response: write_without_response,
-            write: write,
-            notify: notify,
-            indicate: indicate,
-            authenticated_signed_writes: authenticated_signed_writes,
-            reliable_write: reliable_write,
-            writable_auxiliaries: writable_auxiliaries,
+            broadcast,
+            read,
+            write_without_response,
+            write,
+            notify,
+            indicate,
+            authenticated_signed_writes,
+            reliable_write,
+            writable_auxiliaries,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         global: &GlobalScope,
         broadcast: bool,

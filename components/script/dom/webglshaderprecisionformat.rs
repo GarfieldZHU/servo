@@ -5,11 +5,12 @@
 #![allow(dead_code)]
 
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::WebGLShaderPrecisionFormatBinding::WebGLShaderPrecisionFormatMethods;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::window::Window;
-use dom_struct::dom_struct;
 
 #[dom_struct]
 pub struct WebGLShaderPrecisionFormat {
@@ -23,9 +24,9 @@ impl WebGLShaderPrecisionFormat {
     fn new_inherited(range_min: i32, range_max: i32, precision: i32) -> WebGLShaderPrecisionFormat {
         WebGLShaderPrecisionFormat {
             reflector_: Reflector::new(),
-            range_min: range_min,
-            range_max: range_max,
-            precision: precision,
+            range_min,
+            range_max,
+            precision,
         }
     }
 

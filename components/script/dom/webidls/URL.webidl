@@ -7,6 +7,10 @@
  LegacyWindowAlias=webkitURL]
 interface URL {
   [Throws] constructor(USVString url, optional USVString base);
+
+  static URL? parse(USVString url, optional USVString base);
+  static boolean canParse(USVString url, optional USVString base);
+
   [SetterThrows]
   stringifier attribute USVString href;
   readonly attribute USVString origin;
@@ -24,7 +28,7 @@ interface URL {
   // https://w3c.github.io/FileAPI/#creating-revoking
   static DOMString createObjectURL(Blob blob);
   // static DOMString createFor(Blob blob);
-  static void revokeObjectURL(DOMString url);
+  static undefined revokeObjectURL(DOMString url);
 
   USVString toJSON();
 };

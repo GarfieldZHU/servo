@@ -1,16 +1,17 @@
 [package]
 name = "script_tests"
-version = "0.0.1"
-authors = ["The Servo Project Developers"]
-license = "MPL-2.0"
-edition = "2018"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lib]
 name = "script_tests"
 path = "lib.rs"
 
 [dependencies]
-euclid = "0.20"
-keyboard-types = "0.5"
+euclid = { workspace = true }
+keyboard-types = { workspace = true }
 script = {path = "../../../components/script"}
 servo_url = {path = "../../../components/url"}

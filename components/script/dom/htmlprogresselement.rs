@@ -2,17 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+use html5ever::{local_name, LocalName, Prefix};
+use js::rust::HandleObject;
+
 use crate::dom::bindings::codegen::Bindings::HTMLProgressElementBinding::HTMLProgressElementMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
 use crate::dom::element::Element;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::node::Node;
 use crate::dom::nodelist::NodeList;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
 
 #[dom_struct]
 pub struct HTMLProgressElement {
@@ -32,17 +35,19 @@ impl HTMLProgressElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLProgressElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLProgressElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 }
@@ -71,11 +76,15 @@ impl HTMLProgressElementMethods for HTMLProgressElement {
             })
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-progress-value
+    /// <https://html.spec.whatwg.org/multipage/#dom-progress-value>
     fn SetValue(&self, new_val: Finite<f64>) {
-        if 0.0 <= *new_val {
+        if *new_val >= 0.0 {
+            let mut string_value = DOMString::from_string((*new_val).to_string());
+
+            string_value.set_best_representation_of_the_floating_point_number();
+
             self.upcast::<Element>()
-                .set_string_attribute(&local_name!("value"), (*new_val).to_string().into());
+                .set_string_attribute(&local_name!("value"), string_value);
         }
     }
 
@@ -96,10 +105,16 @@ impl HTMLProgressElementMethods for HTMLProgressElement {
             })
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-progress-max
+    /// <https://html.spec.whatwg.org/multipage/#dom-progress-max>
     fn SetMax(&self, new_val: Finite<f64>) {
-        self.upcast::<Element>()
-            .set_string_attribute(&local_name!("max"), (*new_val).to_string().into());
+        if *new_val > 0.0 {
+            let mut string_value = DOMString::from_string((*new_val).to_string());
+
+            string_value.set_best_representation_of_the_floating_point_number();
+
+            self.upcast::<Element>()
+                .set_string_attribute(&local_name!("max"), string_value);
+        }
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-progress-position

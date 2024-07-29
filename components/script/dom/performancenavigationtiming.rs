@@ -2,16 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use dom_struct::dom_struct;
+
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
-use crate::dom::bindings::codegen::Bindings::PerformanceNavigationTimingBinding::NavigationType;
-use crate::dom::bindings::codegen::Bindings::PerformanceNavigationTimingBinding::PerformanceNavigationTimingMethods;
+use crate::dom::bindings::codegen::Bindings::PerformanceNavigationTimingBinding::{
+    NavigationTimingType, PerformanceNavigationTimingMethods,
+};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::reflect_dom_object;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::document::Document;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::performanceresourcetiming::{InitiatorType, PerformanceResourceTiming};
-use dom_struct::dom_struct;
 
 #[dom_struct]
 // https://w3c.github.io/navigation-timing/#dom-performancenavigationtiming
@@ -23,7 +25,7 @@ pub struct PerformanceNavigationTiming {
     navigation_start: u64,
     navigation_start_precise: u64,
     document: Dom<Document>,
-    nav_type: NavigationType,
+    nav_type: NavigationTimingType,
 }
 
 impl PerformanceNavigationTiming {
@@ -42,7 +44,7 @@ impl PerformanceNavigationTiming {
             navigation_start: nav_start,
             navigation_start_precise: nav_start_precise,
             document: Dom::from_ref(document),
-            nav_type: NavigationType::Navigate,
+            nav_type: NavigationTimingType::Navigate,
         }
     }
 
@@ -106,8 +108,8 @@ impl PerformanceNavigationTimingMethods for PerformanceNavigationTiming {
     }
 
     // https://w3c.github.io/navigation-timing/#dom-performancenavigationtiming-type
-    fn Type(&self) -> NavigationType {
-        self.nav_type.clone()
+    fn Type(&self) -> NavigationTimingType {
+        self.nav_type
     }
 
     // https://w3c.github.io/navigation-timing/#dom-performancenavigationtiming-redirectcount

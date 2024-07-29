@@ -2,24 +2,25 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cmp::Ordering;
+use std::iter::Iterator;
+
+use dom_struct::dom_struct;
+use servo_atoms::Atom;
+use style::custom_properties;
+
+use super::bindings::trace::HashMapTracedValues;
 use crate::dom::bindings::codegen::Bindings::StylePropertyMapReadOnlyBinding::StylePropertyMapReadOnlyMethods;
-use crate::dom::bindings::reflector::reflect_dom_object;
-use crate::dom::bindings::reflector::Reflector;
+use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::cssstylevalue::CSSStyleValue;
 use crate::dom::globalscope::GlobalScope;
-use dom_struct::dom_struct;
-use servo_atoms::Atom;
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::iter::Iterator;
-use style::custom_properties;
 
 #[dom_struct]
 pub struct StylePropertyMapReadOnly {
     reflector: Reflector,
-    entries: HashMap<Atom, Dom<CSSStyleValue>>,
+    entries: HashMapTracedValues<Atom, Dom<CSSStyleValue>>,
 }
 
 impl StylePropertyMapReadOnly {
@@ -29,7 +30,7 @@ impl StylePropertyMapReadOnly {
     {
         StylePropertyMapReadOnly {
             reflector: Reflector::new(),
-            entries: entries.into_iter().collect(),
+            entries: HashMapTracedValues(entries.into_iter().collect()),
         }
     }
 
@@ -78,6 +79,7 @@ impl StylePropertyMapReadOnlyMethods for StylePropertyMapReadOnly {
     fn GetProperties(&self) -> Vec<DOMString> {
         let mut result: Vec<DOMString> = self
             .entries
+            .0
             .keys()
             .map(|key| DOMString::from(&**key))
             .collect();
@@ -90,12 +92,10 @@ impl StylePropertyMapReadOnlyMethods for StylePropertyMapReadOnly {
                 } else {
                     Ordering::Greater
                 }
+            } else if custom_properties::parse_name(key2).is_ok() {
+                Ordering::Less
             } else {
-                if let Ok(_) = custom_properties::parse_name(key2) {
-                    Ordering::Less
-                } else {
-                    key1.cmp(key2)
-                }
+                key1.cmp(key2)
             }
         });
         result

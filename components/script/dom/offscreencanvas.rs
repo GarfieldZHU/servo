@@ -2,13 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
+
+use canvas_traits::canvas::{CanvasMsg, FromScriptMsg};
+use dom_struct::dom_struct;
+use euclid::default::Size2D;
+use ipc_channel::ipc::IpcSharedMemory;
+use js::rust::{HandleObject, HandleValue};
+use profile_traits::ipc;
+
 use crate::dom::bindings::cell::{ref_filter_map, DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::OffscreenCanvasBinding::{
     OffscreenCanvasMethods, OffscreenRenderingContext,
 };
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::reflector::reflect_dom_object;
-use crate::dom::bindings::reflector::DomObject;
+use crate::dom::bindings::reflector::{reflect_dom_object_with_proto, DomObject};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
@@ -16,15 +24,8 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlcanvaselement::HTMLCanvasElement;
 use crate::dom::offscreencanvasrenderingcontext2d::OffscreenCanvasRenderingContext2D;
 use crate::script_runtime::JSContext;
-use canvas_traits::canvas::{CanvasMsg, FromScriptMsg};
-use dom_struct::dom_struct;
-use euclid::default::Size2D;
-use ipc_channel::ipc::IpcSharedMemory;
-use js::rust::HandleValue;
-use profile_traits::ipc;
-use std::cell::Cell;
 
-#[unrooted_must_root_lint::must_root]
+#[crown::unrooted_must_root_lint::must_root]
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 pub enum OffscreenCanvasContext {
     OffscreenContext2d(Dom<OffscreenCanvasRenderingContext2D>),
@@ -56,25 +57,28 @@ impl OffscreenCanvas {
         }
     }
 
-    pub fn new(
+    fn new(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         width: u64,
         height: u64,
         placeholder: Option<&HTMLCanvasElement>,
     ) -> DomRoot<OffscreenCanvas> {
-        reflect_dom_object(
+        reflect_dom_object_with_proto(
             Box::new(OffscreenCanvas::new_inherited(width, height, placeholder)),
             global,
+            proto,
         )
     }
 
     #[allow(non_snake_case)]
     pub fn Constructor(
         global: &GlobalScope,
+        proto: Option<HandleObject>,
         width: u64,
         height: u64,
     ) -> Fallible<DomRoot<OffscreenCanvas>> {
-        let offscreencanvas = OffscreenCanvas::new(global, width, height, None);
+        let offscreencanvas = OffscreenCanvas::new(global, proto, width, height, None);
         Ok(offscreencanvas)
     }
 
@@ -103,7 +107,7 @@ impl OffscreenCanvas {
         }
 
         let data = match self.context.borrow().as_ref() {
-            Some(&OffscreenCanvasContext::OffscreenContext2d(ref context)) => {
+            Some(OffscreenCanvasContext::OffscreenContext2d(context)) => {
                 let (sender, receiver) =
                     ipc::channel(self.global().time_profiler_chan().clone()).unwrap();
                 let msg = CanvasMsg::FromScript(
@@ -130,7 +134,7 @@ impl OffscreenCanvas {
         let context = OffscreenCanvasRenderingContext2D::new(
             &self.global(),
             self,
-            self.placeholder.as_ref().map(|c| &**c),
+            self.placeholder.as_deref(),
         );
         *self.context.borrow_mut() = Some(OffscreenCanvasContext::OffscreenContext2d(
             Dom::from_ref(&*context),
@@ -167,7 +171,7 @@ impl OffscreenCanvasMethods for OffscreenCanvas {
 
     // https://html.spec.whatwg.org/multipage/#dom-offscreencanvas-width
     fn Width(&self) -> u64 {
-        return self.width.get();
+        self.width.get()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-offscreencanvas-width
@@ -185,7 +189,7 @@ impl OffscreenCanvasMethods for OffscreenCanvas {
 
     // https://html.spec.whatwg.org/multipage/#dom-offscreencanvas-height
     fn Height(&self) -> u64 {
-        return self.height.get();
+        self.height.get()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-offscreencanvas-height

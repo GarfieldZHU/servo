@@ -2,40 +2,41 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use canvas_traits::canvas::{
+    CanvasGradientStop, FillOrStrokeStyle, LinearGradientStyle, RadialGradientStyle,
+};
+use dom_struct::dom_struct;
+
+use crate::canvas_state::parse_color;
 use crate::dom::bindings::cell::DomRefCell;
-use crate::dom::bindings::codegen::Bindings::CanvasGradientBinding::CanvasGradientMethods;
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasGradientMethods;
 use crate::dom::bindings::error::{Error, ErrorResult};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::globalscope::GlobalScope;
-use canvas_traits::canvas::{
-    CanvasGradientStop, FillOrStrokeStyle, LinearGradientStyle, RadialGradientStyle,
-};
-use cssparser::Color as CSSColor;
-use cssparser::{Parser, ParserInput, RGBA};
-use dom_struct::dom_struct;
 
 // https://html.spec.whatwg.org/multipage/#canvasgradient
 #[dom_struct]
 pub struct CanvasGradient {
     reflector_: Reflector,
     style: CanvasGradientStyle,
+    #[no_trace]
     stops: DomRefCell<Vec<CanvasGradientStop>>,
 }
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 pub enum CanvasGradientStyle {
-    Linear(LinearGradientStyle),
-    Radial(RadialGradientStyle),
+    Linear(#[no_trace] LinearGradientStyle),
+    Radial(#[no_trace] RadialGradientStyle),
 }
 
 impl CanvasGradient {
     fn new_inherited(style: CanvasGradientStyle) -> CanvasGradient {
         CanvasGradient {
             reflector_: Reflector::new(),
-            style: style,
+            style,
             stops: DomRefCell::new(Vec::new()),
         }
     }
@@ -52,22 +53,14 @@ impl CanvasGradientMethods for CanvasGradient {
             return Err(Error::IndexSize);
         }
 
-        let mut input = ParserInput::new(&color);
-        let mut parser = Parser::new(&mut input);
-        let color = CSSColor::parse(&mut parser);
-        let color = if parser.is_exhausted() {
-            match color {
-                Ok(CSSColor::RGBA(rgba)) => rgba,
-                Ok(CSSColor::CurrentColor) => RGBA::new(0, 0, 0, 255),
-                _ => return Err(Error::Syntax),
-            }
-        } else {
-            return Err(Error::Syntax);
+        let color = match parse_color(None, &color) {
+            Ok(color) => color,
+            Err(_) => return Err(Error::Syntax),
         };
 
         self.stops.borrow_mut().push(CanvasGradientStop {
-            offset: (*offset) as f64,
-            color: color,
+            offset: (*offset),
+            color,
         });
         Ok(())
     }

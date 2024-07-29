@@ -2,22 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use crate::display_list::WebRenderImageInfo;
-use crate::opaque_node::OpaqueNodeMethods;
+use std::sync::Arc;
+
+use base::id::PipelineId;
 use fnv::FnvHashMap;
-use gfx::font_cache_thread::FontCacheThread;
-use gfx::font_context::FontContext;
-use msg::constellation_msg::PipelineId;
+use fonts::{FontCacheThread, FontContext};
 use net_traits::image_cache::{
     ImageCache, ImageCacheResult, ImageOrMetadataAvailable, UsePlaceholder,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use script_layout_interface::{PendingImage, PendingImageState};
 use servo_url::{ImmutableOrigin, ServoUrl};
-use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
 use style::context::SharedStyleContext;
 use style::dom::OpaqueNode;
+
+use crate::display_list::WebRenderImageInfo;
 
 pub struct LayoutContext<'a> {
     pub id: PipelineId,
@@ -27,8 +26,8 @@ pub struct LayoutContext<'a> {
     /// Bits shared by the layout and style system.
     pub style_context: SharedStyleContext<'a>,
 
-    /// Interface to the font cache thread.
-    pub font_cache_thread: Mutex<FontCacheThread>,
+    /// A FontContext to be used during layout.
+    pub font_context: Arc<FontContext<FontCacheThread>>,
 
     /// Reference to the script thread image cache.
     pub image_cache: Arc<dyn ImageCache>,
@@ -43,7 +42,7 @@ pub struct LayoutContext<'a> {
 impl<'a> Drop for LayoutContext<'a> {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            assert!(self.pending_images.lock().unwrap().is_empty());
+            assert!(self.pending_images.lock().is_empty());
         }
     }
 }
@@ -75,22 +74,22 @@ impl<'a> LayoutContext<'a> {
             ImageCacheResult::Pending(id) => {
                 let image = PendingImage {
                     state: PendingImageState::PendingResponse,
-                    node: node.to_untrusted_node_address(),
+                    node: node.into(),
                     id,
                     origin: self.origin.clone(),
                 };
-                self.pending_images.lock().unwrap().push(image);
+                self.pending_images.lock().push(image);
                 None
             },
             // Not yet requested - request image or metadata from the cache
             ImageCacheResult::ReadyForRequest(id) => {
                 let image = PendingImage {
                     state: PendingImageState::Unrequested(url),
-                    node: node.to_untrusted_node_address(),
+                    node: node.into(),
                     id,
                     origin: self.origin.clone(),
                 };
-                self.pending_images.lock().unwrap().push(image);
+                self.pending_images.lock().push(image);
                 None
             },
             // Image failed to load, so just return nothing
@@ -109,7 +108,7 @@ impl<'a> LayoutContext<'a> {
             .read()
             .get(&(url.clone(), use_placeholder))
         {
-            return Some((*existing_webrender_image).clone());
+            return Some(*existing_webrender_image);
         }
 
         match self.get_or_request_image_or_meta(node, url.clone(), use_placeholder) {
@@ -130,19 +129,4 @@ impl<'a> LayoutContext<'a> {
             None | Some(ImageOrMetadataAvailable::MetadataAvailable(_)) => None,
         }
     }
-}
-
-pub(crate) type LayoutFontContext = FontContext<FontCacheThread>;
-
-thread_local!(static FONT_CONTEXT: RefCell<Option<LayoutFontContext>> = RefCell::new(None));
-
-pub(crate) fn with_thread_local_font_context<F, R>(layout_context: &LayoutContext, f: F) -> R
-where
-    F: FnOnce(&mut LayoutFontContext) -> R,
-{
-    FONT_CONTEXT.with(|font_context| {
-        f(font_context.borrow_mut().get_or_insert_with(|| {
-            FontContext::new(layout_context.font_cache_thread.lock().unwrap().clone())
-        }))
-    })
 }

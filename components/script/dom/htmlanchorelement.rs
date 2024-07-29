@@ -2,6 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::default::Default;
+
+use dom_struct::dom_struct;
+use html5ever::{local_name, namespace_url, ns, LocalName, Prefix};
+use js::rust::HandleObject;
+use net_traits::request::Referrer;
+use num_traits::ToPrimitive;
+use script_traits::{HistoryEntryReplacement, LoadData, LoadOrigin};
+use servo_atoms::Atom;
+use servo_url::ServoUrl;
+use style::attr::AttrValue;
+
 use crate::dom::activation::Activatable;
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
@@ -27,20 +39,12 @@ use crate::dom::node::{document_from_node, Node};
 use crate::dom::urlhelper::UrlHelper;
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::task_source::TaskSource;
-use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix};
-use net_traits::request::Referrer;
-use num_traits::ToPrimitive;
-use script_traits::{HistoryEntryReplacement, LoadData, LoadOrigin};
-use servo_atoms::Atom;
-use servo_url::ServoUrl;
-use std::default::Default;
-use style::attr::AttrValue;
 
 #[dom_struct]
 pub struct HTMLAnchorElement {
     htmlelement: HTMLElement,
     rel_list: MutNullableDom<DOMTokenList>,
+    #[no_trace]
     url: DomRefCell<Option<ServoUrl>>,
 }
 
@@ -57,17 +61,19 @@ impl HTMLAnchorElement {
         }
     }
 
-    #[allow(unrooted_must_root)]
+    #[allow(crown::unrooted_must_root)]
     pub fn new(
         local_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
+        proto: Option<HandleObject>,
     ) -> DomRoot<HTMLAnchorElement> {
-        Node::reflect_node(
+        Node::reflect_node_with_proto(
             Box::new(HTMLAnchorElement::new_inherited(
                 local_name, prefix, document,
             )),
             document,
+            proto,
         )
     }
 
@@ -427,7 +433,7 @@ impl HTMLAnchorElementMethods for HTMLAnchorElement {
                 if url.host().is_none() || url.cannot_be_a_base() || url.scheme() == "file" =>
             {
                 return;
-            }
+            },
             None => return,
             // Step 4.
             Some(url) => {
@@ -595,16 +601,16 @@ pub fn get_element_target(subject: &Element) -> Option<DOMString> {
         Some(doc) => {
             let element = doc.upcast::<Element>();
             if element.has_attribute(&local_name!("target")) {
-                return Some(element.get_string_attribute(&local_name!("target")));
+                Some(element.get_string_attribute(&local_name!("target")))
             } else {
-                return None;
+                None
             }
         },
-        None => return None,
-    };
+        None => None,
+    }
 }
 
-///  < https://html.spec.whatwg.org/multipage/#get-an-element's-noopener>
+/// <https://html.spec.whatwg.org/multipage/#get-an-element's-noopener>
 pub fn get_element_noopener(subject: &Element, target_attribute_value: Option<DOMString>) -> bool {
     if !(subject.is::<HTMLAreaElement>() ||
         subject.is::<HTMLAnchorElement>() ||
@@ -619,9 +625,9 @@ pub fn get_element_noopener(subject: &Element, target_attribute_value: Option<DO
         Some(rel) => rel.Value(),
         None => return target_is_blank,
     };
-    return link_types.contains("noreferrer") ||
+    link_types.contains("noreferrer") ||
         link_types.contains("noopener") ||
-        (!link_types.contains("opener") && target_is_blank);
+        (!link_types.contains("opener") && target_is_blank)
 }
 
 /// <https://html.spec.whatwg.org/multipage/#following-hyperlinks-2>
