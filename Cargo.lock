@@ -312,7 +312,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "size_of_test",
- "webrender_api",
+ "webrender_api 0.64.0",
 ]
 
 [[package]]
@@ -342,7 +342,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "size_of_test",
- "webrender_api",
+ "webrender_api 0.64.0",
 ]
 
 [[package]]
@@ -646,7 +646,7 @@ dependencies = [
  "surfman",
  "unicode-script",
  "webrender",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "webxr",
  "webxr-api",
@@ -669,7 +669,7 @@ dependencies = [
  "servo_config",
  "sparkle",
  "style",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webxr-api",
 ]
 
@@ -879,7 +879,7 @@ dependencies = [
  "time 0.1.45",
  "toml 0.5.11",
  "webrender",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "webxr",
 ]
@@ -900,7 +900,7 @@ dependencies = [
  "script_traits",
  "servo_url",
  "style_traits",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
 ]
 
@@ -949,7 +949,7 @@ dependencies = [
  "style_traits",
  "webgpu",
  "webrender",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "webxr-api",
 ]
@@ -1283,7 +1283,7 @@ dependencies = [
 [[package]]
 name = "derive_common"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -1415,7 +1415,7 @@ dependencies = [
 [[package]]
 name = "dom"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "bitflags 2.6.0",
 ]
@@ -1559,7 +1559,7 @@ dependencies = [
  "num-traits",
  "serde",
  "servo_url",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webxr-api",
 ]
 
@@ -1851,7 +1851,7 @@ dependencies = [
  "unicode-properties",
  "unicode-script",
  "url",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "xi-unicode",
  "xml-rs",
@@ -1867,7 +1867,7 @@ dependencies = [
  "malloc_size_of_derive",
  "range",
  "serde",
- "webrender_api",
+ "webrender_api 0.64.0",
 ]
 
 [[package]]
@@ -2815,7 +2815,7 @@ checksum = "c13771afe0e6e846f1e67d038d4cb29998a6779f93c809212e4e9c32efd244d4"
 dependencies = [
  "log",
  "mac",
- "markup5ever",
+ "markup5ever 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.72",
@@ -3367,7 +3367,7 @@ dependencies = [
  "style_traits",
  "unicode-bidi",
  "unicode-script",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "xi-unicode",
 ]
@@ -3413,7 +3413,7 @@ dependencies = [
  "unicode-script",
  "unicode-segmentation",
  "url",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "xi-unicode",
 ]
@@ -3455,7 +3455,7 @@ dependencies = [
  "style_traits",
  "time 0.1.45",
  "url",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
 ]
 
@@ -3491,7 +3491,7 @@ dependencies = [
  "style",
  "style_traits",
  "url",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
 ]
 
@@ -3646,7 +3646,7 @@ dependencies = [
  "webdriver_server",
  "webgpu",
  "webrender",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "webxr",
  "webxr-api",
@@ -3746,7 +3746,7 @@ dependencies = [
 [[package]]
 name = "malloc_size_of"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "accountable-refcell",
  "app_units",
@@ -3766,13 +3766,12 @@ dependencies = [
  "smallvec",
  "string_cache",
  "thin-vec",
- "time 0.1.45",
  "tokio",
  "url",
  "uuid",
  "void",
- "webrender_api",
- "xml5ever",
+ "webrender_api 0.65.0",
+ "xml5ever 0.20.0",
 ]
 
 [[package]]
@@ -3809,6 +3808,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "markup5ever"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82c88c6129bd24319e62a0359cb6b958fa7e8be6e19bb1663bc396b90883aca5"
+dependencies = [
+ "log",
+ "phf 0.11.2",
+ "phf_codegen",
+ "string_cache",
+ "string_cache_codegen",
+ "tendril",
+]
+
+[[package]]
 name = "matches"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3826,7 +3839,7 @@ dependencies = [
  "serde",
  "servo-media",
  "servo_config",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
 ]
 
@@ -4184,7 +4197,7 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
 ]
 
@@ -4217,7 +4230,7 @@ dependencies = [
  "servo_url",
  "url",
  "uuid",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
 ]
 
@@ -4541,13 +4554,34 @@ version = "0.3.0"
 source = "git+https://github.com/servo/webrender?branch=0.64#9d354adf8955b1390dd56db89e6d5a9ea7880391"
 dependencies = [
  "euclid",
- "peek-poke-derive",
+ "peek-poke-derive 0.3.0 (git+https://github.com/servo/webrender?branch=0.64)",
+]
+
+[[package]]
+name = "peek-poke"
+version = "0.3.0"
+source = "git+https://github.com/servo/webrender?branch=0.65#8468e81608b00d83c62466f1c0f5ef73d44fda76"
+dependencies = [
+ "euclid",
+ "peek-poke-derive 0.3.0 (git+https://github.com/servo/webrender?branch=0.65)",
 ]
 
 [[package]]
 name = "peek-poke-derive"
 version = "0.3.0"
 source = "git+https://github.com/servo/webrender?branch=0.64#9d354adf8955b1390dd56db89e6d5a9ea7880391"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.72",
+ "synstructure 0.13.1",
+ "unicode-xid",
+]
+
+[[package]]
+name = "peek-poke-derive"
+version = "0.3.0"
+source = "git+https://github.com/servo/webrender?branch=0.65#8468e81608b00d83c62466f1c0f5ef73d44fda76"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4695,7 +4729,7 @@ dependencies = [
  "malloc_size_of",
  "malloc_size_of_derive",
  "serde",
- "webrender_api",
+ "webrender_api 0.64.0",
 ]
 
 [[package]]
@@ -5279,10 +5313,10 @@ dependencies = [
  "uuid",
  "webdriver",
  "webgpu",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "webxr-api",
- "xml5ever",
+ "xml5ever 0.18.1",
 ]
 
 [[package]]
@@ -5315,7 +5349,7 @@ dependencies = [
  "servo_url",
  "style",
  "style_traits",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
 ]
 
@@ -5365,7 +5399,7 @@ dependencies = [
  "uuid",
  "webdriver",
  "webgpu",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "webxr-api",
 ]
@@ -5396,7 +5430,7 @@ dependencies = [
 [[package]]
 name = "selectors"
 version = "0.24.0"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "bitflags 2.6.0",
  "cssparser",
@@ -5408,7 +5442,6 @@ dependencies = [
  "phf_codegen",
  "precomputed-hash",
  "servo_arc",
- "size_of_test",
  "smallvec",
  "to_shmem",
  "to_shmem_derive",
@@ -5684,7 +5717,7 @@ dependencies = [
 [[package]]
 name = "servo_arc"
 version = "0.2.0"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "serde",
  "stable_deref_trait",
@@ -5693,7 +5726,7 @@ dependencies = [
 [[package]]
 name = "servo_atoms"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "string_cache",
  "string_cache_codegen",
@@ -5737,7 +5770,7 @@ dependencies = [
  "euclid",
  "malloc_size_of",
  "malloc_size_of_derive",
- "webrender_api",
+ "webrender_api 0.64.0",
 ]
 
 [[package]]
@@ -5881,7 +5914,7 @@ checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
 [[package]]
 name = "size_of_test"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "static_assertions",
 ]
@@ -6022,7 +6055,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "static_prefs"
 version = "0.1.0"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 
 [[package]]
 name = "strict-num"
@@ -6059,7 +6092,7 @@ dependencies = [
 [[package]]
 name = "style"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "app_units",
  "arrayvec",
@@ -6080,7 +6113,7 @@ dependencies = [
  "log",
  "malloc_size_of",
  "malloc_size_of_derive",
- "markup5ever",
+ "markup5ever 0.14.0",
  "matches",
  "mime",
  "new_debug_unreachable",
@@ -6105,7 +6138,6 @@ dependencies = [
  "style_derive",
  "style_traits",
  "thin-vec",
- "time 0.1.45",
  "to_shmem",
  "to_shmem_derive",
  "uluru",
@@ -6118,7 +6150,7 @@ dependencies = [
 [[package]]
 name = "style_config"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "lazy_static",
 ]
@@ -6126,7 +6158,7 @@ dependencies = [
 [[package]]
 name = "style_derive"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "darling",
  "derive_common",
@@ -6157,7 +6189,7 @@ dependencies = [
 [[package]]
 name = "style_traits"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "app_units",
  "bitflags 2.6.0",
@@ -6170,12 +6202,11 @@ dependencies = [
  "serde",
  "servo_arc",
  "servo_atoms",
- "size_of_test",
  "thin-vec",
  "to_shmem",
  "to_shmem_derive",
  "url",
- "webrender_api",
+ "webrender_api 0.65.0",
 ]
 
 [[package]]
@@ -6527,7 +6558,7 @@ dependencies = [
 [[package]]
 name = "to_shmem"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "cssparser",
  "servo_arc",
@@ -6540,7 +6571,7 @@ dependencies = [
 [[package]]
 name = "to_shmem_derive"
 version = "0.0.1"
-source = "git+https://github.com/servo/stylo?branch=2024-07-16#eceb838e855e3b73a28df602b69494899f6d168b"
+source = "git+https://github.com/servo/stylo?branch=2024-07-16#1aac0916fcc4e2c2d9970cbbbd23176cefa3b587"
 dependencies = [
  "darling",
  "derive_common",
@@ -7266,7 +7297,7 @@ dependencies = [
  "servo_config",
  "smallvec",
  "webrender",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_traits",
  "wgpu-core",
  "wgpu-types",
@@ -7297,7 +7328,7 @@ dependencies = [
  "log",
  "malloc_size_of_derive",
  "num-traits",
- "peek-poke",
+ "peek-poke 0.3.0 (git+https://github.com/servo/webrender?branch=0.64)",
  "plane-split",
  "rayon",
  "ron",
@@ -7307,10 +7338,10 @@ dependencies = [
  "time 0.1.45",
  "topological-sort",
  "tracy-rs",
- "webrender_api",
+ "webrender_api 0.64.0",
  "webrender_build",
  "wr_glyph_rasterizer",
- "wr_malloc_size_of",
+ "wr_malloc_size_of 0.0.2",
 ]
 
 [[package]]
@@ -7324,12 +7355,31 @@ dependencies = [
  "crossbeam-channel",
  "euclid",
  "malloc_size_of_derive",
- "peek-poke",
+ "peek-poke 0.3.0 (git+https://github.com/servo/webrender?branch=0.64)",
  "serde",
  "serde_bytes",
  "serde_derive",
  "time 0.1.45",
- "wr_malloc_size_of",
+ "wr_malloc_size_of 0.0.2",
+]
+
+[[package]]
+name = "webrender_api"
+version = "0.65.0"
+source = "git+https://github.com/servo/webrender?branch=0.65#8468e81608b00d83c62466f1c0f5ef73d44fda76"
+dependencies = [
+ "app_units",
+ "bitflags 2.6.0",
+ "byteorder",
+ "crossbeam-channel",
+ "euclid",
+ "malloc_size_of_derive",
+ "peek-poke 0.3.0 (git+https://github.com/servo/webrender?branch=0.65)",
+ "serde",
+ "serde_bytes",
+ "serde_derive",
+ "time 0.1.45",
+ "wr_malloc_size_of 0.0.3",
 ]
 
 [[package]]
@@ -7354,7 +7404,7 @@ dependencies = [
  "log",
  "serde",
  "surfman",
- "webrender_api",
+ "webrender_api 0.64.0",
 ]
 
 [[package]]
@@ -7845,14 +7895,23 @@ dependencies = [
  "serde",
  "smallvec",
  "tracy-rs",
- "webrender_api",
- "wr_malloc_size_of",
+ "webrender_api 0.64.0",
+ "wr_malloc_size_of 0.0.2",
 ]
 
 [[package]]
 name = "wr_malloc_size_of"
 version = "0.0.2"
 source = "git+https://github.com/servo/webrender?branch=0.64#9d354adf8955b1390dd56db89e6d5a9ea7880391"
+dependencies = [
+ "app_units",
+ "euclid",
+]
+
+[[package]]
+name = "wr_malloc_size_of"
+version = "0.0.3"
+source = "git+https://github.com/servo/webrender?branch=0.65#8468e81608b00d83c62466f1c0f5ef73d44fda76"
 dependencies = [
  "app_units",
  "euclid",
@@ -7968,7 +8027,18 @@ checksum = "9bbb26405d8e919bc1547a5aa9abc95cbfa438f04844f5fdd9dc7596b748bf69"
 dependencies = [
  "log",
  "mac",
- "markup5ever",
+ "markup5ever 0.12.1",
+]
+
+[[package]]
+name = "xml5ever"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2278b4bf33071ba8e30368a59436c65eec8e01c49d5c29b3dfeb0cdc45331383"
+dependencies = [
+ "log",
+ "mac",
+ "markup5ever 0.14.0",
 ]
 
 [[package]]
